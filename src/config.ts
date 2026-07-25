@@ -326,14 +326,20 @@ export const SKY = {
    */
   cloudElevation: 0.38,
   /**
-   * Drift, in the same pre-1000x units: this times 1000 is noise cells per
-   * second. About seven cells span the sky between the zenith and the haze
-   * line, so 1.4e-4 walks a cloud right across the view in roughly fifty
-   * seconds. The old 2.2e-5 took five minutes to do the same, which over the
-   * length of one hunt is a painted backdrop rather than weather — you could
-   * stand and watch and nothing up there would have moved.
+   * Drift. The shader adds `time * cloudSpeed` to the projected plane
+   * coordinate before scaling by `cloudScale`, so a cloud feature travels
+   * `cloudDrift / cloudScale` plane units per second per axis. The visible sky
+   * between 45 degrees of elevation and the haze line spans 2.7 of those units,
+   * which makes this the honest number to tune against: 4.2e-4 walks a cloud
+   * down that whole arc in twelve seconds.
+   *
+   * Two earlier passes at this were both too slow to read as weather — 2.2e-5
+   * took five minutes and 1.4e-4 still took thirty-five, and at that rate you
+   * can stand and stare and be unable to say whether the sky is moving. Real
+   * cumulus genuinely are that slow; a sky the player only glances at cannot
+   * afford to be.
    */
-  cloudDrift: 0.00014,
+  cloudDrift: 0.00042,
   /**
    * Moonlit cloud. The stock shader multiplies cloud colour by the sun's
    * intensity term, which is zero once the sun is down — so at night the clouds
