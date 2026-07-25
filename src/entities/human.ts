@@ -41,15 +41,41 @@ export interface ShotEvent {
   hit: boolean
 }
 
-// Darker than they look on a swatch. The sun is 3.3 intensity and the grade
-// adds contrast on top, so anything above about 0xc08150 clips to featureless
-// white the moment a villager steps out of shade.
-const SKIN = [0x6d4527, 0x7d5433, 0x4f301d, 0x86593a, 0x412818]
-const SHIRT = [0x59653f, 0x71462c, 0x3d4a58, 0x655840, 0x7d684a, 0x4a3b2e]
+/**
+ * Skin. Far darker than a swatch suggests, and darker again than it used to be.
+ *
+ * The reason is a calibration mismatch, and it was the single most damaging
+ * thing about these bodies. Measured in engine at the high sun, on a villager's
+ * chest: a diffuse albedo of 0.041 linear renders as mid grey (sRGB 0.50), 0.08
+ * renders 0.71, and 0.15 renders 0.90. Every *world* surface sits down at the
+ * bottom of that range because every world surface is a photoscanned set — the
+ * clay a hut is walled with means 0.186/0.090/0.046 linear at its brightest and
+ * carries an aoMap and a normal map to break it up. The skin layer has no map at
+ * all, so whatever is in this table *is* the albedo, flat, over the whole body.
+ * The old table was 0.053-0.238 linear and measured 0.42-0.97 sRGB on screen: a
+ * mid-brown man came out the brightest thing in the frame bar the clouds.
+ *
+ * These are 0.030-0.078 linear, which measures 0.42-0.70. The tonal range that
+ * an albedo map would have given comes from CREASE instead.
+ */
+const SKIN = [0x3f291b, 0x462f20, 0x372216, 0x4f3626, 0x301d13]
+/** Garment palettes are multiplied by the cloth weave map, whose own mean is
+ * about a quarter, so they are already four times down and need no such cut.
+ *
+ * Four of the six used to be brown or khaki and one of those was a rust at the
+ * same hue as skin, so a shirted man at twenty metres read as a bare one in a
+ * slightly different brown — the same failure as finding one, arrived at from
+ * the other direction. The replacements hold the same luminance to within 5%
+ * (0.24-0.35 linear) and only move in hue: madder, indigo and a dull green in
+ * place of the rust, the second khaki and the second brown. */
+const SHIRT = [0x59653f, 0x8e4136, 0x3d4a58, 0x3f5878, 0x7d684a, 0x36462f]
 const HUNTER_SHIRT = [0x333d2a, 0x3d3325, 0x2b333c]
 const TROUSER = [0x3d3527, 0x4a4030, 0x2e2a22, 0x554c3c, 0x6a6152, 0x484030]
 const HAIR = [0x241a13, 0x1b1410, 0x3a2a1c]
-const GREY = [0x6e665c, 0x857d72]
+/** Grey hair and white beards, on the same scale as SKIN — and they were not.
+ * At 0.156 and 0.245 linear an elder's beard rendered above 0.9 sRGB, which is
+ * why it read as a surgical mask stuck over the mouth rather than as hair. */
+const GREY = [0x4f4c47, 0x5f5c55]
 const TURBAN = [0xb0a48b, 0xa5522c, 0xbdb39c, 0x5f7488, 0xa8873c, 0x93362d]
 
 /** Leather, felt and brass on the hunters' kit. */
@@ -58,6 +84,12 @@ const FELT = 0x3f342a
 const BRASS = 0xa9853f
 /** Eyes, mouth and nostrils. Not black — black reads as a hole at any distance. */
 const DARK = 0x140d09
+/** The white of an eye, on the same scale as SKIN and then sunk in the orbital
+ * shadow on top of that. Anything actually white here is a headlamp. */
+const SCLERA = 0x6a635b
+/** Iris. Dark enough to read as a pupil at forty metres, brown enough to read
+ * as an iris at two. */
+const IRIS = 0x241610
 
 /**
  * Which palette slot a vertex belongs to. Everything is one buffer, so recolouring
@@ -105,6 +137,85 @@ function trunk(y0: number, y1: number, r0: number, r1: number, z: number, radial
 function slab(w: number, h: number, d: number, x: number, y: number, z: number): THREE.BufferGeometry {
   const g = new THREE.BoxGeometry(w, h, d)
   g.translate(x, y, z)
+  return g
+}
+
+/** One ring of a swept surface: height, half-width, half-depth, fore-aft centre. */
+type Ring = readonly [number, number, number, number]
+
+/**
+ * A closed surface lofted through a stack of elliptical rings.
+ *
+ * The torso used to be five overlapping primitives and two of them fought. At
+ * y = 1.275 the chest cone's half-width was 0.1592 and its half-depth 0.1114,
+ * while the ribcage ellipsoid over it was 0.1560 and 0.1120: the ribcage was
+ * 3.2 mm *inside* at the flanks and 0.6 mm *outside* at the breastbone, so the
+ * two shells crossed somewhere over the pectorals and the whole chest carried a
+ * stipple of z-fighting. Under a cloth map you never saw it. On bare skin it was
+ * the first thing you saw.
+ *
+ * A sweep cannot fight itself. It also buys two things a stack of cones cannot:
+ * a waist genuinely narrower than both the hips and the ribs above it (a cone
+ * can only taper one way), and a per-ring fore-aft offset, which is the lumbar
+ * curve and the seat.
+ */
+function sweep(rings: readonly Ring[], radial = 12): THREE.BufferGeometry {
+  const n = radial + 1
+  const pos = new Float32Array(rings.length * n * 3)
+  const uv = new Float32Array(rings.length * n * 2)
+  const idx: number[] = []
+  for (let r = 0; r < rings.length; r++) {
+    const ring = rings[r]!
+    for (let c = 0; c < n; c++) {
+      const t = c / radial
+      const a = t * TAU
+      const i = r * n + c
+      pos[i * 3] = Math.sin(a) * ring[1]
+      pos[i * 3 + 1] = ring[0]
+      pos[i * 3 + 2] = ring[3] - Math.cos(a) * ring[2]
+      uv[i * 2] = t
+      uv[i * 2 + 1] = r / (rings.length - 1)
+    }
+  }
+  for (let r = 0; r < rings.length - 1; r++) {
+    for (let c = 0; c < radial; c++) {
+      const a = r * n + c
+      const b = (r + 1) * n + c
+      // Wound so the face normal points away from the axis. Rings must ascend
+      // in y or the whole surface turns inside out and culls to nothing.
+      idx.push(a, b, a + 1, a + 1, b, b + 1)
+    }
+  }
+  const g = new THREE.BufferGeometry()
+  g.setAttribute('position', new THREE.BufferAttribute(pos, 3))
+  g.setAttribute('uv', new THREE.BufferAttribute(uv, 2))
+  g.setIndex(idx)
+  g.computeVertexNormals()
+  return g
+}
+
+/**
+ * A flat oriented band: cloth. `w` across, `thick` through, running a->b with
+ * `out` as the face direction.
+ *
+ * The shawl used to be a 5.5 cm tube from the shoulder to the hip, which is the
+ * exact description of a bandolier, and that is what it read as on every bare
+ * villager in the village. Cloth is wide and thin. Nothing else about the shape
+ * matters as much as that ratio.
+ */
+function strip(a: THREE.Vector3, b: THREE.Vector3, w: number, thick: number, out: THREE.Vector3, grow = 0): THREE.BufferGeometry {
+  const y = new THREE.Vector3().subVectors(b, a)
+  const len = y.length()
+  y.divideScalar(len)
+  const z = out.clone().normalize()
+  const x = new THREE.Vector3().crossVectors(y, z).normalize()
+  z.crossVectors(x, y).normalize()
+  // `grow` runs the band past both ends. A drape is a chain of these and each
+  // joint changes direction, so butted end to end they open a wedge of daylight
+  // on the outside of every bend; overrunning by a centimetre closes it.
+  const g = new THREE.BoxGeometry(w, len + grow * 2, thick)
+  g.applyMatrix4(new THREE.Matrix4().makeBasis(x, y, z))
+  g.translate((a.x + b.x) / 2, (a.y + b.y) / 2, (a.z + b.z) / 2)
   return g
 }
 
@@ -216,6 +327,261 @@ interface Part {
   hex: number
 }
 
+// ------------------------------------------------------ torso profile
+/**
+ * The torso section, hips to the base of the neck, at unit girth.
+ *
+ * Rings of [y, half-width, half-depth, fore-aft centre]. The waist minimum is at
+ * 1.085 and is narrower than both the hips below it and the ribs above — the old
+ * stack of cones could only taper one way at a time, so it had no waist at all
+ * and the body read as a barrel. The centre column is the spinal curve: the seat
+ * pushed back at the bottom, the lumbar tucked in, the ribs carried forward.
+ *
+ * Garments are derived from this rather than guessed, which is the only reliable
+ * way to keep a hem outside the body it is meant to be hanging on.
+ */
+const TORSO: readonly Ring[] = [
+  [0.772, 0.006, 0.006, 0.000],  // closed at the perineum, buried between the thighs
+  [0.788, 0.052, 0.040, 0.004],
+  [0.828, 0.108, 0.084, 0.012],
+  [0.862, 0.136, 0.102, 0.016],
+  [0.895, 0.150, 0.111, 0.018],  // widest at the hips
+  [0.930, 0.153, 0.109, 0.010],
+  [0.975, 0.148, 0.104, 0.002],
+  [1.030, 0.140, 0.098, -0.004],
+  [1.085, 0.133, 0.093, -0.008],  // waist
+  [1.135, 0.137, 0.096, -0.008],
+  [1.190, 0.147, 0.102, -0.006],
+  [1.240, 0.156, 0.107, -0.002],
+  [1.290, 0.161, 0.110, 0.002],  // widest at the ribs; 0.32 across, not 0.36 —
+  [1.335, 0.157, 0.105, 0.008],  // at 0.36 the arms hang inside the ribcage
+  [1.375, 0.138, 0.090, 0.012],
+  [1.405, 0.108, 0.072, 0.014],
+  [1.430, 0.048, 0.042, 0.014],  // inside the neck tube, so the rim never shows
+]
+
+/** The profile at any height, clamped at the ends. */
+function torsoAt(y: number): [number, number, number] {
+  if (y <= TORSO[0]![0]) return [TORSO[0]![1], TORSO[0]![2], TORSO[0]![3]]
+  for (let i = 1; i < TORSO.length; i++) {
+    const b = TORSO[i]!
+    if (y > b[0]) continue
+    const a = TORSO[i - 1]!
+    const t = (y - a[0]) / (b[0] - a[0])
+    return [a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t, a[3] + (b[3] - a[3]) * t]
+  }
+  const l = TORSO[TORSO.length - 1]!
+  return [l[1], l[2], l[3]]
+}
+
+/**
+ * A point `gap` clear of the torso surface, at height `y` and angle `a` — 0
+ * straight ahead, positive turning toward the wearer's right.
+ *
+ * Draped garments were authored in raw xyz before, which is why the shawl ended
+ * up four centimetres off the chest at the shoulder and buried inside the
+ * pectoral at the sternum: a straight line between two points on an ellipse cuts
+ * a chord through everything between them.
+ */
+function torsoPoint(y: number, a: number, gap: number, girth = 1): THREE.Vector3 {
+  const p = torsoAt(y)
+  const rx = p[0] * girth
+  const rz = p[1] * girth
+  const sn = Math.sin(a)
+  const cs = Math.cos(a)
+  let nx = sn / rx
+  let nz = -cs / rz
+  const l = Math.hypot(nx, nz) || 1
+  nx /= l
+  nz /= l
+  return V(sn * rx + nx * gap, y, p[2] - cs * rz + nz * gap)
+}
+
+/**
+ * A patch of relief lying *on* the torso surface, between heights y0..y1 and
+ * angles a0..a1, standing `peak` proud at its centre and sinking 1.5 mm inside
+ * the body all the way round its border, so the open edges of the patch are
+ * never visible and no rim can show.
+ *
+ * This exists because an axis-aligned ellipsoid cannot sit on a barrel. The
+ * pectorals were a pair of them, and the arithmetic is why they read as breasts:
+ * an ellipsoid 3 mm proud of the chest *at the breastbone* is 13 mm proud of the
+ * ribcage out at its own centre, because the ribcage has curved 10 mm away by
+ * then and the ellipsoid has not. What surfaces is a dome. A patch offset along
+ * the surface normal stands the same height everywhere and can have a hard lower
+ * border and a soft upper one, which is the actual difference between a pectoral
+ * and a breast.
+ *
+ * a0 must be less than a1 or the winding inverts; the left side is authored by
+ * passing the negated range in ascending order.
+ */
+function relief(
+  y0: number, y1: number, a0: number, a1: number,
+  peak: number, girth: number, cols = 6, rows = 7,
+): THREE.BufferGeometry {
+  const s = (t: number) => (t <= 0 ? 0 : t >= 1 ? 1 : t * t * (3 - 2 * t))
+  const nc = cols + 1
+  const pos = new Float32Array((rows + 1) * nc * 3)
+  const uv = new Float32Array((rows + 1) * nc * 2)
+  const idx: number[] = []
+  for (let r = 0; r <= rows; r++) {
+    const v = r / rows
+    // Hard along the bottom, soft along the top: the shelf has a lower border
+    // you can see and no upper border at all, it just becomes chest.
+    const fv = s(v / 0.09) * s((1 - v) / 0.55)
+    for (let c = 0; c < nc; c++) {
+      const u = c / cols
+      const fu = s(u / 0.28) * s((1 - u) / 0.28)
+      const p = torsoPoint(y0 + (y1 - y0) * v, a0 + (a1 - a0) * u, peak * fu * fv - 0.0015, girth)
+      const i = r * nc + c
+      pos[i * 3] = p.x
+      pos[i * 3 + 1] = p.y
+      pos[i * 3 + 2] = p.z
+      uv[i * 2] = u
+      uv[i * 2 + 1] = v
+    }
+  }
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      const a = r * nc + c
+      const b = (r + 1) * nc + c
+      idx.push(a, b, a + 1, a + 1, b, b + 1)
+    }
+  }
+  const g = new THREE.BufferGeometry()
+  g.setAttribute('position', new THREE.BufferAttribute(pos, 3))
+  g.setAttribute('uv', new THREE.BufferAttribute(uv, 2))
+  g.setIndex(idx)
+  g.computeVertexNormals()
+  return g
+}
+
+/**
+ * Rings for a garment hugging the torso, `gap` clear of it at y0 ramping to
+ * `gap1` at y1, in `steps` sections.
+ *
+ * The ramp is what lets a hem hang: a garment worn over another one has to end
+ * up further off the body than the one underneath, or its last few centimetres
+ * are simply inside it and the hem you see is the wrong garment's.
+ */
+function garmentRings(y0: number, y1: number, gap: number, steps: number, girth = 1, gap1 = gap): Ring[] {
+  const out: Ring[] = []
+  for (let i = 0; i <= steps; i++) {
+    const t = i / steps
+    const y = y0 + (y1 - y0) * t
+    const g = gap + (gap1 - gap) * t
+    const p = torsoAt(y)
+    out.push([y, p[0] * girth + g, p[1] * girth + g, p[2]])
+  }
+  return out
+}
+
+// -------------------------------------------------------------- shading
+/**
+ * Authored ambient occlusion, baked into the vertex colours.
+ *
+ * Every other diffuse surface in this world carries an aoMap and a normal map;
+ * the skin layer has no maps at all, so without this a body is one flat value
+ * from the crown to the soles and reads as something cast in a mould. The light
+ * cannot rescue it either: measured on a villager's chest at the high sun,
+ * zeroing the key light moved it 0.89 -> 0.81 sRGB while zeroing the sky IBL
+ * moved it to 0.24. Nine tenths of the light on a human arrives from the whole
+ * dome at once, which is another way of saying there is almost no form shading
+ * to be had for free.
+ *
+ * Each entry is an ellipsoidal well of shadow in body space: a place where two
+ * forms meet and light cannot get in. Half of them are on the face, because the
+ * face is what the player is looking at when the tiger is close enough to kill.
+ */
+interface Crease {
+  x: number
+  y: number
+  z: number
+  rx: number
+  ry: number
+  rz: number
+  /** Darkening at the centre, 0..1. */
+  k: number
+}
+
+const CREASE: Crease[] = (() => {
+  const out: Crease[] = []
+  const one = (x: number, y: number, z: number, rx: number, ry: number, rz: number, k: number) =>
+    out.push({ x, y, z, rx, ry, rz, k })
+  /** Mirrored pair; `x` is the right-hand one. */
+  const two = (x: number, y: number, z: number, rx: number, ry: number, rz: number, k: number) => {
+    one(x, y, z, rx, ry, rz, k)
+    one(-x, y, z, rx, ry, rz, k)
+  }
+
+  // Torso. The lower border of the pectoral is the one that matters: a male
+  // chest is defined by a hard horizontal shadow under the muscle, not by the
+  // silhouette, which is why the old hemispherical pecs could only read as
+  // breasts however they were coloured.
+  two(0.112, 1.302, -0.004, 0.056, 0.066, 0.062, 0.55)   // armpit
+  two(0.070, 1.264, -0.086, 0.082, 0.015, 0.044, 0.56)   // under the pectoral
+  one(0, 1.300, -0.104, 0.014, 0.062, 0.032, 0.34)       // sternal groove
+  one(0, 1.180, -0.100, 0.010, 0.072, 0.026, 0.20)       // linea alba
+  one(0, 1.128, -0.096, 0.020, 0.026, 0.026, 0.45)       // navel
+  one(0, 1.200, 0.098, 0.013, 0.175, 0.032, 0.32)        // spinal groove
+  one(0, 0.905, -0.030, 0.056, 0.062, 0.056, 0.50)       // groin
+  one(0, 0.882, 0.096, 0.016, 0.072, 0.046, 0.45)        // gluteal cleft
+  two(0.052, 1.400, 0.004, 0.042, 0.052, 0.052, 0.45)    // where the neck leaves the trapezius
+  one(0, 1.500, -0.020, 0.072, 0.030, 0.070, 0.55)       // under the jaw
+  one(0, 1.478, -0.050, 0.046, 0.030, 0.030, 0.42)       // under the chin
+
+  // Limbs: the flexion creases, which are the only shading a straight tube gets.
+  two(0.176, 1.056, -0.032, 0.036, 0.046, 0.030, 0.38)   // inner elbow
+  two(0.090, 0.498, 0.052, 0.052, 0.046, 0.030, 0.42)    // back of the knee
+  two(0.196, 0.688, 0.000, 0.030, 0.046, 0.042, 0.32)    // between the fingers
+  two(0.092, 0.098, 0.006, 0.046, 0.034, 0.042, 0.26)    // ankle hollow
+
+  // Face. The eye socket does most of the work: an eye is a wet ball at the
+  // bottom of a hole, and the hole is the reason you can read a gaze at all.
+  // The old face had none of this — two flat dark discs on a flat lit plane,
+  // which is a drawing of a face rather than a face.
+  two(0.032, 1.5995, -0.062, 0.028, 0.019, 0.032, 0.52)  // orbit
+  two(0.033, 1.612, -0.070, 0.026, 0.013, 0.024, 0.32)   // under the brow ridge
+  two(0.026, 1.572, -0.084, 0.015, 0.022, 0.022, 0.40)   // side of the nose
+  two(0.027, 1.548, -0.080, 0.014, 0.020, 0.022, 0.40)   // nasolabial fold
+  one(0, 1.5585, -0.090, 0.017, 0.009, 0.016, 0.42)      // under the nose
+  one(0, 1.5375, -0.088, 0.028, 0.006, 0.016, 0.48)      // the mouth line itself
+  two(0.021, 1.5375, -0.083, 0.011, 0.013, 0.018, 0.42)  // corners of the mouth
+  one(0, 1.5215, -0.085, 0.019, 0.008, 0.016, 0.38)      // under the lower lip
+  two(0.070, 1.588, 0.014, 0.020, 0.032, 0.020, 0.48)    // behind the ear
+  two(0.062, 1.618, -0.046, 0.021, 0.028, 0.026, 0.22)   // temple
+  return out
+})()
+
+/**
+ * Occlusion at a body-space point.
+ *
+ * The floor of 0.34 is there because this is multiplied into an albedo that is
+ * already down at 0.03-0.08 linear: below the floor a crease stops reading as a
+ * crease and starts reading as a hole punched in the model.
+ */
+function shadeAt(x: number, y: number, z: number): number {
+  let s = 1
+  for (const c of CREASE) {
+    // Cheap reject first. Thirty-three fields against three thousand vertices
+    // against fifty-two pooled bodies is six million tests at load; the y test
+    // throws out nine in ten of them before any division.
+    if (y < c.y - c.ry || y > c.y + c.ry) continue
+    const dx = (x - c.x) / c.rx
+    const dy = (y - c.y) / c.ry
+    const dz = (z - c.z) / c.rz
+    const q = dx * dx + dy * dy + dz * dz
+    if (q >= 1) continue
+    const f = 1 - q
+    s *= 1 - c.k * f * Math.sqrt(f)
+  }
+  // Vertex-scale mottle standing in for a pore/blemish map. Four percent is
+  // under the threshold where it starts to read as dirt rather than as skin, and
+  // three thousand vertices is dense enough to carry the low frequency of it.
+  const n = Math.sin(x * 61.7 + y * 113.3 + z * 79.1) * Math.sin(x * 29.3 - y * 41.9 + z * 53.7)
+  return Math.max(0.34, s) * (1 + n * 0.04)
+}
+
 function distToSeg(px: number, py: number, pz: number, a: THREE.Vector3, b: THREE.Vector3): number {
   const abx = b.x - a.x
   const aby = b.y - a.y
@@ -296,6 +662,8 @@ interface Skin {
   mesh: THREE.SkinnedMesh
   region: Uint8Array
   base: Float32Array
+  /** Baked occlusion, one multiplier per vertex. See CREASE. */
+  shade: Float32Array
   attr: THREE.BufferAttribute
 }
 
@@ -602,9 +970,15 @@ export class Human {
     const wide = rng.range(0.9, 1.13)
     /** Muscle/fat, on top of the overall girth: a thin man in a loose shirt. */
     const bulk = rng.range(0.92, 1.12)
-    const dress = rng.pick(['shirt', 'shirt', 'shirt', 'vest', 'bare'] as const)
+    // One in five used to come back bare-chested, and a bare chest is the one
+    // state where every modelling shortcut on the torso is on show. One in seven
+    // is enough to keep the crowd from looking uniformed.
+    const dress = rng.pick(['shirt', 'shirt', 'shirt', 'shirt', 'vest', 'vest', 'bare'] as const)
     const lower = rng.pick(['trouser', 'trouser', 'dhoti', 'dhoti', 'shorts'] as const)
-    const cuff = dress === 'shirt' ? rng.pick([0, 0.13, 0.13, 0.3]) : 0
+    // Never zero. A shirt with no sleeve at all is a torso in a different
+    // colour: in a line-up of five, four bodies read as naked because three of
+    // them were wearing sleeveless shirts and nothing said otherwise.
+    const cuff = dress === 'shirt' ? rng.pick([0.1, 0.13, 0.13, 0.3]) : 0
     const shod = rng.chance(0.55)
 
     const parts: Part[] = []
@@ -620,52 +994,193 @@ export class Human {
     // a skin torso underneath one would be two thousand vertices nobody ever
     // sees.
     const shirted = dress === 'shirt'
-    const bodyPart = (g: THREE.BufferGeometry) =>
-      shirted ? cloth(B_SPINE, g, Reg.shirt) : skin(B_SPINE, g)
     const r = (v: number) => v * bulk
-    bodyPart(ell(0, 0.95, 0, r(0.15), 0.135, r(0.112)))             // pelvis
-    bodyPart(ell(0, 0.9, 0.055, r(0.142), 0.115, r(0.1)))           // buttocks
-    bodyPart(trunk(0.97, 1.13, r(0.148), r(0.136), 0.74))           // waist
-    parts.push({ g: trunk(1.13, 1.28, r(0.136), r(0.16), 0.7), bones: B_CHEST, layer: shirted ? 'cloth' : 'skin', region: shirted ? Reg.shirt : Reg.skin, hex: 0 })
+
+    // One swept surface for the whole trunk, replacing a pelvis, a seat, a waist
+    // cone, a chest cone and a ribcage ellipsoid that overlapped each other five
+    // deep and z-fought across the breastbone. See sweep() for the measurement.
+    // Split at the chest bone's height so the halves can bind to different bone
+    // sets — the same split the cones had, just made once instead of five times.
+    const rings = TORSO.map(([y, rx, rz, cz]) => [y, rx * bulk, rz * bulk, cz] as Ring)
+    const split = 9  // y = 1.135, just above the navel
+    const trunkLo = sweep(rings.slice(0, split + 1), 12)
+    const trunkHi = sweep(rings.slice(split), 12)
+    if (shirted) {
+      cloth(B_SPINE, trunkLo, Reg.shirt)
+      cloth(B_CHEST, trunkHi, Reg.shirt)
+    } else {
+      skin(B_SPINE, trunkLo)
+      skin(B_CHEST, trunkHi)
+    }
     const upper = (g: THREE.BufferGeometry) =>
       shirted ? cloth(B_CHEST, g, Reg.shirt) : skin(B_CHEST, g)
-    // Chest breadth 0.31, not 0.36. At 0.36 the arms hung five centimetres inside
-    // the ribcage and the torso poked out through them the moment they abducted.
-    upper(ell(0, 1.275, 0, r(0.156), 0.105, r(0.112)))              // ribcage
-    upper(ell(-0.068, 1.285, -0.07, 0.06, 0.05, 0.042))             // pectorals
-    upper(ell(0.068, 1.285, -0.07, 0.06, 0.05, 0.042))
-    upper(ell(0, 1.388, 0.012, 0.12, 0.048, 0.07))                  // trapezius
+
+    // Pectorals: a shelf laid on the ribcage, not two hemispheres stuck to it.
+    // Three attempts at this were ellipsoids and all three read as breasts at
+    // two metres, for a reason that is arithmetic rather than taste — see
+    // relief(). Whatever an axis-aligned ellipsoid is set to stand proud of the
+    // breastbone, it stands four times that proud out at its own centre, and a
+    // lens that tall has a round outline no matter how it is scaled.
+    //
+    // The relief is 1.1 cm at its thickest, which is life-size for a working
+    // man, and it runs from 8 degrees off the breastbone (leaving the sternal
+    // gutter) out to 60, where it passes under the deltoid. What actually sells
+    // it is the border: the bottom edge comes up over 9% of the patch height,
+    // which is a hard step at y 1.27 with the under-pectoral shadow in CREASE
+    // sitting directly beneath it, while the top fades over half the patch and
+    // simply becomes chest. Breasts hang and have a soft lower border; pectorals
+    // sit and have a hard one. That contrast is the whole read.
+    upper(relief(1.262, 1.382, 0.14, 1.05, 0.011, bulk))
+    upper(relief(1.262, 1.382, -1.05, -0.14, 0.011, bulk))
+
+    // Trapezius. It used to be one flat 24 cm pancake laid across the top of the
+    // chest, which from the front read as a yoke and closed off the base of the
+    // neck — most of the reason the head looked bolted on. It is a *slope*: high
+    // beside the neck, falling away to the point of the shoulder, and the
+    // falling away is what leaves a neck standing above it.
+    for (const s of ['L', 'R'] as const) {
+      const sg = s === 'L' ? -1 : 1
+      upper(tube(V(sg * 0.020, 1.400, 0.016), V(sg * 0.136, 1.360, 0.004), 0.038, 0.056, 6))
+    }
 
     // Neck always skin — a collar covers the base of it, not the whole thing.
     // Cut in at the front so the throat sits behind the jaw rather than under it.
     skin(B_NECK, tube(V(0, 1.36, 0.008), V(0, 1.5, 0.014), 0.058, 0.048))
+    // The two cords from behind the ear down to the top of the breastbone.
+    // Nothing else says "neck" as cheaply: without them a neck is a smooth tube
+    // and the head might as well be on a post. Twelve vertices each.
+    for (const s of ['L', 'R'] as const) {
+      const sg = s === 'L' ? -1 : 1
+      skin(B_NECK, tube(V(sg * 0.042, 1.492, 0.010), V(sg * 0.018, 1.392, -0.036), 0.015, 0.011, 5))
+    }
+    // Larynx, 4.6 mm proud. Any more and it is a growth.
+    skin(B_NECK, ell(0, 1.443, -0.034, 0.013, 0.017, 0.008, 6, 4))
 
     // Deltoids sit on the clavicle/upper-arm pair so they follow the shoulder:
     // the cap stays with the (unrotating) clavicle and the belly goes with the
     // arm, which is why the arm can raise without the shoulder opening a seam.
+    // Taller and narrower than the old ball, and dropped 1.6 cm so its lower
+    // point tapers into the arm at the insertion instead of sitting on top of
+    // the shoulder like an epaulette.
+    // Dropped again, to 1.336, so its crown lands at 1.416 — level with the top
+    // of the trapezius. At 1.352 it stood 2.2 cm above it and the shoulder had a
+    // separate rounded lump on top of it, which with the sleeve over it is a
+    // puffed sleeve, and a puffed sleeve is a blouse. Widened at the same time
+    // (0.072 against 0.069) so the sleeve's top rim can hide inside it.
     for (const s of ['L', 'R'] as const) {
-      const x = (s === 'L' ? -1 : 1) * 0.155
-      const g = ell(x, 1.368, 0, 0.075, 0.078, 0.072)
-      if (shirted || dress === 'vest') cloth(B_ARM(s), g, Reg.shirt)
+      const x = (s === 'L' ? -1 : 1) * 0.158
+      const g = ell(x, 1.336, -0.004, 0.072, 0.080, 0.066)
+      // Bare for a vest: bare shoulders are the whole point of wearing one.
+      if (shirted) cloth(B_ARM(s), g, Reg.shirt)
       else skin(B_ARM(s), g)
     }
 
+    /** A rolled edge. An open cylinder rim is a knife edge with backface culling
+     * behind it, which is exactly what the waist read as: a bright line with a
+     * seam under it and no thickness anywhere. Every hem in here gets one. */
+    const roll = (y: number, rx: number, rz: number, cz = 0, radial = 12) =>
+      ell(0, y, cz, rx, 0.014, rz, radial, 3)
+
     if (dress === 'vest') {
-      // Front and back panels only, so the shoulders and arms stay bare — the
-      // silhouette a shirt doesn't give you.
-      cloth(B_CHEST, ell(0, 1.19, -0.086, 0.125, 0.135, 0.035), Reg.shirt)
-      cloth(B_SPINE, ell(0, 1.18, 0.085, 0.135, 0.15, 0.032), Reg.shirt)
-      cloth(B_CHEST, tube(V(-0.085, 1.4, 0), V(-0.072, 1.26, -0.07), 0.032, 0.03), Reg.shirt)
-      cloth(B_CHEST, tube(V(0.085, 1.4, 0), V(0.072, 1.26, -0.07), 0.032, 0.03), Reg.shirt)
+      // A sleeveless jerkin rather than the old pair of flat panels, which stood
+      // 1.3 cm off a bare chest and read as a bib hung round the neck. Derived
+      // from the body profile so it clears the torso by a constant centimetre
+      // all the way round, and stopped at 1.345 so it passes under the deltoid
+      // instead of through it.
+      // The lower half widens its clearance from 1.1 cm to 2.4 cm on the way
+      // down so the jerkin finishes outside the waistband (1.3 cm) instead of
+      // inside it — tucked into the trousers it stopped being a garment at all
+      // and just made the torso two colours.
+      // 1.7 cm clear over the chest rather than 1.0: the pectoral relief stands
+      // 1.1 cm proud, so at a centimetre it came through the vest as two brown
+      // rectangles sitting on the front of it.
+      cloth(B_CHEST, sweep(garmentRings(1.190, 1.345, 0.017, 3, bulk, 0.014), 12), Reg.shirt)
+      cloth(B_SPINE, sweep(garmentRings(0.965, 1.190, 0.026, 4, bulk, 0.017), 12), Reg.shirt)
+      const top = torsoAt(1.345)
+      const bot = torsoAt(0.965)
+      cloth(B_CHEST, roll(1.345, top[0] * bulk + 0.016, top[1] * bulk + 0.016, top[2]), Reg.shirt)
+      cloth(B_SPINE, roll(0.965, bot[0] * bulk + 0.028, bot[1] * bulk + 0.028, bot[2]), Reg.shirt)
+      // Straps. Without them the jerkin is a tube that stops under the armpits
+      // and stays up by magic, which is a strapless bodice — the one silhouette
+      // that undoes everything the chest underneath it is doing. On the arm set
+      // like the shawl's shoulder piece, so a raised arm carries them with it
+      // instead of tearing them open at the deltoid.
+      for (const s of ['L', 'R'] as const) {
+        const sg = s === 'L' ? -1 : 1
+        const f = torsoPoint(1.320, sg * 0.62, 0.016, bulk)
+        const bk = torsoPoint(1.320, sg * (Math.PI - 0.62), 0.016, bulk)
+        const over = V(sg * 0.112 * bulk, 1.424, -0.002)
+        cloth(B_ARM(s), strip(f, over, 0.050, 0.012, V(sg * 0.5, 0.15, -0.85)), Reg.shirt)
+        cloth(B_ARM(s), strip(over, bk, 0.050, 0.012, V(sg * 0.5, 0.15, 0.85)), Reg.shirt)
+      }
     } else if (dress === 'bare') {
-      // A shawl over one shoulder and across the chest. Asymmetry does more for
-      // a crowd than any symmetric garment can.
+      // A shawl over one shoulder and across the chest and back. Asymmetry does
+      // more for a crowd than any symmetric garment can — but it has to read as
+      // cloth, and the old one was a 5.5 cm tube from shoulder to hip, which is
+      // the definition of a bandolier. These are 13 cm across and 1.8 cm thick.
+      // Draped 2.6 cm off the body: less and the chord between two points on the
+      // ribcage sinks straight through the pectoral between them.
       const s = rng.chance(0.5) ? -1 : 1
-      cloth(B_CHEST, tube(V(s * 0.132, 1.405, 0.02), V(-s * 0.125, 1.06, -0.06), 0.055, 0.07, 6), Reg.shirt)
-      cloth(B_SPINE, tube(V(s * 0.125, 1.39, 0.05), V(-s * 0.1, 1.05, 0.07), 0.05, 0.06, 6), Reg.shirt)
-    } else if (cuff === 0) {
-      // Sleeveless shirts get a collar so the neckline still reads.
-      cloth(B_CHEST, trunk(1.36, 1.43, 0.085, 0.1, 0.8, 10), Reg.shirt)
+      const g = 0.021
+      const p = (y: number, a: number) => torsoPoint(y, a * s, g, bulk)
+      const shoulder = V(s * 0.126 * bulk, 1.422, -0.040)
+      const nape = V(s * 0.122 * bulk, 1.426, 0.044)
+      // Over the point of the shoulder, bound to the arm like the deltoid is:
+      // on the chest set it tore open the first time a hunter shouldered a rifle.
+      const arm = B_ARM(s < 0 ? 'L' : 'R')
+      cloth(arm, strip(shoulder, nape, 0.098, 0.013, V(s * 0.3, 0.95, 0), 0.012), Reg.shirt)
+      // Down the chest, then across to the opposite hip. Four short sections
+      // rather than two long ones: a strip is straight, and a straight line
+      // between two points on a ribcage passes through everything in between.
+      const c = [shoulder, p(1.345, 0.80), p(1.250, 0.45), p(1.150, 0.10), p(1.050, -0.42)]
+      const b = [nape, p(1.345, 2.34), p(1.250, 2.69), p(1.150, 3.04), c[4]!]
+      const w = [0.108, 0.124, 0.130, 0.126]
+      /** Which way the cloth faces: radially out from the body's axis. */
+      const out = (u: THREE.Vector3, v: THREE.Vector3) => {
+        const my = (u.y + v.y) / 2
+        return V(u.x + v.x, 0, u.z + v.z - 2 * torsoAt(my)[2])
+      }
+      for (let i = 0; i < 4; i++) {
+        const set = i < 2 ? B_CHEST : B_SPINE
+        cloth(set, strip(c[i]!, c[i + 1]!, w[i]!, 0.014, out(c[i]!, c[i + 1]!), 0.012), Reg.shirt)
+        cloth(set, strip(b[i]!, b[i + 1]!, w[i]!, 0.014, out(b[i]!, b[i + 1]!), 0.012), Reg.shirt)
+      }
+      // The loose end, hanging free off the hip.
+      cloth(B_SPINE, strip(c[4]!, V(-s * 0.112 * bulk, 0.870, -0.008), 0.098, 0.013, V(-s * 0.94, 0, -0.34)), Reg.shirt)
+    }
+
+    if (shirted) {
+      // Collar and hem. Without them a shirt is a differently-coloured torso:
+      // the two edges are the only place a garment announces itself as one. The
+      // collar stands 1.5 cm clear of the neck; the hem flares away below the
+      // waist, with its top ring tucked inside the body so there is no rim.
+      cloth(B_NECK, trunk(1.418, 1.478, 0.072, 0.064, 0.88, 10), Reg.shirt)
+      // The hem has to be outside the waistband over the whole height the two
+      // share, not just at the bottom. A cone that only overtook the waistband
+      // at 1.00 left the trousers showing from 1.05 down to 1.00 and the shirt
+      // reappearing below: a shirt, then a five-centimetre dark band, then a red
+      // band. Everyone read it as a belt.
+      //
+      // Two segments, because one straight ramp cannot do it: tucked inside the
+      // body at 1.10, out past the waistband's 1.3 cm clearance by 1.05 (which
+      // is the very top of both the trouser waistband and the dhoti tie), then
+      // flaring on out to 3.4 cm at 0.895. Nothing under it ever surfaces.
+      const hemK: readonly (readonly [number, number])[] = [[0.895, 0.034], [1.05, 0.018], [1.10, -0.006]]
+      const hem: Ring[] = []
+      for (let i = 0; i <= 7; i++) {
+        const y = 0.895 + (1.10 - 0.895) * (i / 7)
+        const j = y <= hemK[1]![0] ? 0 : 1
+        const a = hemK[j]!
+        const b = hemK[j + 1]!
+        const g = a[1] + (b[1] - a[1]) * ((y - a[0]) / (b[0] - a[0]))
+        const p = torsoAt(y)
+        hem.push([y, p[0] * bulk + g, p[1] * bulk + g, p[2]])
+      }
+      cloth(B_SPINE, sweep(hem, 12), Reg.shirt)
+      // The roll is 2 mm fatter than the ring it caps. Matched exactly, the two
+      // 12-gons alternate which one is outside and the hem comes out scalloped.
+      const h0 = torsoAt(0.895)
+      cloth(B_SPINE, roll(0.895, h0[0] * bulk + 0.036, h0[1] * bulk + 0.036, h0[2]), Reg.shirt)
     }
 
     // ---- arms. Upper arm with a biceps belly, elbow, forearm with a flexor
@@ -702,7 +1217,13 @@ export class Human {
       skin(bones, tube(V(sg * 0.184, 0.766, -0.018), V(sg * 0.166, 0.712, -0.042), 0.016, 0.009, 5))  // thumb
       if (cuff > 0) {
         const end = new THREE.Vector3().lerpVectors(sh, wr, cuff / 0.59)
-        cloth(bones, tube(sh, end, r(0.078), r(cuff > 0.2 ? 0.053 : 0.068)), Reg.shirt)
+        // Narrow at the top, wide at the hem — the opposite of what it was. At
+        // 0.078 the sleeve's top rim stood 2.6 cm outside the deltoid under it
+        // and the two together made a bulb on each shoulder. At 0.056 the rim is
+        // inside the deltoid (0.058 at that height) and never surfaces, and the
+        // flare to the hem is what makes it read as cloth hanging off an arm
+        // rather than as a second skin.
+        cloth(bones, tube(sh, end, r(0.056), r(cuff > 0.2 ? 0.052 : 0.066)), Reg.shirt)
       }
     }
 
@@ -725,7 +1246,14 @@ export class Human {
       // Kneecap on the femur alone. The joint blob has to blend across the hinge
       // and loses a fifth of its radius at 60 degrees of flex; a bony front that
       // rides rigidly on the thigh is what stops that reading as a dent.
-      skin([`thigh${s}`], ell(sg * 0.088, 0.482, -0.05, 0.03, 0.038, 0.022))
+      // Pulled back 6 mm from where it was: at the low end of the girth range it
+      // stood a millimetre outside the trouser leg and came through as a
+      // skin-coloured patch on each knee.
+      // Back another 5 mm and taller than it is wide. Standing 8 mm proud of the
+      // knee blob it cut a perfect circle across a bare shin and read as a decal
+      // rather than as bone; at 3 mm the outline is an oval that dies out at the
+      // sides, which is what a patella looks like.
+      skin([`thigh${s}`], ell(sg * 0.088, 0.484, -0.039, 0.032, 0.044, 0.020))
       skin(bones, tube(knee, ankle, r(0.062), 0.036))
       skin(bones, ell(sg * 0.092, 0.36, 0.026, r(0.05), 0.085, r(0.044)))    // calf
       // Foot. The malleoli belong to the shin, the heel and arch to the foot, the
@@ -749,13 +1277,28 @@ export class Human {
       }
     }
 
+    // The waist was a hard seam: a cylinder butted against the torso with its
+    // open rim showing as a thin bright line and no overlap either side of it.
+    // Both garments now run 3 cm higher, tuck their top ring inside the body,
+    // and finish on a rolled edge so the join has thickness.
     if (lower === 'dhoti') {
       // A wrapped skirt to the knee. Bound to the pelvis alone, which is what a
       // real dhoti does — it swings with the hips, not with each thigh.
-      cloth(['hips'], trunk(0.56, 1.015, 0.23, 0.166, 1, 14), Reg.trouser)
-      cloth(['hips'], ell(0, 0.59, 0, 0.23, 0.05, 0.23, 14, 4), Reg.trouser)
+      cloth(['hips'], trunk(0.56, 0.955, 0.235, r(0.158), 0.78, 14), Reg.trouser)
+      cloth(['hips'], ell(0, 0.59, 0, 0.235, 0.05, 0.184, 14, 4), Reg.trouser)
+      // The tie: a separate band, wide enough to swallow the top of the skirt.
+      cloth(B_SPINE, trunk(0.94, 1.052, r(0.166), r(0.134), 0.78, 12), Reg.trouser)
+      cloth(B_SPINE, roll(0.942, r(0.168), r(0.131)), Reg.trouser)
     } else {
-      cloth(B_SPINE, trunk(0.86, 1.015, 0.162, 0.156, 0.78, 12), Reg.trouser)
+      // Swept from the body profile rather than coned, so it takes the flare of
+      // the hips, and carried down to 0.80 rather than 0.86. Both the trouser
+      // and the shorts leg tubes start at the hip joint and are cut square
+      // across, so between 0.795 and 0.86 the front of the crotch was outside
+      // both of them and outside the waistband: a 6 cm wedge of bare skin under
+      // the belt of every trousered villager and every hunter in the game.
+      cloth(B_SPINE, sweep(garmentRings(0.80, 1.050, 0.013, 6, bulk), 12), Reg.trouser)
+      const w = torsoAt(1.050)
+      cloth(B_SPINE, roll(1.050, w[0] * bulk + 0.015, w[1] * bulk + 0.015, w[2]), Reg.trouser)
     }
 
     // ---- head. Skull, brow, cheekbones, jaw, chin, nose, ears, eyes, mouth.
@@ -768,17 +1311,64 @@ export class Human {
     // a human that is never straight.
     skin(B_HEAD, ell(0, 1.607, 0.012, 0.079, 0.108, 0.098, 12, 8))
     skin(B_HEAD, ell(0, 1.625, -0.058, 0.066, 0.026, 0.032))            // brow ridge
-    skin(B_HEAD, ell(-0.05, 1.578, -0.052, 0.03, 0.032, 0.03))          // cheekbones
-    skin(B_HEAD, ell(0.05, 1.578, -0.052, 0.03, 0.032, 0.03))
+    // Cheekbones flattened against the skull. At 3 cm through and 2.3 cm proud
+    // they were two balls stuck on the sides of the face; a zygomatic arch is a
+    // ridge, and 9 mm is as far as one stands out.
+    skin(B_HEAD, ell(-0.05, 1.578, -0.040, 0.032, 0.028, 0.028))        // cheekbones
+    skin(B_HEAD, ell(0.05, 1.578, -0.040, 0.032, 0.028, 0.028))
     skin(B_HEAD, ell(0, 1.545, -0.022, 0.058, 0.05, 0.072))             // jaw
     skin(B_HEAD, ell(0, 1.517, -0.056, 0.03, 0.03, 0.03))               // chin
-    skin(B_HEAD, ell(0, 1.588, -0.08, 0.015, 0.028, 0.026))             // nose bridge
-    skin(B_HEAD, ell(0, 1.566, -0.09, 0.018, 0.014, 0.018))             // tip
+    // The nose was one 3 cm ellipsoid on the bridge and one on the tip, which
+    // from the front is a bump and from the side is nothing. A nose is four
+    // things: a bridge that starts *between the brows*, a dorsum that runs down
+    // and forward, a tip that hooks back under, and two wings either side of it.
+    // The tip reaches z -0.1175, 2 cm proud of the cheek, which is what puts a
+    // shadow across half the face when the sun is off to one side.
+    // The root is level with the skull, not proud of it: the nasion is the
+    // deepest point of the profile, and pushing it forward turned the whole nose
+    // into one bulb running from the brow to the lip. 2.2 cm of dorsum, 1.5 cm
+    // across, and 1.7 cm of projection past the upper lip.
+    skin(B_HEAD, ell(0, 1.6035, -0.062, 0.012, 0.022, 0.016))           // root, between the brows
+    skin(B_HEAD, tube(V(0, 1.6035, -0.070), V(0, 1.5715, -0.094), 0.011, 0.0135, 6))  // dorsum
+    skin(B_HEAD, ell(0, 1.5665, -0.098, 0.0145, 0.0125, 0.0155, 8, 5))  // tip
+    skin(B_HEAD, ell(-0.0135, 1.5605, -0.084, 0.009, 0.010, 0.0125, 6, 4))  // alae
+    skin(B_HEAD, ell(0.0135, 1.5605, -0.084, 0.009, 0.010, 0.0125, 6, 4))
+    fixed(B_HEAD, ell(-0.0115, 1.5545, -0.0875, 0.005, 0.0035, 0.006, 5, 3), DARK)  // nostrils
+    fixed(B_HEAD, ell(0.0115, 1.5545, -0.0875, 0.005, 0.0035, 0.006, 5, 3), DARK)
+
+    // Eyes. Previously a 2.6 cm dark disc stuck flat on a lit cheek, which is
+    // the single most cartoon thing on the model. An eye is a ball sunk in a
+    // socket, mostly covered: a sclera almond only 4 mm of which ever shows, a
+    // brown iris over it, and lids of skin above and below with the upper one
+    // sitting lower and heavier. The socket shadow that makes it read is in
+    // CREASE.
+    //
+    // The depths matter more than the shapes. The skull surface at the eye is
+    // z -0.0778; the first attempt put the eyeball's front at -0.0825, which is
+    // 5 mm proud, and it bulged out of the face like a headlamp. The ball is
+    // flush, the lids are 3 mm proud of it, and the 9 mm of opening between them
+    // is all that ever shows.
+    for (const s of [-1, 1]) {
+      const x = s * 0.0315
+      fixed(B_HEAD, ell(x, 1.599, -0.0695, 0.0125, 0.0065, 0.0085, 7, 4), SCLERA)
+      // 7.2 mm across, not 5.5. At 5.5 there were seven millimetres of sclera
+      // either side of the iris against eleven of iris, and eyes with that much
+      // white showing are eyes that are staring — every villager looked
+      // startled, standing still, in daylight.
+      fixed(B_HEAD, ell(x, 1.5985, -0.0725, 0.0072, 0.0062, 0.006, 6, 4), IRIS)
+      skin(B_HEAD, ell(x, 1.6115, -0.0705, 0.0165, 0.0085, 0.0105, 7, 4))  // upper lid, heavier
+      skin(B_HEAD, ell(x, 1.5875, -0.0700, 0.0155, 0.007, 0.0100, 7, 4))   // lower lid
+    }
+
+    // Mouth. Was a 4 cm black bar. Lips are skin, not a hole: two soft rolls
+    // with a dark line between them, the upper thinner than the lower and the
+    // whole thing set back under the nose rather than on the front of the chin.
+    skin(B_HEAD, ell(0, 1.5425, -0.0845, 0.024, 0.0075, 0.011, 8, 4))   // upper lip
+    skin(B_HEAD, ell(0, 1.5305, -0.0845, 0.022, 0.0095, 0.012, 8, 4))   // lower lip
+    fixed(B_HEAD, ell(0, 1.5375, -0.0885, 0.023, 0.0028, 0.006, 8, 3), DARK)
+
     skin(B_HEAD, ell(-0.078, 1.59, 0.012, 0.011, 0.026, 0.02))          // ears
     skin(B_HEAD, ell(0.078, 1.59, 0.012, 0.011, 0.026, 0.02))
-    fixed(B_HEAD, ell(-0.031, 1.601, -0.078, 0.013, 0.012, 0.008), DARK)  // eyes
-    fixed(B_HEAD, ell(0.031, 1.601, -0.078, 0.013, 0.012, 0.008), DARK)
-    fixed(B_HEAD, ell(0, 1.542, -0.073, 0.02, 0.006, 0.008), DARK)      // mouth
 
     // Hair, headwear and beards, all vertex-coloured into the skin layer so a
     // white beard under a red turban is still no extra draw call.
@@ -808,10 +1398,17 @@ export class Human {
     }
 
     if (rng.chance(0.45)) {
-      // Centred behind and below the nose, so it never reaches the nose tip at
-      // z -0.11 and the face stays a face.
-      fixed(B_HEAD, ell(0, 1.535, -0.028, 0.068, 0.055, 0.072), hairCol)
-      if (rng.chance(0.6)) fixed(B_HEAD, ell(0, 1.56, -0.069, 0.027, 0.012, 0.016), hairCol)  // moustache
+      // The beard was one 14 cm ball centred on the mouth. Its front surface
+      // stood a millimetre proud of the lips, so it covered them completely, and
+      // on the grey-haired quarter of the crowd it read — unmistakably — as a
+      // surgical mask. It has to be a single mass hugging the jaw and stopping
+      // 1.4 cm short of the lips — the first rebuild used four small pieces on
+      // the chin and either side of the mouth, which at this vertex density are
+      // four separate smooth balls and read as cotton wool glued on.
+      fixed(B_HEAD, ell(0, 1.5175, -0.030, 0.059, 0.040, 0.063, 10, 6), hairCol)  // chin and jaw
+      fixed(B_HEAD, ell(0, 1.4965, -0.014, 0.050, 0.028, 0.056, 8, 5), hairCol)   // under the jaw
+      // Sits on the top edge of the upper lip, 4 mm proud of the philtrum.
+      if (rng.chance(0.6)) fixed(B_HEAD, ell(0, 1.5495, -0.084, 0.023, 0.008, 0.013, 8, 4), hairCol)
     }
 
     // ---- assemble. One skinned mesh per layer: skin has no cloth weave and a
@@ -827,6 +1424,7 @@ export class Human {
       for (const p of mine) total += p.g.attributes.position!.count
       const region = new Uint8Array(total)
       const base = new Float32Array(total * 3)
+      const shade = new Float32Array(total)
       const col = new THREE.Color()
       let o = 0
       for (const p of mine) {
@@ -835,8 +1433,12 @@ export class Human {
         // Every part needs the same attribute set or the merge drops one.
         p.g.setAttribute('color', new THREE.Float32BufferAttribute(new Float32Array(n * 3), 3))
         if (p.region === Reg.fixed) col.setHex(p.hex)
+        const pv = p.g.attributes.position!.array as ArrayLike<number>
         for (let i = 0; i < n; i++) {
           region[o + i] = p.region
+          // Baked in the bind pose, which is the only pose that exists at build
+          // time and close enough to every pose the gait ever reaches.
+          shade[o + i] = shadeAt(pv[i * 3]!, pv[i * 3 + 1]!, pv[i * 3 + 2]!)
           if (p.region === Reg.fixed) {
             base[(o + i) * 3] = col.r
             base[(o + i) * 3 + 1] = col.g
@@ -857,7 +1459,7 @@ export class Human {
       mesh.receiveShadow = true
       mesh.bind(skeleton, new THREE.Matrix4())
       this.body.add(mesh)
-      this.layers.push({ mesh, region, base, attr: geo.attributes.color as THREE.BufferAttribute })
+      this.layers.push({ mesh, region, base, shade, attr: geo.attributes.color as THREE.BufferAttribute })
     }
     this.body.add(root)
 
@@ -896,15 +1498,19 @@ export class Human {
       const a = l.attr.array as Float32Array
       for (let i = 0; i < l.region.length; i++) {
         const reg = l.region[i]!
+        // The occlusion multiplies whichever colour lands here, palette or
+        // fixed alike: an eye socket has to darken the eye in it as well as the
+        // lids around it, or the eye is a lamp at the bottom of a hole.
+        const s = l.shade[i]!
         if (reg === Reg.fixed) {
-          a[i * 3] = l.base[i * 3]!
-          a[i * 3 + 1] = l.base[i * 3 + 1]!
-          a[i * 3 + 2] = l.base[i * 3 + 2]!
+          a[i * 3] = l.base[i * 3]! * s
+          a[i * 3 + 1] = l.base[i * 3 + 1]! * s
+          a[i * 3 + 2] = l.base[i * 3 + 2]! * s
         } else {
           const c = pal[reg]!
-          a[i * 3] = c.r
-          a[i * 3 + 1] = c.g
-          a[i * 3 + 2] = c.b
+          a[i * 3] = c.r * s
+          a[i * 3 + 1] = c.g * s
+          a[i * 3 + 2] = c.b * s
         }
       }
       l.attr.needsUpdate = true
