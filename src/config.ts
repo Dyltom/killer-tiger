@@ -178,6 +178,22 @@ export const WAVE = {
   damageScale: 0.05,
 }
 
+/**
+ * One beat per hunt, so the night has a shape rather than just a rising enemy
+ * count. Indexed from hunt 1; past the end of the table the last line repeats,
+ * which is the point it has become a siege and stops being a story.
+ */
+export const STORY: { title: string; line: string; toast: string }[] = [
+  { title: 'FIRST BLOOD', line: 'Nobody is awake. Keep it that way', toast: 'The village does not know yet' },
+  { title: 'THE ALARM', line: 'A boy saw you. He is running for the headman', toast: 'They have found the first body' },
+  { title: 'THE RIFLES', line: 'The old guns are out of their oilcloth', toast: 'Lamps are lit in every doorway' },
+  { title: 'THE CORDON', line: 'They are working in pairs now, sweeping the grass', toast: 'They have stopped calling for you and started looking' },
+  { title: 'THE FENCE LINE', line: 'This is the ground your mate died on', toast: 'You know this stretch of wire' },
+  { title: 'THE BOUNTY', line: 'Word reached the district. Men came for the skin', toast: 'These ones are not farmers' },
+  { title: 'THE BURNING', line: 'They are firing the cane to drive you out', toast: 'Smoke on three sides' },
+  { title: 'THE LAST NIGHT', line: 'Nine hundred nights of patience, spent', toast: 'There is nothing left to go back to' },
+]
+
 export const COMBO = {
   /** Kill within this window extends the chain. */
   window: 4.5,

@@ -232,7 +232,7 @@
         position: fixed; inset: 0; display: flex; flex-direction: column;
         align-items: center; justify-content: center; text-align: center;
         background: radial-gradient(ellipse at center, rgba(28, 14, 6, 0.86) 0%, rgba(6, 4, 3, 0.97) 75%);
-        backdrop-filter: blur(3px); z-index: 10; padding: 24px;
+        backdrop-filter: blur(3px); z-index: 10; padding: 24px; overflow-y: auto;
       }
       .overlay h1 {
         font-family: 'Bebas Neue', Impact, sans-serif;
@@ -244,9 +244,13 @@
         font-size: 15px; letter-spacing: 0.42em; text-transform: uppercase;
         color: rgba(244, 234, 217, 0.6); margin-top: 8px; font-weight: 700;
       }
+      .story {
+        max-width: 58ch; margin: 14px auto 0; font-size: 14.5px; line-height: 1.5;
+        color: rgba(244, 234, 217, 0.62);
+      }
       .keys {
         display: grid; grid-template-columns: auto auto; gap: 6px 18px;
-        margin: 34px 0 8px; font-size: 16px; text-align: left;
+        margin: 26px 0 8px; font-size: 16px; text-align: left;
       }
       .keys .k {
         font-weight: 700; color: var(--amber); text-align: right;
@@ -333,6 +337,12 @@
     <div id="menu" class="overlay hidden">
       <h1 class="display">KILLER <span class="b">TIGER</span></h1>
       <div class="tag">Apex predator &middot; first person</div>
+      <p class="story">
+        They cut the sal forest for cane and shot the deer that ran from it.
+        Your mate went into a snare on the new fence line, and your cubs went
+        quiet in the dry season after. Nine hundred nights you kept to the
+        treeline above the village. Tonight you come down.
+      </p>
       <div class="keys">
         <div class="k">W A S D</div><div class="d">Prowl</div>
         <div class="k">MOUSE</div><div class="d">Look</div>
@@ -350,13 +360,13 @@
 
     <div id="paused" class="overlay hidden">
       <h1 class="display">PAUSED</h1>
-      <div class="tag">The village holds its breath</div>
+      <div class="tag">The grass holds still</div>
       <button class="cta display" id="resume-btn">Resume hunt</button>
     </div>
 
     <div id="gameover" class="overlay hidden">
       <h1 class="display" id="go-title">THE HUNT <span class="b">ENDS</span></h1>
-      <div class="tag" id="go-sub">The hunters brought you down</div>
+      <div class="tag" id="go-sub">They will hang your skin in the headman's house</div>
       <div id="stats">
         <div class="s"><div class="v" id="go-score">0</div><div class="l">Score</div></div>
         <div class="s"><div class="v" id="go-kills">0</div><div class="l">Kills</div></div>

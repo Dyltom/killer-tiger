@@ -3,7 +3,7 @@
  * Rendering and the DOM live elsewhere; this file is the simulation.
  */
 import * as THREE from 'three'
-import { BUFFS, COMBO, HUMAN, PICKUP, STORAGE_KEY, TIGER, WAVE, WORLD } from './config'
+import { BUFFS, COMBO, HUMAN, PICKUP, STORAGE_KEY, STORY, TIGER, WAVE, WORLD } from './config'
 import { audio } from './engine/audio'
 import type { Input } from './engine/input'
 import { clamp, Rng } from './engine/rng'
@@ -126,8 +126,7 @@ export class Game {
     this.fillWave(true)
     this.setState('playing')
     audio.waveStart()
-    this.hud.announce('HUNT 1', 'Take six of them')
-    this.hud.toast('The village does not know yet', 'good')
+    this.tellStory('good')
   }
 
   private setState(s: GameState) {
@@ -225,10 +224,17 @@ export class Game {
     this.tiger.heal(22)
     this.tiger.addRage(20)
     audio.waveStart()
-    const hunters = this.desiredHunters()
-    this.hud.announce(`HUNT ${this.wave}`, `${hunters} hunter${hunters > 1 ? 's' : ''} coming for you`)
-    this.hud.toast(`Hunt ${this.wave} — they are arming themselves`, 'bad')
+    this.tellStory('bad')
     this.spawnPickupNear(this.tiger.pos, 'meat')
+  }
+
+  /** The beat for the current hunt, with the odds against you appended to it. */
+  private tellStory(tone: 'good' | 'bad') {
+    const beat = STORY[Math.min(this.wave, STORY.length) - 1]!
+    const hunters = this.desiredHunters()
+    const odds = hunters > 0 ? ` — ${hunters} rifle${hunters > 1 ? 's' : ''}` : ''
+    this.hud.announce(beat.title, beat.line + odds)
+    this.hud.toast(beat.toast, tone)
   }
 
   // --------------------------------------------------------------- pickups

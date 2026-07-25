@@ -425,6 +425,37 @@ function campfire(kit: Kit, rng: Rng): THREE.Group {
   return g
 }
 
+// ------------------------------------------------------- sitting on the land
+type Height = (x: number, z: number) => number
+
+/**
+ * Lowest ground anywhere under a footprint of the given radius.
+ *
+ * Sampling only the centre is what left the uphill side of every hut and pot on
+ * the outer ring standing clear of the slope on a wedge of air. Sinking to the
+ * minimum instead buries the uphill edge, which nothing can see, rather than
+ * floating the downhill one, which everything can.
+ */
+function groundUnder(height: Height, x: number, z: number, r: number): number {
+  let y = height(x, z)
+  for (let i = 0; i < 4; i++) {
+    const a = (i / 4) * Math.PI * 2 + Math.PI / 4
+    y = Math.min(y, height(x + Math.cos(a) * r, z + Math.sin(a) * r))
+  }
+  return y
+}
+
+/**
+ * Lay a loose prop over on whatever it is sitting on. Buildings stay plumb —
+ * people level their own foundations — but a pot or a woodpile does not.
+ */
+function layOnSlope(obj: THREE.Object3D, height: Height, x: number, z: number, yaw: number) {
+  const gx = height(x + 0.7, z) - height(x - 0.7, z)
+  const gz = height(x, z + 0.7) - height(x, z - 0.7)
+  const clamp = (v: number) => Math.max(-0.32, Math.min(0.32, v / 1.4))
+  obj.rotation.set(clamp(gz), yaw, -clamp(gx), 'YXZ')
+}
+
 // ------------------------------------------------------------------- build
 export function buildVillage(ctx: VillageContext): THREE.Group {
   const { rng } = ctx
@@ -445,19 +476,18 @@ export function buildVillage(ctx: VillageContext): THREE.Group {
     }
     placed.push({ x, z, r: 7 })
 
-    const y = ctx.height(x, z)
     const rot = rng.range(0, Math.PI * 2)
 
     // Round dwellings dominate; the square ones read as stores and granaries.
     if (rng.chance(0.68)) {
       const hut = roundHut(kit, rng)
-      hut.group.position.set(x, y, z)
+      hut.group.position.set(x, groundUnder(ctx.height, x, z, hut.radius * 0.85), z)
       hut.group.rotation.y = rot
       root.add(hut.group)
       ctx.colliders.push({ kind: 'circle', x, z, r: hut.radius * 0.78, h: hut.height })
     } else {
       const hut = squareHut(kit, rng)
-      hut.group.position.set(x, y, z)
+      hut.group.position.set(x, groundUnder(ctx.height, x, z, Math.max(hut.hw, hut.hd)), z)
       hut.group.rotation.y = rot
       root.add(hut.group)
       ctx.colliders.push({ kind: 'box', x, z, hw: hut.hw, hd: hut.hd, rot, h: hut.height })
@@ -470,7 +500,6 @@ export function buildVillage(ctx: VillageContext): THREE.Group {
       const pr = rng.range(3.4, 6.0)
       const px = x + Math.cos(pa) * pr
       const pz = z + Math.sin(pa) * pr
-      const py = ctx.height(px, pz)
       const roll = rng.next()
       let obj: THREE.Object3D
       if (roll < 0.3) obj = clayPot(kit, rng)
@@ -478,8 +507,8 @@ export function buildVillage(ctx: VillageContext): THREE.Group {
       else if (roll < 0.75) obj = woodpile(kit, rng)
       else if (roll < 0.93) obj = dryingRack(kit, rng)
       else obj = cart(kit, rng)
-      obj.position.set(px, py, pz)
-      obj.rotation.y = rng.range(0, Math.PI * 2)
+      obj.position.set(px, groundUnder(ctx.height, px, pz, 0.9) - 0.03, pz)
+      layOnSlope(obj, ctx.height, px, pz, rng.range(0, Math.PI * 2))
       root.add(obj)
     }
 
