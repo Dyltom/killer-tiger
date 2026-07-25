@@ -717,11 +717,12 @@ export class Audio {
     const dest = this.voice(PRI.high, 2.2, LEVELS.roar, place, 2.2, true)
     if (!dest) return
     this.duck(0.45)
-    const t0 = this.t + this.travel(place)
+    const tv = this.travel(place)
+    const t0 = this.t + tv
     const pitch = rand(0.94, 1.07)
 
     // Breath in.
-    this.noise(dest, 0.26, 0.1, 'bandpass', 380, 900, 0, 1.4, 0.12)
+    this.noise(dest, 0.26, 0.1, 'bandpass', 380, 900, tv, 1.4, 0.12)
 
     const start = 0.24
     const dur = 1.55
@@ -748,17 +749,56 @@ export class Audio {
 
     const env = ctx.createGain()
     env.gain.setValueAtTime(0.0001, t0 + start)
-    env.gain.exponentialRampToValueAtTime(1, t0 + start + 0.09)
+    // A roar does not fade in. The folds are already slammed together when the
+    // air hits them, so the mouth opens onto a sound that is already at full
+    // power. The slow ramp this used to have is what made it read as a swell.
+    env.gain.exponentialRampToValueAtTime(1, t0 + start + 0.035)
     env.gain.setValueAtTime(1, t0 + start + dur * 0.55)
     env.gain.exponentialRampToValueAtTime(0.0001, t0 + start + dur)
     // Vocal tract of something with a head the size of a bucket.
-    this.formants(env, shaper, [330, 980, 2100], [1, 0.42, 0.14], 5)
+    //
+    // Four formants, not three, and the top two carry real level. A tiger's
+    // roar measured almost nothing above two kilohertz, which is why it sat
+    // in the mix like a subwoofer test rather than an animal — the weight was
+    // all there, but weight alone is a truck going past. What tells you it is
+    // alive, and what makes it carry across a clearing, is the rasp on top.
+    for (const [f, lvl, q] of [
+      [330, 1, 5], [980, 0.42, 5.8], [2100, 0.34, 6], [3400, 0.2, 5],
+    ] as const) {
+      const bp = ctx.createBiquadFilter()
+      bp.type = 'bandpass'
+      bp.frequency.value = f * (0.97 + pitch * 0.03)
+      bp.Q.value = q
+      const g = ctx.createGain()
+      g.gain.value = lvl
+      shaper.connect(bp)
+      bp.connect(g)
+      g.connect(env)
+    }
     env.connect(dest)
+
+    // The snarl. Broadband noise chopped by the same flutter that chops the
+    // tone, because it is the same set of folds doing the chopping — running
+    // the rasp unmodulated is what makes a synthesised roar sound like a tone
+    // with a hiss laid over it instead of one throat.
+    const snarl = ctx.createGain()
+    snarl.gain.value = 0.34
+    lfoGain.connect(snarl.gain)
+    snarl.connect(env)
+    this.noise(snarl, dur, 0.5, 'bandpass', 2600, 1700, tv + start, 1.5, 0.03)
+    this.noise(snarl, dur * 0.9, 0.3, 'bandpass', 4600, 3200, tv + start, 1.2, 0.04)
+    // Chaotic sputter. Big cats roar with a thick fibrous pad on the folds that
+    // makes the vibration break up irregularly, and that irregularity is most
+    // of what separates a real roar from a sawtooth with tremolo on it.
+    this.grains(env, 16, dur * 0.8, 0.18, 1800, 6500, 0.01, 0.045, tv + start, 2.6, 0.4)
 
     for (const [type, f0, f1, level] of [
       ['sawtooth', 128, 62, 0.5],
       ['square', 84, 41, 0.3],
       ['sawtooth', 191, 93, 0.18],
+      // Biphonation: the two folds do not run at quite the same rate, and the
+      // slow beating between them is the roughness you hear in the real thing.
+      ['sawtooth', 133, 64.5, 0.22],
     ] as const) {
       const osc = ctx.createOscillator()
       osc.type = type
@@ -774,9 +814,10 @@ export class Audio {
 
     // Chest. Below the formants, unmodulated, so there is something solid under
     // the rasp rather than the whole roar chattering.
-    this.tone(dest, 'sine', 68 * pitch, 34, dur * 0.95, 0.5, start, 0.05)
-    // Throat air.
-    this.noise(dest, dur, 0.16, 'bandpass', 1500, 500, start, 0.9, 0.06)
+    this.tone(dest, 'sine', 68 * pitch, 34, dur * 0.95, 0.5, tv + start, 0.05)
+    // Throat air, on the roar's own formants so it sounds like it came out of
+    // the same animal rather than being hiss laid alongside one.
+    this.breath(dest, tv + start, dur * 0.85, 0.14, [330, 980, 2100], 2.2)
   }
 
   /** A warning from the back of the throat. The roar's little brother. */
@@ -930,14 +971,24 @@ export class Audio {
     // Jaws closing.
     this.noise(dest, 0.05, 0.3, 'lowpass', 2200, 600, 0, 1, 0.001)
     // Bone. Short resonant cracks, scattered over 90 ms.
+    //
+    // These used to be banded between 700 Hz and 2.6 kHz, which is where a
+    // branch snaps underwater. A dry bone gives way in one brittle step and
+    // rings up past six kilohertz, and that snap is the entire reason a kill
+    // bite reads as fatal rather than as another hit — without it the sound
+    // says the jaws closed, not that something inside gave.
     for (let i = 0; i < 4; i++) {
       const at = 0.03 + i * rand(0.014, 0.032)
-      this.noise(dest, rand(0.012, 0.03), rand(0.2, 0.42), 'bandpass', rand(700, 2600) * j, rand(300, 900), at, 9, 0.0008)
+      this.noise(dest, rand(0.012, 0.03), rand(0.2, 0.42), 'bandpass', rand(1200, 5200) * j, rand(400, 1400), at, 9, 0.0008)
+      // The click of the break itself, ahead of the ring.
+      this.noise(dest, 0.005, rand(0.14, 0.26), 'highpass', rand(4500, 7500), 3500, at, 0.7, 0.0005)
     }
     this.tone(dest, 'triangle', 900 * j, 180, 0.05, 0.2, 0.035, 0.001)
     // Tear.
     this.noise(dest, 0.34, 0.3, 'lowpass', 1600 * j, 240, 0.05, 1.6, 0.008)
     this.noise(dest, 0.26, 0.16, 'bandpass', 2800, 900, 0.07, 3.2, 0.02)
+    // Sinew and cartilage letting go one strand at a time, behind the break.
+    this.grains(dest, 10, 0.22, 0.15, 1400, 5600, 0.006, 0.028, 0.06, 2.8, 0.45)
     // Spray, and the body going down.
     this.noise(dest, 0.2, 0.1, 'highpass', 3600, 1400, 0.11, 0.8, 0.01)
     this.tone(dest, 'sine', 96, 36, 0.4, 0.42, 0.02, 0.006)
