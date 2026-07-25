@@ -43,10 +43,86 @@ export const TIGER = {
   walkSpeed: 6.2,
   sprintSpeed: 13.5,
   crouchSpeed: 3.0,
-  /** Ground acceleration / friction (higher = snappier). */
-  accel: 42,
-  friction: 11,
+  /**
+   * How hard the tiger can push against the ground, in m/s^2, and how close to
+   * the speed it wants before it stops pushing that hard, in m/s.
+   *
+   * These are forces, not rates, because a rate cannot be bounded: the old pair
+   * was a 42 m/s^2 acceleration and a `1 - 11*dt` friction multiply applied *on
+   * top of* an already-decaying approach to zero, and letting go of the stick took
+   * 1.71 m/s out of the tiger in a single frame — 103 m/s^2, ten g, a
+   * quarter-tonne animal stopping dead in 50 ms. Everything downstream of speed
+   * jumped with it, the gait clock worst of all. A plain exponential fixes the
+   * stop but not the start: chasing 6.2 m/s from rest at rate 7 is still 43 m/s^2
+   * on the first frame after the key goes down.
+   *
+   * 14 m/s^2 is about 1.4 g, which is what a big cat actually gets out of a
+   * standing start, and it takes 0.73 s to reach a walk. Braking is harder than
+   * driving — claws dug in — but it is still 1.25 m and just over half a second
+   * from a walk, against the old 0.27 m. That is the weight of the animal, and
+   * it is deliberate. Inside the knee the law is exponential at force/knee, 7/s
+   * up and 13/s down, so the arrival has no corner in it either.
+   */
+  accelForce: 14,
+  accelKnee: 2.0,
+  brakeForce: 16,
+  brakeKnee: 1.2,
   airControl: 0.28,
+  /**
+   * How far the tiger will follow ground that drops away underneath it before it
+   * counts as having left it.
+   *
+   * Without this it left the ground constantly. The old test was a bare
+   * `pos.y > gy + 0.06`, and at a sprint the tiger covers 0.22 m a frame, so any
+   * slope steeper than 1 in 4 unstuck it — measured, that was twenty takeoffs and
+   * landings in 2.7 seconds of running on open ground, each one freezing the gait
+   * clock, tucking both forelegs up out of frame and dropping the camera 4 cm on
+   * the frame it landed. Rolling terrain is not a series of cliffs.
+   */
+  stepDown: 0.55,
+  /**
+   * How long the tiger has to be off the ground before the legs believe it. Two
+   * or three frames of air over a lip is not a leap, and the forelegs reaching
+   * for a landing is far too big a pose to enter by accident.
+   */
+  airGrace: 0.10,
+  /**
+   * The landing dip, as a spring rather than an offset.
+   *
+   * `landDipTake` is the fraction of the impact speed the head keeps travelling
+   * at once the feet are down; the spring then arrests it over about a tenth of a
+   * second. That is a velocity being absorbed by legs, which is what landing is —
+   * and unlike the old `landImpact`, which subtracted its full height from the eye
+   * on the contact frame, it cannot teleport the camera. The pounce landing used
+   * to be a 259 mm single-frame drop followed by a 38 mm rebound.
+   *
+   * Half is deliberately generous. The eye arrives at 9.8 m/s off a pounce and the
+   * body stops dead the instant the feet are down; whatever fraction the head does
+   * not keep is a step in the camera's velocity. Measured over the six frames after
+   * a pounce touchdown, half spreads 157 mm of settling over -54, -45, -25, -15,
+   * -10, -8 mm, against 140 mm over -54, -33, -20, -13, -11, -9 at 0.3: the arrest
+   * is longer, the dip is 59 mm rather than 40, and neither ever reverses. The old
+   * offset went -259 and then bounced +38 back up on the next frame.
+   */
+  landDipTake: 0.5,
+  landDipMax: 4.5,
+  /** Rad/s of the same spring. Critically damped, so it never overshoots up. */
+  dipFreq: 15,
+  /** Downward kick as the tiger coils into a pounce, through the same spring. */
+  pounceDip: 1.5,
+  /**
+   * The legs, as a low-pass on the ground the eye is carried over. 1/s.
+   *
+   * The height field is bilinear off a 0.68 m table, so its gradient is
+   * piecewise constant: run across it and the camera's vertical velocity changes
+   * abruptly at every cell boundary, which at a sprint is once every three
+   * frames. That is a C1 break in the view several times a second — the
+   * sewing-machine jitter — and no amount of smoothing the *gait* removes it,
+   * because it is coming from the floor. A quarter-second-ish spring on the
+   * reference height absorbs it, exactly like the animal's legs do, and only the
+   * eye uses it: pos.y stays exactly on the terrain for collision and for the AI.
+   */
+  legSpring: 14,
 
   gravity: 26,
   /** Straight-up hop when pouncing with no forward input. */
@@ -229,26 +305,48 @@ export const CAMERA = {
   sensitivity: 0.0022,
   pitchLimit: 1.45,
   /**
-   * Forefoot strides per second at walkSpeed. Cadence scales as speed^0.7 from
-   * here, so a sprint is a longer stride as well as a quicker one — scaling it
-   * linearly makes a fast animal look like a wound-up toy.
-   */
-  strideRate: 1.5,
-  swayAmp: 0.05,
-  /**
-   * The bound, as amplitudes of a plain sinusoid of the gait phase — the head is
-   * lowest just after a forefoot plants, highest through the swing, and the nose
-   * pitches down into the landing.
+   * Forefoot strides per second at walkSpeed, and the number the whole gait is
+   * solved from rather than a knob to taste.
    *
-   * These are half the old values because the old curve was rectified
-   * (`pow(max(sin, 0), 0.6)`) and so only ever moved the head one way from rest.
-   * A symmetric sine of the same amplitude travels twice as far. It is also
-   * multiplied by the gait amplitude, which reaches 1.5 at a sprint, so a bound
-   * at full speed still throws the head further than a walk does.
+   * A tiger cantering at 6.2 m/s covers about two metres per stride, so it takes
+   * 3.1 of them a second. The gait clock is advanced by ground covered divided by
+   * that stride length (see updateGait), which is what makes the cadence rise and
+   * fall with speed on its own and reach zero exactly when the tiger stops.
+   *
+   * The old 1.5 was less than half a real cadence, and everything that looked
+   * wrong about the run followed from it: with the viewmodel's sweep fixed at
+   * about half a metre by the limb's reach, a foot that only plants 1.5 times a
+   * second has to crawl backward at 1.7 m/s while the ground goes past at 6.2.
+   * Three quarters of every contact was a skid.
    */
-  boundAmp: 0.10,
-  boundPitch: 0.032,
-  boundRoll: 0.020,
+  strideRate: 3.1,
+  /**
+   * How much longer the animal's stride gets as it speeds up: strideLength scales
+   * as speed^0.7, so cadence takes the remaining speed^0.3. Both are measured
+   * relationships for a cat, and they are the reason a sprint reads as reaching
+   * further rather than as the same trot played faster.
+   */
+  strideGrowth: 0.7,
+  /**
+   * The bound: amplitudes of plain sinusoids of the gait phase. The head is
+   * lowest through the middle of a forefoot's contact and highest at the top of
+   * the suspension between strides, and the nose pitches down into the plant.
+   *
+   * A quarter of what they were, because the cadence they ride on has doubled and
+   * the gait amplitude that scales them no longer saturates at 1.5 — the head was
+   * travelling 256 mm peak to peak at a walk, at 1.4 m/s, which is not a big cat
+   * carrying its head level, it is a pogo stick. 64 mm at 3.1 strides a second is
+   * about 1 g of head acceleration, which is what a real canter does.
+   */
+  boundAmp: 0.032,
+  boundPitch: 0.016,
+  /**
+   * Sway and roll run at half the stride rate — a quadruped's shoulders roll once
+   * per pair of strides — so these are halved again on top, to hold the same
+   * angular rate now that the underlying cadence has doubled.
+   */
+  swayAmp: 0.030,
+  boundRoll: 0.010,
 }
 
 export const COLORS = {

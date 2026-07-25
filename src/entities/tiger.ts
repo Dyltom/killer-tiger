@@ -68,8 +68,23 @@ const PAW = {
   x: 0.30,
   /** Mid-stance: how far ahead of the eye the foot is halfway through contact. */
   z: -0.66,
-  /** Half the stride. The foot runs from z - stride (plant) to z + stride (lift). */
-  stride: 0.24,
+  /**
+   * Half the stride. The foot runs from z - stride (plant) to z + stride (lift),
+   * scaled by the gait amplitude.
+   *
+   * This is a reach limit, not a taste: at 0.28 the wrist at full protraction is
+   * 1.26 m from the shoulder, which the forearm covers by stretching about a fifth
+   * past its nominal 0.72 m. Beyond that the limb visibly telescopes.
+   *
+   * It used to be 0.24 with a gait amplitude that saturated at 1.5, so the sweep
+   * was already 0.36 — past this limit, not under it. The amplitude tops out at 1
+   * now (see updateGait) and the honest number lives here instead.
+   *
+   * Everything about the cadence follows from it. The clock is advanced by ground
+   * covered over the animal's real stride length, so a sweep of 2 * stride against
+   * a two-metre stride is what fixes the duty factor. See DUTY_MIN.
+   */
+  stride: 0.28,
   /** Peak of the swing above the ground. */
   lift: 0.20,
   /**
@@ -147,14 +162,29 @@ const PAW = {
 const SHOULDER = { x: 0.20, y: -0.30, z: 0.06 }
 
 /**
- * Fraction of the stride a forefoot spends on the ground. A running cat's foot
- * is planted for most of the cycle and whips forward in what's left; a sine wave
- * splits it evenly, which is why the old gait read as paddling at the air rather
- * than as feet driving against the ground.
+ * Duty factor: the fraction of a stride a forefoot spends on the ground. Solved
+ * every frame from the two lengths that matter rather than fixed, and that is the
+ * whole of why the paws no longer skate.
+ *
+ * A planted foot has to travel backward past the animal at exactly the rate the
+ * ground is going past it, or it is sliding. Two of the three numbers involved are
+ * already spoken for: the sweep is 2 * PAW.stride, which is as far as the limb
+ * reaches, and the cadence is the animal's own, which comes from the stride length
+ * it covers on the ground. So the duty factor is not free — it is
+ * sweep / strideLength, and nothing else will do.
+ *
+ * At walkSpeed that comes out at 0.28, which is a cantering cat's forelimb duty
+ * factor to two figures, and it falls further as the animal opens up. The old code
+ * fixed it at 0.62 and the cadence at 1.5 strides a second, which left a planted
+ * paw crossing the ground at 1.7 m/s while the world went past at 6.2: measured,
+ * 76 mm of skid per frame, three quarters of the tiger's own speed.
+ *
+ * The floor is set by the swing's overshoot rather than by anatomy — see stride(),
+ * where a shorter contact forces the foot to reach further past the plant on its
+ * way down, and the limb runs out of arm. The ceiling is a slow walk.
  */
-const STANCE = 0.62
-/** Slope of the stance ramp, in stride units per unit of swing. See stride(). */
-const SWING_TANGENT = (-2 * (1 - STANCE)) / STANCE
+const DUTY_MIN = 0.20
+const DUTY_MAX = 0.55
 
 /**
  * Where one forefoot is in its stride: +1 fully forward at the instant it
@@ -170,17 +200,22 @@ const SWING_TANGENT = (-2 * (1 - STANCE)) / STANCE
  * footfall was the paw stopping dead in mid-air and then jerking backward at
  * ground speed the instant it touched down — a corner in the foot's velocity
  * twice per stride, which is exactly what the run read as. Matching the slope
- * means the foot is already travelling backward when it lands. It also overshoots
- * a little past +1 on the way there, which is the reach a running cat has.
+ * means the foot is already travelling backward when it lands.
+ *
+ * The consequence is that it overshoots past +1 mid-swing and comes back to plant,
+ * which is both the reach a running cat has and a hard constraint on `duty`: the
+ * tangent is 2(1-duty)/duty, so the shorter the contact the bigger the bulge —
+ * 1.29x the sweep at duty 0.28, 1.6x at 0.20. That is what DUTY_MIN is protecting.
  */
-function stride(phase: number): number {
+function stride(phase: number, duty: number): number {
   const c = phase - Math.floor(phase)
-  if (c < STANCE) return 1 - 2 * (c / STANCE)
-  const s = (c - STANCE) / (1 - STANCE)
+  if (c < duty) return 1 - 2 * (c / duty)
+  const s = (c - duty) / (1 - duty)
   const s2 = s * s
   const s3 = s2 * s
-  // Hermite with p0 = -1, p1 = +1, m0 = m1 = SWING_TANGENT, collected.
-  return -4 * s3 + 6 * s2 - 1 + SWING_TANGENT * (2 * s3 - 3 * s2 + s)
+  // Hermite with p0 = -1, p1 = +1, m0 = m1 = the stance slope, collected.
+  const m = (-2 * (1 - duty)) / duty
+  return -4 * s3 + 6 * s2 - 1 + m * (2 * s3 - 3 * s2 + s)
 }
 
 /** Ease in and out of a 0..1 ramp. Used for every blend between attack keyframes. */
@@ -196,10 +231,10 @@ function smoothstep(x: number): number {
  * so the foot's vertical speed jumped the moment it left the ground and again
  * the moment it touched down. This leaves and lands at zero vertical speed.
  */
-function lift(phase: number): number {
+function lift(phase: number, duty: number): number {
   const c = phase - Math.floor(phase)
-  if (c < STANCE) return 0
-  const s = (c - STANCE) / (1 - STANCE)
+  if (c < duty) return 0
+  const s = (c - duty) / (1 - duty)
   const u = s * (1 - s)
   return 16 * u * u
 }
@@ -588,12 +623,16 @@ export class Tiger {
    * to zero is what stops the gait now; the clock just keeps its place.
    */
   private gaitPhase = 0
-  /** How much of a full stride the legs are taking, 0..1.5. Damped, never snapped. */
+  /** How much of a full stride the legs are taking, 0..1. Damped, never snapped. */
   private gaitAmp = 0
+  /** This frame's duty factor. Resolved in updateGait, read by the pose. See DUTY_MIN. */
+  private gaitDuty = DUTY_MAX
   /** Stride offset between the two forefeet: 0.5 alternating, near 0 bounding. */
   private pairPhase = 0.5
   /** 0 on the ground, 1 in the air. Tucks the forelegs into a reach mid-pounce. */
   private airBlend = 0
+  /** Seconds off the ground. Gates airBlend, so a lip in the dirt is not a leap. */
+  private airTime = 0
   /** Which half-stride last fired a footstep. */
   private lastBeat = -1
   /** The bound, resolved once per frame and read by both the paws and the camera. */
@@ -603,7 +642,18 @@ export class Tiger {
   private bobRoll = 0
   /** Height of the eye above the ground under it, bob and all. */
   private eyeAbove = TIGER.eyeHeight
-  private landImpact = 0
+  /**
+   * The ground the eye is carried over, and the reference the paws are placed
+   * against. Not pos.y: it is the terrain run through the leg spring, so the
+   * bilinear height field's corners never reach the view. See TIGER.legSpring.
+   */
+  private eyeGround = 0
+  /** Terrain height under the tiger this frame, and its smoothed self. */
+  private groundY = 0
+  private groundSmooth = 0
+  /** The landing spring: how far the eye is pushed down, and how fast. */
+  private dip = 0
+  private dipVel = 0
   private camShake = 0
   private shakeTime = 0
   private recoilY = 0
@@ -651,6 +701,7 @@ export class Tiger {
 
   constructor(readonly camera: THREE.PerspectiveCamera, private world: World) {
     this.pos.y = terrainHeight(this.pos.x, this.pos.z)
+    this.groundY = this.groundSmooth = this.eyeGround = this.pos.y
     this.buildViewmodel()
     camera.add(this.vm)
   }
@@ -938,12 +989,16 @@ export class Tiger {
    * rolls by up to fifteen centimetres over the metre and three quarters between
    * the tiger's eye and its paws, so on any slope one foot hangs in clear air
    * while the other is buried to the wrist.
+   *
+   * Measured against `eyeGround` rather than pos.y, because that is what the
+   * camera is placed off — the two have to use the same reference or the feet
+   * float by whatever the leg spring is absorbing.
    */
   private slopeAt(side: -1 | 1): number {
     const ahead = -PAW.z
     const px = this.pos.x - Math.sin(this.yaw) * ahead + Math.cos(this.yaw) * side * PAW.x
     const pz = this.pos.z - Math.cos(this.yaw) * ahead - Math.sin(this.yaw) * side * PAW.x
-    return clamp(terrainHeight(px, pz) - this.pos.y, -0.45, 0.45)
+    return clamp(terrainHeight(px, pz) - this.eyeGround, -0.45, 0.45)
   }
 
   /**
@@ -957,8 +1012,8 @@ export class Tiger {
   private gaitPose(side: -1 | 1, pos: THREE.Vector3, rot: THREE.Vector3) {
     // Left leads; the right is offset by however alternating the gait currently is.
     const phase = this.gaitPhase + (side === 1 ? this.pairPhase : 0)
-    const reach = stride(phase) * this.gaitAmp
-    const air = lift(phase) * this.gaitAmp
+    const reach = stride(phase, this.gaitDuty) * this.gaitAmp
+    const air = lift(phase, this.gaitDuty) * this.gaitAmp
     const ground = -this.eyeAbove + this.slopeAt(side)
     const tuck = this.airBlend
     // Asymmetry — see PAW.stagger. Not simply +/-: an equal and opposite offset is
@@ -1125,12 +1180,24 @@ export class Tiger {
     this.camShake = Math.max(0, this.camShake - dt * 2.4)
     this.shakeTime += dt
     this.recoilY = damp(this.recoilY, 0, 9, dt)
-    this.landImpact = damp(this.landImpact, 0, 9, dt)
     this.hitStop = Math.max(0, this.hitStop - dt)
     this.impact = damp(this.impact, 0, 11, dt)
+
+    // The landing spring. Critically damped, and integrated semi-implicitly so it
+    // cannot gain energy at a long frame: velocity first, then position off the
+    // velocity we just solved. The eye's *velocity* is what an impact changes —
+    // subtracting a height on the contact frame, which is what this replaces, is
+    // a teleport.
+    const w = TIGER.dipFreq
+    this.dipVel -= (w * w * this.dip + 2 * w * this.dipVel) * dt
+    this.dip += this.dipVel * dt
+
     // Off the ground the forelegs stop striding and reach: a pouncing cat throws
     // both front feet out ahead of itself and holds them there until it lands.
-    this.airBlend = damp(this.airBlend, this.grounded ? 0 : 1, 7, dt)
+    // Gated on having been airborne a moment, because the pose is far too big to
+    // enter over a bump — see TIGER.airGrace.
+    this.airTime = this.grounded ? 0 : this.airTime + dt
+    this.airBlend = damp(this.airBlend, this.airTime > TIGER.airGrace ? 1 : 0, 7, dt)
 
     if (this.clawBlood > 0) {
       this.clawBlood = Math.max(0, this.clawBlood - dt / TIGER.clawBloodTime)
@@ -1174,15 +1241,30 @@ export class Tiger {
     const wantX = (fwdX * axis.z + rightX * axis.x) * target
     const wantZ = (fwdZ * axis.z + rightZ * axis.x) * target
 
-    const control = this.grounded ? 1 : TIGER.airControl
-    const accel = TIGER.accel * control * dt
-    this.vel.x += (wantX - this.vel.x) * Math.min(1, accel / Math.max(1, target))
-    this.vel.z += (wantZ - this.vel.z) * Math.min(1, accel / Math.max(1, target))
-
-    if (this.grounded && axis.x === 0 && axis.z === 0) {
-      const f = Math.max(0, 1 - TIGER.friction * dt)
-      this.vel.x *= f
-      this.vel.z *= f
+    // A force, not a lerp. The error between the velocity we have and the one we
+    // want is chased at a capped acceleration, easing off inside `knee` of the
+    // target so the arrival has no corner in it. Acceleration is therefore
+    // continuous everywhere, including the frame the key goes down, the frame it
+    // comes up, and the frame the target flips through a direction change — the
+    // error is a vector, so a reversal is just a long way to go, not a special case.
+    //
+    // The old form was `min(1, accel*dt/target)` with a second friction multiply
+    // stacked on top when the stick was neutral, and the two together took
+    // 1.7 m/s out of the tiger in a single frame — 103 m/s², ten gravities. The
+    // exponential that briefly replaced it was no better at the top: chasing
+    // 6.2 m/s from rest at rate 7 is 43 m/s² on the first frame. Nothing that
+    // reads speed, least of all the gait clock, stays smooth across either.
+    const moving = axis.x !== 0 || axis.z !== 0
+    const ex = wantX - this.vel.x
+    const ez = wantZ - this.vel.z
+    const err = Math.hypot(ex, ez)
+    if (err > 1e-6) {
+      const cap = (moving ? TIGER.accelForce : TIGER.brakeForce) * (this.grounded ? 1 : TIGER.airControl)
+      const knee = moving ? TIGER.accelKnee : TIGER.brakeKnee
+      // Never step past the target: at 20 fps a full-force frame is 0.7 m/s.
+      const dv = Math.min(err, cap * Math.min(1, err / knee) * dt)
+      this.vel.x += (ex / err) * dv
+      this.vel.z += (ez / err) * dv
     }
 
     // Pounce.
@@ -1198,9 +1280,12 @@ export class Tiger {
       }
       this.vel.y = TIGER.pounceUp + Math.max(0, dir.y) * 5
       this.grounded = false
+      this.airTime = TIGER.airGrace + 1 // a leap is a leap from the first frame
       this.pouncing = true
       this.pounceEvent = true
-      this.recoilY = -0.09
+      // Through the spring rather than straight onto the eye: the coil is a shove
+      // downward on the head, not an instant nine centimetres of it.
+      this.dipVel += TIGER.pounceDip
     }
 
     // Gravity + integrate.
@@ -1231,15 +1316,22 @@ export class Tiger {
 
     // Ground.
     const gy = terrainHeight(this.pos.x, this.pos.z)
+    this.groundY = gy
     if (this.pos.y <= gy) {
       if (!this.grounded) {
-        this.landImpact = Math.min(0.4, Math.abs(this.vel.y) * 0.018)
+        // The impact, as an initial velocity for the spring in updateTimers.
+        this.dipVel += Math.min(TIGER.landDipMax, Math.abs(this.vel.y) * TIGER.landDipTake)
         this.landedEvent = true
         this.pouncing = false
       }
       this.pos.y = gy
       this.vel.y = 0
       this.grounded = true
+    } else if (this.grounded && this.vel.y <= 0 && this.pos.y - gy <= TIGER.stepDown) {
+      // Ground that fell away underneath a foot that is still on it. Follow it
+      // down instead of going ballistic for three frames — see TIGER.stepDown.
+      this.pos.y = gy
+      this.vel.y = 0
     } else if (this.pos.y > gy + 0.06) {
       this.grounded = false
     }
@@ -1248,44 +1340,67 @@ export class Tiger {
   }
 
   /**
-   * The gait clock: how fast the legs are cycling, how far they are reaching, and
-   * how much they are alternating.
+   * The gait clock: how far the legs are reaching, how long they hold the ground,
+   * and how far round the stride they are.
    *
-   * All three are damped rather than switched, which is most of what the run was
-   * missing. Amplitude ramping in and out is what starts and stops the walk — the
-   * phase itself is never touched, so slowing to a halt settles the feet where
-   * they are instead of rewinding them through the stride.
+   * The clock is advanced by *ground covered*, not by a cadence read off the
+   * speedometer, and that one change is what makes the whole thing hold together:
+   *
+   *   - the planted foot is stuck to the world by construction rather than by
+   *     coincidence, at any speed and through any acceleration, because both it
+   *     and the phase are driven by the same displacement;
+   *   - the cadence falls out correct — strideLength grows as speed^0.7, so
+   *     cadence takes speed^0.3 — instead of being a second curve that has to be
+   *     kept in agreement with the first;
+   *   - it reaches zero exactly when the tiger does, with no threshold to cross.
+   *     The old `speed > 0.35` gate stopped the clock dead while the amplitude was
+   *     still 1.46, which put a corner in the head bob's velocity every time the
+   *     player let go of the stick.
+   *
+   * Nothing here is switched on a state. Amplitude ramping in and out is what
+   * starts and stops the walk, and the phase is never rewound.
    */
   private updateGait(dt: number) {
     const speed = Math.hypot(this.vel.x, this.vel.z)
-    const moving = this.grounded && speed > 0.35
+    const pace = speed / TIGER.walkSpeed
 
-    // Reach. Full stride by about a third of walking pace, and half again as long
-    // at a sprint, so going faster is partly a longer stride and not only a
-    // quicker one — tying cadence straight to speed is what made a sprint read as
-    // a wind-up toy running down.
-    const want = moving ? clamp(speed / (TIGER.walkSpeed * 0.6), 0, 1.5) : 0
-    this.gaitAmp = damp(this.gaitAmp, want, 8, dt)
+    // Reach. Saturates at 1 rather than 1.5: PAW.stride is already the limb's
+    // reach, so there is nothing left to give above walking pace and the extra
+    // ground has to be bought with cadence and a shorter contact instead. The old
+    // curve hit its 1.5 clamp at 0.9 of walkSpeed, so a walk and a flat sprint
+    // reached identically far and the walk was doing it 50% past the limb's reach.
+    //
+    // Off the ground the reach folds away into the pounce tuck instead.
+    const want = clamp(Math.pow(pace, 0.55), 0, 1) * (1 - this.airBlend)
+    this.gaitAmp = damp(this.gaitAmp, want, 10, dt)
 
-    if (moving) {
-      const cadence = CAMERA.strideRate * Math.pow(speed / TIGER.walkSpeed, 0.7)
-      this.gaitPhase = (this.gaitPhase + cadence * dt) % 2
-    }
+    // The animal's own stride length, which is the only thing the clock needs.
+    const strideLen = Math.max(0.05, (TIGER.walkSpeed / CAMERA.strideRate) * Math.pow(pace, CAMERA.strideGrowth))
+    this.gaitPhase = (this.gaitPhase + (speed * dt) / strideLen) % 2
+
+    // Contact, as the fraction of that stride the sweep can actually cover.
+    this.gaitDuty = clamp((2 * PAW.stride * this.gaitAmp) / strideLen, DUTY_MIN, DUTY_MAX)
 
     // A walking cat moves its forefeet alternately; a bounding one reaches with
-    // both together and lands on them together. Interpolated by speed, and damped
-    // so a sudden sprint slides one foot into step rather than teleporting it.
+    // both together and lands on them together. Interpolated by speed — and moved
+    // only while the trailing foot is off the ground, because re-timing a foot that
+    // is standing on something drags it across the dirt: at the old flat rate of 4
+    // the sprint transition alone slid it a metre a second.
     const bound = clamp(
       (speed - TIGER.walkSpeed) / (TIGER.sprintSpeed - TIGER.walkSpeed), 0, 1,
     )
-    this.pairPhase = damp(this.pairPhase, 0.5 - bound * 0.34, 4, dt)
+    const rightPhase = this.gaitPhase + this.pairPhase
+    if (rightPhase - Math.floor(rightPhase) > this.gaitDuty) {
+      this.pairPhase = damp(this.pairPhase, 0.5 - bound * 0.34, 6, dt)
+    }
 
     // Footsteps fire on the plant, so the sound is on the frame the paw touches
     // the ground. The old distance counter drifted out of step with the legs
     // within a couple of strides of any change of pace.
+    const striding = this.grounded && this.gaitAmp > 0.25
     const beat = Math.floor(this.gaitPhase * 2)
-    if (moving && beat !== this.lastBeat && this.lastBeat >= 0) this.footstepEvent = true
-    this.lastBeat = moving ? beat : -1
+    if (striding && beat !== this.lastBeat && this.lastBeat >= 0) this.footstepEvent = true
+    this.lastBeat = striding ? beat : -1
   }
 
   private updateActions(input: Input) {
@@ -1354,7 +1469,12 @@ export class Tiger {
         }
         this.place(paw, side, poseP, poseR)
       }
-      this.recoilY = -Math.sin(t * Math.PI) * 0.075
+      // A quartic hump rather than a half sine: `sin(pi t)` leaves zero with a
+      // slope, so the eye picked up 0.56 m/s of downward velocity on the frame
+      // the bite started and lost it again on the frame it ended. This peaks at
+      // exactly the same depth but starts and ends at rest.
+      const h = t * (1 - t)
+      this.recoilY = -0.075 * 16 * h * h
     } else {
       const left = this.pawState === 'swipeL'
       const paw = left ? this.pawL : this.pawR
@@ -1372,7 +1492,11 @@ export class Tiger {
       if (t < 0.24) {
         // Wind up, out of whatever the legs are already doing.
         this.gaitPose(side, poseP2, poseR2)
-        const e = Math.sin((t / 0.24) * Math.PI * 0.5)
+        // Smoothstep, not an ease-out: an ease-out leaves the gait pose at full
+        // speed, so a swipe thrown mid-stride began with the foot snapping off
+        // whatever it was doing. Both ends of this are at rest, and the drive
+        // that follows also starts at rest, so the whole chain is C1.
+        const e = smoothstep(t / 0.24)
         poseP.set(side * (PAW.x + 0.14), ground + 0.42, PAW.z + 0.44)
         poseR.set(PAW.pitch + 0.42, -side * (PAW.yaw + 0.30), -side * (PAW.roll + 0.28))
         keyP.copy(poseP); keyR.copy(poseR)
@@ -1411,13 +1535,20 @@ export class Tiger {
       // plants its far foot and shoves off it. Freezing it — which is what the
       // old brace did — stopped the animal dead underneath the swing.
       this.gaitPose(otherSide, poseP2, poseR2)
-      const brace = Math.sin(clamp(t / 0.6, 0, 1) * Math.PI) * 0.5
+      // Same reason as the bite's recoil: a half sine over 0..0.6 both enters and
+      // leaves with slope, and the leaving end lands right in the middle of the
+      // stroke where the far foot is supposed to be carrying the weight.
+      const u = clamp(t / 0.6, 0, 1)
+      const brace = 8 * (u * (1 - u)) ** 2
       poseP2.z -= brace * 0.10
       poseR2.x += brace * 0.12
       this.place(other, otherSide, poseP2, poseR2)
 
-      const driveE = clamp((t - 0.24) / 0.28, 0, 1)
-      this.recoilY = -driveE * 0.045 + clamp((t - 0.52) / 0.48, 0, 1) * 0.02
+      // Down through the drive and back up as the foot comes through. Both halves
+      // are smoothsteps so the head is at rest at t=0, at the contact and at the
+      // hand-back to the gait; the old pair of linear ramps put a step in the
+      // eye's velocity at all three.
+      this.recoilY = -0.045 * (t < 0.52 ? smoothstep(t / 0.52) : 1 - smoothstep((t - 0.52) / 0.48))
     }
 
     if (t >= 1) this.pawState = 'idle'
@@ -1525,26 +1656,39 @@ export class Tiger {
    * `pow( max( sin, 0 ), 0.6 )`, which has an infinite slope where it leaves zero
    * — a corner in the camera's vertical velocity twice per stride, and a good part
    * of what read as jank in the run. Phase offsets do the same shaping job without
-   * the kink: the head is lowest just after a forefoot plants and highest through
-   * the swing, and the nose pitches down into the landing.
+   * the kink.
+   *
+   * The offsets are keyed off the plant, which is phase 0. The head is lowest a
+   * little way into the contact and highest at the top of the suspension between
+   * strides, and the nose pitches down into the plant itself. They had to move when
+   * the duty factor did: at the old 0.62 an offset of 1.9 rad put the low point
+   * inside the contact, but with contact now less than a third of the stride the
+   * same number put it out in mid-air, and a head that dips while the animal is
+   * airborne reads as a spring in the neck rather than weight on a leg.
    */
   private updateBound(dt: number) {
     const targetEye = this.crouching ? TIGER.crouchEyeHeight : TIGER.eyeHeight
     this.eyeY = damp(this.eyeY, targetEye, 12, dt)
 
+    // The legs, absorbing the height field's corners. Only the view uses this;
+    // pos.y stays exactly on the terrain. See TIGER.legSpring, and note the fade:
+    // in the air the body is ballistic and there is no leg to spring.
+    this.groundSmooth = damp(this.groundSmooth, this.groundY, TIGER.legSpring, dt)
+    this.eyeGround = this.pos.y + (this.groundSmooth - this.groundY) * (1 - this.airBlend)
+
     const w = this.gaitPhase * Math.PI * 2
     const amp = this.gaitAmp
-    this.bobY = Math.sin(w + 1.9) * CAMERA.boundAmp * amp
-    this.bobPitch = -Math.sin(w + 0.6) * CAMERA.boundPitch * amp
+    // Low a sixth of a stride after the plant, i.e. through the middle of contact.
+    this.bobY = Math.sin(w + 3.77) * CAMERA.boundAmp * amp
+    this.bobPitch = -Math.sin(w + 1.07) * CAMERA.boundPitch * amp
     // Half rate: a quadruped's shoulders roll once per *pair* of strides, and 2 is
     // exactly where gaitPhase wraps, so this stays continuous across the wrap.
     this.bobX = Math.sin(w * 0.5) * CAMERA.swayAmp * amp
     this.bobRoll = Math.sin(w * 0.5 + 1.2) * CAMERA.boundRoll * amp
-    this.eyeAbove = this.eyeY + this.bobY + this.recoilY - this.landImpact
+    this.eyeAbove = this.eyeY + this.bobY + this.recoilY - this.dip
   }
 
   private updateCamera(dt: number) {
-    const bobY = this.bobY
     const bobPitch = this.bobPitch
     const bobX = this.bobX
     const bobRoll = this.bobRoll
@@ -1560,10 +1704,17 @@ export class Tiger {
     // impact is felt in the world rather than only in the arm.
     this.lookDir(lunge).multiplyScalar(this.impact)
 
+    // Sway and shake go along the tiger's own right, not along world x. They used
+    // to be added straight to pos.x with the z axis getting `shakeY * 0.2`, which
+    // meant the shoulder sway turned into a fore-and-aft lurch whenever the animal
+    // happened to be facing along x, and the shake ran on a fixed world diagonal.
+    const rx = Math.cos(this.yaw)
+    const rz = -Math.sin(this.yaw)
+    const lateral = bobX + shakeX
     this.camera.position.set(
-      this.pos.x + bobX * 0.35 + shakeX + lunge.x,
-      this.pos.y + this.eyeY + bobY + this.recoilY - this.landImpact + shakeY + lunge.y,
-      this.pos.z + shakeY * 0.2 + lunge.z,
+      this.pos.x + rx * lateral + lunge.x,
+      this.eyeGround + this.eyeAbove + shakeY + lunge.y,
+      this.pos.z + rz * lateral + lunge.z,
     )
     this.camera.rotation.set(
       this.pitch + bobPitch + shakeY * 0.4 - this.impact * 2.2,
@@ -1605,12 +1756,21 @@ export class Tiger {
     this.pawState = 'idle'
     this.gaitPhase = 0
     this.gaitAmp = 0
+    this.gaitDuty = DUTY_MAX
     this.pairPhase = 0.5
+    this.grounded = true
+    this.pouncing = false
+    this.airTime = 0
     this.airBlend = 0
     this.lastBeat = -1
     this.bobY = this.bobPitch = this.bobX = this.bobRoll = 0
+    this.recoilY = 0
+    this.dip = this.dipVel = 0
     this.eyeY = TIGER.eyeHeight
     this.eyeAbove = TIGER.eyeHeight
+    // The leg spring has to start relaxed, or the first frame after a respawn
+    // carries the old ground height and drops the view a metre at 14/s.
+    this.groundY = this.groundSmooth = this.eyeGround = this.pos.y
     this.resetPaws()
   }
 }
