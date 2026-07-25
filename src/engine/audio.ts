@@ -640,15 +640,31 @@ export class Audio {
     g.setTargetAtTime(AUDIO.music, t + AUDIO.duckAttack * 3, AUDIO.duckRelease)
   }
 
-  /** Ears ring and the world goes muddy for a beat. Used when the tiger is hit. */
+  /**
+   * Ears ring and the world goes muddy for a beat. Used when the tiger is hit.
+   *
+   * A hit that lands while you are still reeling does not put you back where
+   * the first one did. Retriggering at full depth on every round is what let a
+   * late wave — where hits arrive faster than the recovery takes — park the
+   * whole mix under a 4 kHz lowpass and simply leave it there. This filter sits
+   * on the master, so what it was erasing was the crack and the air of the very
+   * rifles shooting at you: the mix went dead exactly when it had the most to
+   * say, and it stayed dead for as long as the shooting lasted.
+   *
+   * Scaling each new hit by how fogged things already are converges instead of
+   * sinking. Sustained fire now holds you moderately dulled rather than
+   * progressively deafened, and one hit out of the blue still lands hard.
+   */
   private concuss(amount: number) {
     const ctx = this.ctx
     if (!ctx || !this.muffle) return
     const t = ctx.currentTime
     const f = this.muffle.frequency
+    const already = Math.max(0, Math.min(1, 1 - f.value / 20000))
+    const depth = Math.max(already, Math.min(0.72, amount * (1 - already * 0.55)))
     f.cancelScheduledValues(t)
-    f.setValueAtTime(Math.max(500, 20000 * (1 - amount)), t)
-    f.exponentialRampToValueAtTime(20000, t + 0.35 + amount * 0.5)
+    f.setValueAtTime(Math.max(1200, 20000 * (1 - depth)), t)
+    f.exponentialRampToValueAtTime(20000, t + 0.3 + depth * 0.55)
   }
 
   // ---------------------------------------------------------------- sounds
