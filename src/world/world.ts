@@ -12,40 +12,150 @@ import * as THREE from 'three'
 import { COLORS, SKY, WORLD } from '../config'
 import { fbm, Rng } from '../engine/rng'
 import { buildBushes, buildGrass, buildTrees, type GrassPatch } from './flora'
-import { surface, terrainMaterial, TERRAIN_SIZE } from './materials'
+import type { ChunkedScatter } from './scatter'
+import { surface, terrainMaterial } from './materials'
+import { terrainHeight, terrainNormal, TERRAIN_SIZE } from './terrain'
 import { textures } from './textures'
 import { buildVillage } from './village'
 import { updateWind } from './wind'
 
-export interface CircleCollider {
-  kind: 'circle'
+interface ColliderBase {
   x: number
   z: number
-  r: number
   /** How tall it is — the tiger can pounce over short things. */
   h: number
+  /**
+   * Ground height under the collider, cached at build time. `resolve` tests it
+   * for every collider near every entity every frame; evaluating the height
+   * field there was one of the largest single costs in the simulation.
+   */
+  gy?: number
 }
-export interface BoxCollider {
+export interface CircleCollider extends ColliderBase {
+  kind: 'circle'
+  r: number
+}
+export interface BoxCollider extends ColliderBase {
   kind: 'box'
-  x: number
-  z: number
   hw: number
   hd: number
   rot: number
-  h: number
 }
 export type Collider = CircleCollider | BoxCollider
 
 export type { GrassPatch }
+export { terrainHeight, terrainNormal }
 
-/** Terrain height at a world position. Deterministic, cheap, no lookups. */
-export function terrainHeight(x: number, z: number): number {
-  const big = fbm(x * 0.0085, z * 0.0085, 3) * 3.4
-  const small = fbm(x * 0.05 + 40, z * 0.05 - 20, 2) * 0.45
-  // Flatten the village bowl in the middle so huts sit properly.
-  const d = Math.hypot(x, z)
-  const flatten = THREE.MathUtils.smoothstep(d, 18, 62)
-  return (big + small) * flatten
+/**
+ * Uniform grid over the static colliders.
+ *
+ * Both hot queries — "push this circle out of anything it overlaps" and "is the
+ * line between these two points blocked" — were linear scans over every
+ * collider in the world. With fifty humans and the tiger each resolving three
+ * iterations a frame that was tens of thousands of collider tests per frame for
+ * a handful of real overlaps. A 12 m grid turns both into a look at the two or
+ * three cells that can possibly matter.
+ */
+class ColliderGrid {
+  private static readonly CELL = 12
+  private cells = new Map<number, number[]>()
+  /** Per-query stamp, so a collider spanning several cells is tested once. */
+  private stamp: Int32Array = new Int32Array(0)
+  private tick = 0
+
+  constructor(private list: Collider[]) {}
+
+  private static key(cx: number, cz: number) {
+    return (cx + 1024) * 4096 + (cz + 1024)
+  }
+
+  /** Rebuild after all the world's builders have finished adding colliders. */
+  build() {
+    const C = ColliderGrid.CELL
+    this.cells.clear()
+    this.stamp = new Int32Array(this.list.length)
+    for (let i = 0; i < this.list.length; i++) {
+      const c = this.list[i]!
+      c.gy = terrainHeight(c.x, c.z)
+      const rad = c.kind === 'circle' ? c.r : Math.hypot(c.hw, c.hd)
+      const x0 = Math.floor((c.x - rad) / C)
+      const x1 = Math.floor((c.x + rad) / C)
+      const z0 = Math.floor((c.z - rad) / C)
+      const z1 = Math.floor((c.z + rad) / C)
+      for (let cx = x0; cx <= x1; cx++) {
+        for (let cz = z0; cz <= z1; cz++) {
+          const k = ColliderGrid.key(cx, cz)
+          let bucket = this.cells.get(k)
+          if (!bucket) this.cells.set(k, (bucket = []))
+          bucket.push(i)
+        }
+      }
+    }
+  }
+
+  /** Start a fresh query; every `visit` after this dedupes against it. */
+  private begin() {
+    this.tick++
+  }
+
+  private visit(i: number): boolean {
+    if (this.stamp[i] === this.tick) return false
+    this.stamp[i] = this.tick
+    return true
+  }
+
+  /** Every collider whose cell overlaps the disc, each yielded once. */
+  near(x: number, z: number, radius: number, fn: (c: Collider) => void) {
+    const C = ColliderGrid.CELL
+    this.begin()
+    const x0 = Math.floor((x - radius) / C)
+    const x1 = Math.floor((x + radius) / C)
+    const z0 = Math.floor((z - radius) / C)
+    const z1 = Math.floor((z + radius) / C)
+    for (let cx = x0; cx <= x1; cx++) {
+      for (let cz = z0; cz <= z1; cz++) {
+        const bucket = this.cells.get(ColliderGrid.key(cx, cz))
+        if (!bucket) continue
+        for (const i of bucket) if (this.visit(i)) fn(this.list[i]!)
+      }
+    }
+  }
+
+  /**
+   * Every collider in a cell the segment passes through. Walks the line in
+   * half-cell steps rather than doing a proper DDA — the segments here are tens
+   * of metres over 12 m cells, so this is a dozen map lookups either way and
+   * stepping is far less code to get wrong.
+   */
+  along(ax: number, az: number, bx: number, bz: number, fn: (c: Collider) => boolean): boolean {
+    const C = ColliderGrid.CELL
+    this.begin()
+    const dx = bx - ax
+    const dz = bz - az
+    const len = Math.hypot(dx, dz)
+    const steps = Math.ceil(len / (C * 0.5)) + 1
+    let lastKey = NaN
+    for (let s = 0; s <= steps; s++) {
+      const t = s / steps
+      const px = ax + dx * t
+      const pz = az + dz * t
+      const cx = Math.floor(px / C)
+      const cz = Math.floor(pz / C)
+      // Neighbours too: a collider centred in the next cell can still bulge
+      // across the line, and missing those makes cover flicker.
+      for (let ox = -1; ox <= 1; ox++) {
+        for (let oz = -1; oz <= 1; oz++) {
+          const k = ColliderGrid.key(cx + ox, cz + oz)
+          if (k === lastKey) continue
+          const bucket = this.cells.get(k)
+          if (!bucket) continue
+          for (const i of bucket) if (this.visit(i) && fn(this.list[i]!)) return true
+        }
+      }
+      lastKey = ColliderGrid.key(cx, cz)
+    }
+    return false
+  }
 }
 
 export class World {
@@ -62,6 +172,9 @@ export class World {
   private decals: THREE.Mesh[] = []
   private decalPool = 0
   private rng = new Rng(20260725)
+  private grid = new ColliderGrid(this.colliders)
+  /** Every chunked foliage field, culled and retuned together. */
+  private fields: ChunkedScatter[] = []
 
   constructor(scene: THREE.Scene) {
     this.buildTerrain()
@@ -84,19 +197,27 @@ export class World {
       clearOf: (x: number, z: number, pad: number) => this.clearOf(x, z, pad),
       colliders: this.colliders,
     }
-    this.group.add(buildTrees(flora))
+    this.fields.push(...buildTrees(flora))
     this.buildRocks()
-    this.group.add(buildBushes(flora))
+    this.fields.push(buildBushes(flora))
 
     const grass = buildGrass(flora)
     this.grassPatches.push(...grass.patches)
     this.spawnPoints.push(...grass.centres)
-    this.group.add(grass.tall, grass.cover)
+    this.fields.push(grass.tall, grass.cover)
+    for (const f of this.fields) this.group.add(f.group)
 
     this.buildBoundaryCliffs()
     this.buildHorizon()
     this.buildDecalPool()
+    // Colliders are complete only now, so index them last.
+    this.grid.build()
     scene.add(this.group)
+  }
+
+  /** Quality tiers pull every foliage field's draw distance in together. */
+  setFoliageDistance(scale: number) {
+    for (const f of this.fields) f.setDistanceScale(scale)
   }
 
   // -------------------------------------------------------------- terrain
@@ -237,7 +358,10 @@ export class World {
     for (let v = 0; v < VARIANTS; v++) {
       const count = Math.min(per, total - v * per)
       const mesh = new THREE.InstancedMesh(cliffGeo(v * 31.7 + 3), mat, count)
-      mesh.castShadow = true
+      // Deliberately not a shadow caster. The ring is 205k triangles sitting
+      // outside the playable area, so every one of them was being rasterised
+      // into the shadow map to darken ground the player can never stand on.
+      mesh.castShadow = false
       mesh.receiveShadow = true
       mesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(count * 3), 3)
 
@@ -404,6 +528,7 @@ export class World {
   }
 
   // ------------------------------------------------------------- queries
+  /** Build-time only — runs before the grid is indexed, so it stays linear. */
   private clearOf(x: number, z: number, pad: number): boolean {
     for (const c of this.colliders) {
       const r = c.kind === 'circle' ? c.r : Math.max(c.hw, c.hd)
@@ -431,8 +556,10 @@ export class World {
     let hit = false
     for (let iter = 0; iter < 3; iter++) {
       let moved = false
-      for (const c of this.colliders) {
-        if (feetY > terrainHeight(c.x, c.z) + c.h) continue // pounced clean over it
+      // Nothing further than the entity's radius plus the largest prop can
+      // matter, and the grid only hands back what shares a cell with that disc.
+      this.grid.near(x, z, radius + 4, (c) => {
+        if (feetY > c.gy! + c.h) return // pounced clean over it
         if (c.kind === 'circle') {
           const dx = x - c.x
           const dz = z - c.z
@@ -464,7 +591,7 @@ export class World {
             moved = hit = true
           }
         }
-      }
+      })
       if (!moved) break
     }
     // Valley wall.
@@ -485,17 +612,16 @@ export class World {
     if (len < 0.001) return false
     const ux = dx / len
     const uz = dz / len
-    for (const c of this.colliders) {
+    return this.grid.along(ax, az, bx, bz, (c) => {
+      if (c.h < 1.2) return false // low things don't block sight
       const r = c.kind === 'circle' ? c.r : Math.hypot(c.hw, c.hd) * 0.8
-      if (c.h < 1.2) continue // low things don't block sight
       // Closest approach of the segment to the collider centre.
       const t = (c.x - ax) * ux + (c.z - az) * uz
-      if (t < 0 || t > len) continue
+      if (t < 0 || t > len) return false
       const px = ax + ux * t
       const pz = az + uz * t
-      if (Math.hypot(px - c.x, pz - c.z) < r) return true
-    }
-    return false
+      return Math.hypot(px - c.x, pz - c.z) < r
+    })
   }
 
   /** A random navigable spot at least `minR` out. */
@@ -513,7 +639,10 @@ export class World {
   update(dt: number, time: number, viewer?: THREE.Vector3) {
     updateWind(time)
 
-    if (viewer) this.horizon.position.set(viewer.x, 0, viewer.z)
+    if (viewer) {
+      this.horizon.position.set(viewer.x, 0, viewer.z)
+      for (const f of this.fields) f.update(viewer.x, viewer.z)
+    }
 
     for (const f of this.fireLights) {
       f.light.intensity = f.base * (0.72 + Math.abs(fbm(time * 2.4 + f.phase, f.phase, 2)) * 0.85)

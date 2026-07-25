@@ -275,7 +275,9 @@ export const POST = {
    *  brightness in the 0..4 range, so this is close to a direct multiplier. */
   godrayStrength: 0.22,
   godrayDecay: 0.955,
-  godraySamples: 48,
+  // 48 taps cost a full-screen dependent-texture-read pass per tap and are
+  // indistinguishable from 28 once the decay curve is this steep.
+  godraySamples: 28,
   /** Final grade. */
   vignette: 0.42,
   grain: 0.032,

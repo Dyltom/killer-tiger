@@ -1,8 +1,12 @@
 /**
  * Trees, scrub and grass.
  *
- * Everything here is an InstancedMesh built once at load. The visual jump over
- * the first pass comes from three changes:
+ * Everything here is instanced and built once at load, split across a grid of
+ * chunks (see scatter.ts) so the renderer can throw away whole cells before
+ * shading anything. That is what makes the density affordable: the ground-cover
+ * field carries over a hundred thousand tufts and draws around eight thousand.
+ *
+ * The look rests on three things:
  *
  *   - canopies are alpha cut-out cards scattered through a crown volume, not a
  *     solid icosahedron. A silhouette with holes in it is the single biggest
@@ -10,14 +14,12 @@
  *   - a second, much denser layer of short grass covers the ground everywhere,
  *     so the terrain texture is never the outermost thing you see; and
  *   - all of it moves, with a travelling gust rather than per-plant jitter.
- *
- * The ground layer only exists near the camera — addDistanceFade collapses it
- * before it becomes 14,000 quads of overdraw at the horizon.
  */
 import * as THREE from 'three'
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
 import { WORLD } from '../config'
 import { Rng } from '../engine/rng'
+import { ChunkedScatter } from './scatter'
 import { surface } from './materials'
 import { textures } from './textures'
 import { addDistanceFade, addTranslucency, addWind } from './wind'
@@ -126,10 +128,12 @@ function compose(x: number, y: number, z: number, rx: number, ry: number, rz: nu
   return M.compose(P, Q, S)
 }
 
-/** Park an unused instance somewhere it will never be drawn. */
-function hide(mesh: THREE.InstancedMesh, from: number) {
-  const m = compose(0, -9999, 0, 0, 0, 0, 1e-4, 1e-4, 1e-4)
-  for (let i = from; i < mesh.count; i++) mesh.setMatrixAt(i, m)
+/** Every chunked field, so the world can cull and retune them together. */
+export interface FloraFields {
+  trees: ChunkedScatter[]
+  bushes: ChunkedScatter
+  tallGrass: ChunkedScatter
+  groundCover: ChunkedScatter
 }
 
 // ------------------------------------------------------------------- trees
@@ -145,15 +149,24 @@ function hide(mesh: THREE.InstancedMesh, from: number) {
  * A real canopy is lumpy — dense masses of foliage with daylight between them —
  * and you get that by concentrating the same cards into a handful of clusters
  * anchored to branches you can actually see.
+ *
+ * Down from 88 now that the cards are chunk-culled: the crowns that survive the
+ * cull are drawn at full density, and the ones behind you cost nothing, so the
+ * budget buys silhouette where it is visible instead of everywhere at once.
  */
-const CARDS_PER_TREE = 88
+const CARDS_PER_TREE = 72
 const BRANCHES_PER_TREE = 8
 const CARDS_PER_LIMB = CARDS_PER_TREE / BRANCHES_PER_TREE
 
-export function buildTrees(ctx: FloraContext): THREE.Group {
+/** Trees are large; a chunk has to be big enough not to fragment a treeline. */
+const TREE_CELL = 40
+const SHRUB_CELL = 32
+const GRASS_CELL = 26
+const COVER_CELL = 20
+
+export function buildTrees(ctx: FloraContext): ChunkedScatter[] {
   const { rng } = ctx
   const tex = textures()
-  const group = new THREE.Group()
   const n = WORLD.trees
 
   // ---- geometry
@@ -172,9 +185,7 @@ export function buildTrees(ctx: FloraContext): THREE.Group {
   // ---- materials
   // Repeats are set from the real size of the thing they're on. The bark set is
   // about a metre across, and these trunks run 5-12 m tall on a ~1.3 m
-  // circumference, so 2 x 7 puts the plates at life size. At the 2 x 3 this used
-  // to be, one bark tile stretched over four metres of trunk and the trees read
-  // as smooth peeled poles.
+  // circumference, so 2 x 7 puts the plates at life size.
   const barkMat = surface('bark', { repeat: [2, 7], roughness: 1, normalScale: 1.3 })
   const branchMat = surface('bark', { repeat: [2, 3], roughness: 1, normalScale: 1.3 })
   const flareMat = surface('bark', { repeat: [2, 1], roughness: 1, color: 0x9a8b76 })
@@ -184,21 +195,12 @@ export function buildTrees(ctx: FloraContext): THREE.Group {
   // should read as a lantern, not a black stencil.
   addTranslucency(leafMat, 0.85, 2.6)
 
-  const trunks = new THREE.InstancedMesh(trunkGeo, barkMat, n)
-  const flares = new THREE.InstancedMesh(flareGeo, flareMat, n)
-  const branches = new THREE.InstancedMesh(branchGeo, branchMat, n * BRANCHES_PER_TREE)
-  const cards = new THREE.InstancedMesh(cardGeo, leafMat, n * CARDS_PER_TREE)
-  for (const m of [trunks, flares, branches, cards]) {
-    m.castShadow = true
-    m.receiveShadow = true
-    m.frustumCulled = false
-  }
-  // Cards get their own tint per tree so the treeline isn't one flat green.
-  cards.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(n * CARDS_PER_TREE * 3), 3)
+  const trunks = new ChunkedScatter(TREE_CELL)
+  const flares = new ChunkedScatter(TREE_CELL)
+  const branches = new ChunkedScatter(TREE_CELL)
+  const cards = new ChunkedScatter(TREE_CELL)
 
   const tint = new THREE.Color()
-  let bi = 0
-  let ci = 0
 
   for (let i = 0; i < n; i++) {
     let x = 0
@@ -224,9 +226,9 @@ export function buildTrees(ctx: FloraContext): THREE.Group {
     const lean = rng.range(-0.06, 0.06)
     const lean2 = rng.range(-0.06, 0.06)
 
-    trunks.setMatrixAt(i, compose(x, y, z, lean, yaw, lean2, thick, h, thick))
+    trunks.push(compose(x, y, z, lean, yaw, lean2, thick, h, thick), x, y + h, z)
     const fh = rng.range(0.35, 0.6) * thick
-    flares.setMatrixAt(i, compose(x, y - 0.05, z, 0, yaw, 0, thick * 0.4, fh, thick * 0.4))
+    flares.push(compose(x, y - 0.05, z, 0, yaw, 0, thick * 0.4, fh, thick * 0.4), x, y + fh, z)
 
     // Crown volume: acacias spread wide and flat, the others build a dome.
     // The round crowns start halfway up rather than at 0.62 — any higher and a
@@ -244,7 +246,7 @@ export function buildTrees(ctx: FloraContext): THREE.Group {
       const len = crownR * rng.range(0.62, 1.0)
       const rx = Math.cos(ba) * pitch
       const rz = -Math.sin(ba) * pitch
-      branches.setMatrixAt(bi++, compose(x, forkY, z, rx, 0, rz, thick * 0.95, len, thick * 0.95))
+      branches.push(compose(x, forkY, z, rx, 0, rz, thick * 0.95, len, thick * 0.95), x, forkY + len, z)
 
       // Where that limb actually ends, so the foliage hangs off it instead of
       // floating in the general vicinity.
@@ -271,41 +273,45 @@ export function buildTrees(ctx: FloraContext): THREE.Group {
         const cy = forkY + (tipY - forkY) * along + Math.cos(jp) * jr * (acacia ? 0.55 : 1)
         const cz = z + (tipZ - z) * along + Math.sin(jp) * Math.sin(ja) * jr
 
-        // Smaller than the old even scatter used — the density now comes from
+        // Smaller than an even scatter would need — the density comes from
         // overlap inside the clump, so oversized cards only cost silhouette.
-        const size = crownR * rng.range(0.34, 0.56)
+        const size = crownR * rng.range(0.36, 0.58)
         // The spray follows its limb but flops off it, more so on the acacias
         // whose foliage lies flat across the top of the branch.
         const cp = pitch * rng.range(0.55, 1.15) + rng.range(-0.28, 0.28)
-        cards.setMatrixAt(
-          ci,
+        tint.setHSL(hue + rng.range(-0.02, 0.02), rng.range(0.26, 0.48), rng.range(0.42, 0.72))
+        cards.push(
           composeCard(
             cx, cy, cz,
             Math.cos(ba) * cp, -Math.sin(ba) * cp, rng.range(0, Math.PI * 2),
             size, size * rng.range(0.85, 1.15), size,
           ),
+          // Bucket the card by the *trunk*, not by its own position: a crown
+          // straddling a cell boundary would otherwise split into two chunks
+          // that pop in and out independently and tear the canopy in half.
+          x, cy + size, z,
+          tint,
         )
-        tint.setHSL(hue + rng.range(-0.02, 0.02), rng.range(0.26, 0.48), rng.range(0.42, 0.72))
-        cards.setColorAt(ci, tint)
-        ci++
       }
     }
 
     ctx.colliders.push({ kind: 'circle', x, z, r: 0.55 * thick, h })
   }
 
-  hide(branches, bi)
-  hide(cards, ci)
-  for (const m of [trunks, flares, branches, cards]) m.instanceMatrix.needsUpdate = true
-  cards.instanceColor.needsUpdate = true
+  // Trunks read at any range; foliage and branches are only worth drawing where
+  // the silhouette matters, and the treeline beyond that is the horizon layer's
+  // job. Shadows come from the crowns, so the cards keep casting.
+  trunks.build(trunkGeo, barkMat, { drawDistance: 250, castShadow: true, receiveShadow: true })
+  flares.build(flareGeo, flareMat, { drawDistance: 90, castShadow: false, receiveShadow: true })
+  branches.build(branchGeo, branchMat, { drawDistance: 150, castShadow: true, receiveShadow: true })
+  cards.build(cardGeo, leafMat, { drawDistance: 220, castShadow: true, receiveShadow: true })
 
-  group.add(trunks, flares, branches, cards)
-  return group
+  return [trunks, flares, branches, cards]
 }
 
 // ------------------------------------------------------------------ bushes
 /** Low scrub. Cheap, and it does most of the work of making the plain look full. */
-export function buildBushes(ctx: FloraContext): THREE.InstancedMesh {
+export function buildBushes(ctx: FloraContext): ChunkedScatter {
   const { rng } = ctx
   const tex = textures()
   const geo = cardClump(11, 0.5, 0.62, 5150)
@@ -314,15 +320,10 @@ export function buildBushes(ctx: FloraContext): THREE.InstancedMesh {
   addTranslucency(mat, 0.6, 3.0)
   addDistanceFade(mat, 105, 150)
 
-  const n = WORLD.bushes
-  const mesh = new THREE.InstancedMesh(geo, mat, n)
-  mesh.castShadow = true
-  mesh.receiveShadow = true
-  mesh.frustumCulled = false
-  mesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(n * 3), 3)
+  const field = new ChunkedScatter(SHRUB_CELL)
   const tint = new THREE.Color()
 
-  for (let i = 0; i < n; i++) {
+  for (let i = 0; i < WORLD.bushes; i++) {
     let x = 0
     let z = 0
     for (let tries = 0; tries < 20; tries++) {
@@ -332,13 +333,13 @@ export function buildBushes(ctx: FloraContext): THREE.InstancedMesh {
       if (Math.hypot(x, z) > 20 && ctx.clearOf(x, z, 1.6)) break
     }
     const s = rng.range(1.1, 2.6)
-    mesh.setMatrixAt(i, compose(x, ctx.height(x, z) - 0.15, z, 0, rng.range(0, Math.PI), 0, s, s * rng.range(0.55, 0.85), s))
+    const y = ctx.height(x, z) - 0.15
     tint.setHSL(rng.range(0.14, 0.22), rng.range(0.22, 0.42), rng.range(0.42, 0.66))
-    mesh.setColorAt(i, tint)
+    field.push(compose(x, y, z, 0, rng.range(0, Math.PI), 0, s, s * rng.range(0.55, 0.85), s), x, y + s, z, tint)
   }
-  mesh.instanceMatrix.needsUpdate = true
-  mesh.instanceColor.needsUpdate = true
-  return mesh
+
+  field.build(geo, mat, { drawDistance: 152, castShadow: true, receiveShadow: true })
+  return field
 }
 
 // ------------------------------------------------------------------- grass
@@ -349,8 +350,8 @@ export interface GrassPatch {
 }
 
 export interface GrassResult {
-  tall: THREE.InstancedMesh
-  cover: THREE.InstancedMesh
+  tall: ChunkedScatter
+  cover: ChunkedScatter
   patches: GrassPatch[]
   /** Patch centres, useful as pickup spawn points. */
   centres: THREE.Vector3[]
@@ -363,8 +364,8 @@ export function buildGrass(ctx: FloraContext): GrassResult {
 
   // ---- tall stalking grass, clustered into patches the AI knows about
   // Wider than it is tall: a card taller than it is wide reads as a bulrush.
-  // Top of the card lands around 1.2 m, which hides a crouched tiger (0.85 m
-  // eye) while a standing one (1.55 m) can still see over it.
+  // Top of the card lands around 1.2 m, which hides a crouched tiger while a
+  // standing one can still see over it.
   const tallGeo = crossedQuads(3, 1.12, 1.0)
   const tallMat = leafMaterial(tex.grassBlade!, 0xffffff)
   tallMat.alphaTest = 0.28
@@ -372,18 +373,13 @@ export function buildGrass(ctx: FloraContext): GrassResult {
   // Tighter lobe than the canopy — dry grass is stiffer and less translucent,
   // and a wide lobe here washes out the whole plain.
   addTranslucency(tallMat, 0.9, 4.0)
-  addDistanceFade(tallMat, 120, 165)
+  addDistanceFade(tallMat, 96, 128)
 
   const patches: GrassPatch[] = []
   const centres: THREE.Vector3[] = []
   const perPatch = WORLD.bladesPerPatch
-  const tall = new THREE.InstancedMesh(tallGeo, tallMat, WORLD.grassPatches * perPatch)
-  tall.receiveShadow = true
-  tall.castShadow = true
-  tall.frustumCulled = false
-  tall.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(tall.count * 3), 3)
+  const tall = new ChunkedScatter(GRASS_CELL)
 
-  let i = 0
   for (let p = 0; p < WORLD.grassPatches; p++) {
     let px = 0
     let pz = 0
@@ -403,18 +399,19 @@ export function buildGrass(ctx: FloraContext): GrassResult {
       const x = px + Math.cos(a) * r
       const z = pz + Math.sin(a) * r
       const s = rng.range(0.8, 1.15)
-      // Sunk slightly so no clump shows a floating hard edge on a slope.
-      tall.setMatrixAt(i, compose(x, ctx.height(x, z) - 0.08, z, 0, rng.range(0, Math.PI), 0, s, s * rng.range(0.8, 1.15), s))
       // Dry-season savanna: olive and straw, never lime. Hues below ~0.12 come
       // out fluorescent yellow once the low sun rakes across them.
       tint.setHSL(rng.range(0.13, 0.2), rng.range(0.18, 0.36), rng.range(0.3, 0.48))
-      tall.setColorAt(i, tint)
-      i++
+      // Sunk slightly so no clump shows a floating hard edge on a slope.
+      const y = ctx.height(x, z) - 0.08
+      tall.push(compose(x, y, z, 0, rng.range(0, Math.PI), 0, s, s * rng.range(0.8, 1.15), s), x, y + 1.3, z, tint)
     }
   }
-  hide(tall, i)
-  tall.instanceMatrix.needsUpdate = true
-  tall.instanceColor.needsUpdate = true
+
+  // No shadow casting. Fourteen thousand alpha-tested crossed quads is by far
+  // the most expensive thing that was going into the shadow map, and what it
+  // bought was a faint mottling on ground that is already covered in grass.
+  tall.build(tallGeo, tallMat, { drawDistance: 132, castShadow: false, receiveShadow: true })
 
   // ---- short ground cover, everywhere, close to the camera only
   // Wide and low. A cover card taller than it is wide reads as a planted shrub;
@@ -425,29 +422,21 @@ export function buildGrass(ctx: FloraContext): GrassResult {
   coverMat.alphaTest = 0.28
   addWind(coverMat, { amplitude: 0.08, height: 0.44, speed: 2.6, gust: 0.9 })
   addTranslucency(coverMat, 0.9, 4.0)
-  // Pushed well out: a fade ring at 50 m sits inside the village and shows as a
-  // visible circle of bare ground around the player. Past ~70 m the tufts are
-  // sub-pixel anyway and only cost overdraw.
-  addDistanceFade(coverMat, 44, 68)
+  // The shader fade and the chunk cull have to agree: the fade finishes at 68 m
+  // so a chunk switched off past ~72 m can never pop, it was already invisible.
+  addDistanceFade(coverMat, 46, 68)
 
-  const cover = new THREE.InstancedMesh(coverGeo, coverMat, WORLD.groundCover)
-  cover.receiveShadow = true
-  cover.frustumCulled = false
-  cover.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(WORLD.groundCover * 3), 3)
-
+  const cover = new ChunkedScatter(COVER_CELL)
   for (let c = 0; c < WORLD.groundCover; c++) {
-    // Bias inward: the fade radius is 52 m, so blades out at the boundary
-    // would never be visible anyway.
     const d = rng.inDisc(WORLD.bounds - 2)
     const s = rng.range(0.85, 1.65)
-    cover.setMatrixAt(c, compose(d.x, ctx.height(d.x, d.z) - 0.05, d.z, 0, rng.range(0, Math.PI), 0, s, s * rng.range(0.8, 1.25), s))
     // Desaturated and pulled toward the ground's own hue: high-contrast tufts
     // on pale dirt read as scattered props rather than a continuous sward.
     tint.setHSL(rng.range(0.12, 0.19), rng.range(0.12, 0.28), rng.range(0.28, 0.46))
-    cover.setColorAt(c, tint)
+    const y = ctx.height(d.x, d.z) - 0.05
+    cover.push(compose(d.x, y, d.z, 0, rng.range(0, Math.PI), 0, s, s * rng.range(0.8, 1.25), s), d.x, y + 0.6, d.z, tint)
   }
-  cover.instanceMatrix.needsUpdate = true
-  cover.instanceColor.needsUpdate = true
+  cover.build(coverGeo, coverMat, { drawDistance: 72, castShadow: false, receiveShadow: true })
 
   return { tall, cover, patches, centres }
 }

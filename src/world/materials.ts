@@ -13,7 +13,7 @@
  * fog working without reimplementing any of it.
  */
 import * as THREE from 'three'
-import { WORLD } from '../config'
+import { TERRAIN_SIZE } from './terrain'
 
 export interface PbrSet {
   map: THREE.Texture
@@ -289,5 +289,4 @@ export function terrainMaterial(size: number): THREE.MeshStandardMaterial {
   return mat
 }
 
-/** Terrain plane edge length, exported so world.ts and the shader agree. */
-export const TERRAIN_SIZE = WORLD.radius * 2
+export { TERRAIN_SIZE }

@@ -87,6 +87,23 @@ export class Sky {
     this.scene.add(new THREE.HemisphereLight(SKY.skyBounce, SKY.groundBounce, SKY.bounceIntensity))
   }
 
+  /**
+   * Resize the shadow map and pull its frustum in for the quality tier. The old
+   * map has to be disposed by hand or the driver keeps both alive; three then
+   * reallocates at the new size on the next shadow render.
+   */
+  setShadowQuality(size: number, extent: number) {
+    const s = this.sun
+    if (s.shadow.mapSize.x !== size) {
+      s.shadow.mapSize.set(size, size)
+      s.shadow.map?.dispose()
+      s.shadow.map = null
+    }
+    const c = s.shadow.camera
+    c.left = -extent; c.right = extent; c.top = extent; c.bottom = -extent
+    c.updateProjectionMatrix()
+  }
+
   // -------------------------------------------------------------------- IBL
   /**
    * Prefilter the dome into a radiance map. Must run after the renderer exists

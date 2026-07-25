@@ -3,6 +3,7 @@ import * as THREE from 'three'
 import { CAMERA, POST, TIGER } from './config'
 import { audio } from './engine/audio'
 import { Input } from './engine/input'
+import { Quality } from './engine/quality'
 import { Game } from './game'
 import { installAtmosphericFog, makeFog } from './render/atmosphere'
 import { PostFX } from './render/postfx'
@@ -36,8 +37,8 @@ const renderer = new THREE.WebGLRenderer({
   powerPreference: 'high-performance',
 })
 renderer.setSize(innerWidth, innerHeight)
-// Cap DPR: retina at 3x murders the framerate for almost no visual gain here.
-renderer.setPixelRatio(Math.min(devicePixelRatio, 2))
+// Provisional; the quality manager takes this over below and keeps adjusting it.
+renderer.setPixelRatio(Math.min(devicePixelRatio, 1.5))
 renderer.shadowMap.enabled = true
 renderer.shadowMap.type = THREE.PCFSoftShadowMap
 renderer.toneMapping = THREE.ACESFilmicToneMapping
@@ -63,6 +64,20 @@ const hud = new Hud()
 const world = new World(scene)
 const game = new Game(scene, camera, world, hud)
 const postfx = new PostFX(renderer, scene, camera, sky.sunDir)
+
+// ------------------------------------------------------------- quality
+// One place decides how expensive a frame is allowed to be, and it decides it
+// from measured frame time rather than from a settings menu the player has no
+// way to answer correctly.
+const quality = new Quality()
+quality.onChange = (p) => {
+  renderer.setPixelRatio(Math.min(devicePixelRatio, p.pixelRatio))
+  postfx.setSize(innerWidth, innerHeight)
+  postfx.setQuality(p)
+  sky.setShadowQuality(p.shadowMapSize, p.shadowExtent)
+  world.setFoliageDistance(p.foliageDistance)
+}
+quality.apply()
 
 addEventListener('resize', () => {
   camera.aspect = innerWidth / innerHeight
@@ -113,7 +128,7 @@ function beginHunt() {
  */
 Object.assign(window, {
   __kt: {
-    game, world, input, camera, renderer, scene, sky, postfx, THREE,
+    game, world, input, camera, renderer, scene, sky, postfx, quality, THREE,
     step: (frames = 1, dt = 1 / 60) => { for (let i = 0; i < frames; i++) frame(dt) },
     hold: (code: string) => dispatchEvent(new KeyboardEvent('keydown', { code })),
     release: (code: string) => dispatchEvent(new KeyboardEvent('keyup', { code })),
@@ -155,6 +170,7 @@ const clock = new THREE.Clock()
 
 /** One simulation + render step. Split out so tests can drive it directly. */
 function frame(dt: number) {
+  if (game.state === 'playing') quality.sample(dt)
   const controlling = (input.locked || NOLOCK) && game.state === 'playing'
   game.update(dt, input, controlling)
   input.endFrame()

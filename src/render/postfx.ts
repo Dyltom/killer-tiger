@@ -232,8 +232,10 @@ export class PostFX {
   readonly godrays: ShaderPass
   readonly grade: ShaderPass
   readonly bloom: UnrealBloomPass
+  private smaa: SMAAPass
   private sunUv = new THREE.Vector2()
   private time = 0
+  private godraysOn = true
 
   constructor(
     private renderer: THREE.WebGLRenderer,
@@ -272,12 +274,30 @@ export class PostFX {
     this.composer.addPass(this.grade)
 
     // SMAA last so it antialiases the graded image, including the sharpen.
-    this.composer.addPass(new SMAAPass())
+    this.smaa = new SMAAPass()
+    this.composer.addPass(this.smaa)
 
     this.setSize(innerWidth, innerHeight)
   }
 
+  /**
+   * Switch passes on and off for the quality tier. Disabled passes stay in the
+   * chain — a ShaderPass with `enabled = false` is skipped entirely, and keeping
+   * it allocated means climbing back a tier costs nothing.
+   */
+  setQuality(p: { godrays: boolean; bloom: boolean; smaa: boolean }) {
+    // The god-ray pass also owns the HDR ceiling that keeps bloom from veiling
+    // the frame, so it stays enabled and just stops tracing when it is "off".
+    this.godraysOn = p.godrays
+    this.bloom.enabled = p.bloom
+    this.smaa.enabled = p.smaa
+  }
+
   setSize(w: number, h: number) {
+    // The composer caches the pixel ratio it was built with, so a quality tier
+    // change has to be pushed through here or the render targets stay at the
+    // old resolution and the tier does nothing.
+    this.composer.setPixelRatio(this.renderer.getPixelRatio())
     this.composer.setSize(w, h)
     const size = this.renderer.getDrawingBufferSize(new THREE.Vector2())
     this.grade.uniforms.uTexel!.value.set(1 / size.x, 1 / size.y)
@@ -290,7 +310,7 @@ export class PostFX {
 
     const visible = sunScreenPosition(this.sunDir, this.camera, this.sunUv)
     this.godrays.uniforms.uSun!.value.copy(this.sunUv)
-    this.godrays.uniforms.uStrength!.value = visible ? POST.godrayStrength : 0
+    this.godrays.uniforms.uStrength!.value = visible && this.godraysOn ? POST.godrayStrength : 0
 
     const g = this.grade.uniforms
     g.uTime!.value = this.time

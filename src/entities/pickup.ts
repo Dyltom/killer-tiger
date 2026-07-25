@@ -135,20 +135,47 @@ export class Pickup {
   age = 0
   private spin = 0
   private halo: THREE.Mesh
-  private light: THREE.PointLight
+  private beam: THREE.Mesh
+  private glow = 1
   private models = new Map<PickupId, THREE.Object3D>()
+  /** Emissive materials of the active model, retinted on spawn. */
+  private emissives: THREE.MeshStandardMaterial[] = []
 
   constructor() {
+    // Additive, not a PointLight. Every live PointLight changes the scene's
+    // light count, and three keys its shader programs on that count — so a
+    // pickup spawning or expiring recompiled every material in the world and
+    // stalled the frame. An additive shell reads the same at a fraction of the
+    // cost and costs nothing to switch on and off.
     this.halo = new THREE.Mesh(
-      new THREE.SphereGeometry(0.42, 12, 10),
-      new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.14, depthWrite: false }),
+      new THREE.SphereGeometry(0.42, 10, 8),
+      new THREE.MeshBasicMaterial({
+        color: 0xffffff,
+        transparent: true,
+        opacity: 0.3,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+        side: THREE.BackSide,
+      }),
     )
     this.halo.position.y = 0.24
     this.group.add(this.halo)
 
-    this.light = new THREE.PointLight(0xffffff, 3, 6, 2)
-    this.light.position.y = 0.4
-    this.group.add(this.light)
+    // A soft shaft standing on the drop, so a pickup in long grass still reads
+    // from across the plain — the job the point light's falloff used to do.
+    this.beam = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.16, 0.5, 3.2, 8, 1, true),
+      new THREE.MeshBasicMaterial({
+        color: 0xffffff,
+        transparent: true,
+        opacity: 0.075,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+        side: THREE.DoubleSide,
+      }),
+    )
+    this.beam.position.y = 1.6
+    this.group.add(this.beam)
 
     // Build every model once; show only the active one.
     for (const def of Object.values(PICKUP_TYPES)) {
@@ -169,8 +196,18 @@ export class Pickup {
     const def = PICKUP_TYPES[id]
     for (const [key, m] of this.models) m.visible = key === id
     ;(this.halo.material as THREE.MeshBasicMaterial).color.setHex(def.color)
-    this.light.color.setHex(def.color)
-    this.light.intensity = 3 * def.glow
+    ;(this.beam.material as THREE.MeshBasicMaterial).color.setHex(def.color)
+    this.glow = def.glow
+
+    // Bloom is what sells the glow, so the model itself has to be over 1.0 in
+    // HDR. Collected here so the pulse below only walks a short list.
+    this.emissives.length = 0
+    this.models.get(id)?.traverse((o) => {
+      if (o instanceof THREE.Mesh && o.material instanceof THREE.MeshStandardMaterial) {
+        o.material.emissive.setHex(def.color)
+        this.emissives.push(o.material)
+      }
+    })
     this.group.position.set(x, terrainHeight(x, z), z)
     this.group.visible = true
   }
@@ -189,8 +226,11 @@ export class Pickup {
       model.rotation.y = this.spin
       model.position.y = Math.sin(time * PICKUP.bobSpeed + this.spin) * PICKUP.bobHeight + PICKUP.bobHeight
     }
-    const pulse = 0.11 + Math.sin(time * 3 + this.spin) * 0.05
-    ;(this.halo.material as THREE.MeshBasicMaterial).opacity = pulse
+    const pulse = 0.5 + Math.sin(time * 3 + this.spin) * 0.5
+    ;(this.halo.material as THREE.MeshBasicMaterial).opacity = (0.2 + pulse * 0.16) * this.glow
+    ;(this.beam.material as THREE.MeshBasicMaterial).opacity = (0.05 + pulse * 0.035) * this.glow
+    const e = (0.55 + pulse * 0.45) * this.glow
+    for (const m of this.emissives) m.emissiveIntensity = e
     // Blink out over the final three seconds so its loss is never a surprise.
     const left = PICKUP.lifetime - this.age
     if (left < 3) this.group.visible = Math.sin(this.age * 22) > -0.3
