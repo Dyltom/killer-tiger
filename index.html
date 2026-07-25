@@ -1,0 +1,315 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+    <title>KILLER TIGER</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Rajdhani:wght@500;700&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      :root {
+        --amber: #ffb03a;
+        --blood: #c22b2b;
+        --ink: #0b0906;
+      }
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body { width: 100%; height: 100%; overflow: hidden; background: var(--ink); }
+      body {
+        font-family: 'Rajdhani', system-ui, sans-serif;
+        color: #f4ead9;
+        cursor: default;
+        -webkit-font-smoothing: antialiased;
+      }
+      canvas { display: block; }
+
+      #app { position: fixed; inset: 0; }
+
+      /* ---------- shared ---------- */
+      .display { font-family: 'Bebas Neue', Impact, sans-serif; letter-spacing: 0.04em; }
+      .hidden { display: none !important; }
+
+      /* ---------- HUD ---------- */
+      #hud { position: fixed; inset: 0; pointer-events: none; user-select: none; }
+
+      #vignette {
+        position: absolute; inset: 0;
+        box-shadow: inset 0 0 220px 60px rgba(0, 0, 0, 0.72);
+        transition: box-shadow 0.25s;
+      }
+      #damage-flash {
+        position: absolute; inset: 0;
+        background: radial-gradient(ellipse at center, rgba(190, 20, 20, 0) 35%, rgba(190, 20, 20, 0.85) 100%);
+        opacity: 0; transition: opacity 0.35s ease-out;
+      }
+      #frenzy-tint {
+        position: absolute; inset: 0;
+        background: radial-gradient(ellipse at center, rgba(255, 60, 20, 0.06) 30%, rgba(255, 30, 10, 0.4) 100%);
+        opacity: 0; transition: opacity 0.4s;
+      }
+
+      /* crosshair */
+      #reticle {
+        position: absolute; left: 50%; top: 50%;
+        width: 26px; height: 26px; margin: -13px 0 0 -13px;
+        transition: transform 0.12s ease-out, opacity 0.2s;
+        opacity: 0.85;
+      }
+      #reticle .bar {
+        position: absolute; background: rgba(255, 235, 210, 0.9);
+        box-shadow: 0 0 4px rgba(0,0,0,0.9);
+      }
+      #reticle .t, #reticle .b { left: 50%; width: 2px; height: 7px; margin-left: -1px; }
+      #reticle .t { top: 0; } #reticle .b { bottom: 0; }
+      #reticle .l, #reticle .r { top: 50%; height: 2px; width: 7px; margin-top: -1px; }
+      #reticle .l { left: 0; } #reticle .r { right: 0; }
+      #reticle.hot .bar { background: var(--blood); }
+
+      /* bottom-left meters */
+      #meters { position: absolute; left: 28px; bottom: 26px; width: 260px; }
+      .meter { margin-bottom: 9px; }
+      .meter-label {
+        display: flex; justify-content: space-between; align-items: baseline;
+        font-size: 12px; letter-spacing: 0.18em; text-transform: uppercase;
+        color: rgba(244, 234, 217, 0.55); margin-bottom: 3px; font-weight: 700;
+      }
+      .meter-track {
+        height: 11px; background: rgba(0, 0, 0, 0.55);
+        border: 1px solid rgba(255, 255, 255, 0.16); position: relative; overflow: hidden;
+      }
+      .meter-fill { position: absolute; inset: 0; transform-origin: left center; transition: transform 0.12s linear; }
+      #hp-fill { background: linear-gradient(90deg, #8e1b1b, #e04141); }
+      #stam-fill { background: linear-gradient(90deg, #2b6b52, #57c98f); }
+      #rage-fill { background: linear-gradient(90deg, #a34b09, #ffb03a); }
+      .meter.ready .meter-track { border-color: var(--amber); box-shadow: 0 0 14px rgba(255, 176, 58, 0.5); }
+
+      /* top-left score */
+      #score-box { position: absolute; left: 28px; top: 22px; }
+      #score { font-size: 54px; line-height: 0.9; color: var(--amber); text-shadow: 0 3px 0 rgba(0,0,0,0.6); }
+      #score-sub {
+        font-size: 13px; letter-spacing: 0.22em; text-transform: uppercase;
+        color: rgba(244, 234, 217, 0.5); font-weight: 700;
+      }
+      #combo {
+        font-size: 30px; color: #fff; margin-top: 6px;
+        text-shadow: 0 0 16px rgba(255, 100, 40, 0.9); opacity: 0; transition: opacity 0.2s;
+      }
+
+      /* top-right wave / objective */
+      #wave-box { position: absolute; right: 28px; top: 22px; text-align: right; }
+      #wave { font-size: 34px; color: #f4ead9; }
+      #objective { font-size: 14px; letter-spacing: 0.14em; color: rgba(244, 234, 217, 0.62); font-weight: 700; }
+      #threat {
+        font-size: 12px; letter-spacing: 0.2em; margin-top: 4px; font-weight: 700;
+        text-transform: uppercase; color: #7fdca6;
+      }
+      #threat.alert { color: var(--blood); animation: pulse 0.7s infinite; }
+      @keyframes pulse { 50% { opacity: 0.35; } }
+
+      /* radar */
+      #radar {
+        position: absolute; right: 28px; bottom: 26px;
+        width: 148px; height: 148px; border-radius: 50%;
+        background: rgba(6, 10, 8, 0.55);
+        border: 1px solid rgba(255, 255, 255, 0.18);
+        box-shadow: 0 0 24px rgba(0,0,0,0.6) inset;
+      }
+
+      /* power-up chips */
+      #buffs { position: absolute; left: 50%; bottom: 26px; transform: translateX(-50%); display: flex; gap: 10px; }
+      .buff {
+        padding: 5px 12px 4px; font-size: 14px; letter-spacing: 0.14em; font-weight: 700;
+        text-transform: uppercase; background: rgba(0,0,0,0.6);
+        border: 1px solid var(--amber); color: var(--amber);
+        display: flex; gap: 8px; align-items: baseline;
+      }
+      .buff .t { opacity: 0.7; font-variant-numeric: tabular-nums; }
+
+      /* toast feed */
+      /* Sits under the wave box, clear of the crosshair. */
+      #feed {
+        position: absolute; right: 28px; top: 120px;
+        display: flex; flex-direction: column; align-items: flex-end; gap: 5px; width: 320px;
+      }
+      .toast {
+        font-size: 19px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
+        text-shadow: 0 2px 6px rgba(0,0,0,0.9); animation: toastIn 0.2s ease-out;
+      }
+      .toast.kill { color: #f4ead9; }
+      .toast.good { color: var(--amber); }
+      .toast.bad { color: var(--blood); }
+      @keyframes toastIn { from { opacity: 0; transform: translateX(24px); } }
+
+      /* big centre announce */
+      #announce {
+        position: absolute; left: 50%; top: 27%; transform: translate(-50%, -50%);
+        text-align: center; opacity: 0; pointer-events: none;
+      }
+      #announce .big { font-size: 76px; line-height: 0.92; color: var(--amber); text-shadow: 0 4px 0 rgba(0,0,0,0.55); }
+      #announce .small {
+        font-size: 16px; letter-spacing: 0.3em; text-transform: uppercase;
+        color: rgba(244, 234, 217, 0.7); font-weight: 700;
+      }
+      #announce.show { animation: announce 2.2s ease-out forwards; }
+      @keyframes announce {
+        0% { opacity: 0; transform: translate(-50%, -50%) scale(1.25); }
+        12% { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+        75% { opacity: 1; }
+        100% { opacity: 0; }
+      }
+
+      /* hit marker */
+      #hitmark {
+        position: absolute; left: 50%; top: 50%; width: 40px; height: 40px; margin: -20px 0 0 -20px;
+        opacity: 0;
+      }
+      #hitmark div { position: absolute; width: 13px; height: 3px; background: #fff; box-shadow: 0 0 5px #000; }
+      #hitmark .a { top: 6px; left: 4px; transform: rotate(45deg); }
+      #hitmark .b { top: 6px; right: 4px; transform: rotate(-45deg); }
+      #hitmark .c { bottom: 6px; left: 4px; transform: rotate(-45deg); }
+      #hitmark .d { bottom: 6px; right: 4px; transform: rotate(45deg); }
+      #hitmark.pop { animation: hit 0.28s ease-out; }
+      #hitmark.crit div { background: var(--blood); }
+      @keyframes hit { 0% { opacity: 1; transform: scale(0.6); } 100% { opacity: 0; transform: scale(1.35); } }
+
+      /* ---------- overlays ---------- */
+      .overlay {
+        position: fixed; inset: 0; display: flex; flex-direction: column;
+        align-items: center; justify-content: center; text-align: center;
+        background: radial-gradient(ellipse at center, rgba(28, 14, 6, 0.86) 0%, rgba(6, 4, 3, 0.97) 75%);
+        backdrop-filter: blur(3px); z-index: 10; padding: 24px;
+      }
+      .overlay h1 {
+        font-family: 'Bebas Neue', Impact, sans-serif;
+        font-size: clamp(56px, 12vw, 132px); line-height: 0.85; letter-spacing: 0.02em;
+        color: var(--amber); text-shadow: 0 0 40px rgba(255, 120, 30, 0.35), 0 6px 0 rgba(0,0,0,0.5);
+      }
+      .overlay h1 .b { color: var(--blood); }
+      .overlay .tag {
+        font-size: 15px; letter-spacing: 0.42em; text-transform: uppercase;
+        color: rgba(244, 234, 217, 0.6); margin-top: 8px; font-weight: 700;
+      }
+      .keys {
+        display: grid; grid-template-columns: auto auto; gap: 6px 18px;
+        margin: 34px 0 8px; font-size: 16px; text-align: left;
+      }
+      .keys .k {
+        font-weight: 700; color: var(--amber); text-align: right;
+        font-variant-numeric: tabular-nums;
+      }
+      .keys .d { color: rgba(244, 234, 217, 0.8); }
+      .cta {
+        margin-top: 30px; font-family: 'Bebas Neue', sans-serif; font-size: 30px;
+        letter-spacing: 0.12em; color: var(--ink); background: var(--amber);
+        padding: 10px 40px 7px; border: none; cursor: pointer;
+        box-shadow: 0 5px 0 #a35f10; transition: transform 0.1s, box-shadow 0.1s;
+      }
+      .cta:hover { transform: translateY(2px); box-shadow: 0 3px 0 #a35f10; }
+      .cta:active { transform: translateY(5px); box-shadow: 0 0 0 #a35f10; }
+      .fine { margin-top: 18px; font-size: 13px; color: rgba(244, 234, 217, 0.4); letter-spacing: 0.1em; }
+
+      #stats { display: flex; gap: 40px; margin-top: 26px; }
+      #stats .s { text-align: center; }
+      #stats .v { font-family: 'Bebas Neue', sans-serif; font-size: 46px; color: #f4ead9; line-height: 1; }
+      #stats .l {
+        font-size: 12px; letter-spacing: 0.22em; text-transform: uppercase;
+        color: rgba(244, 234, 217, 0.45); font-weight: 700;
+      }
+
+      #loading { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+        background: var(--ink); z-index: 20; font-family: 'Bebas Neue', sans-serif;
+        font-size: 28px; letter-spacing: 0.3em; color: var(--amber); }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+
+    <div id="hud" class="hidden">
+      <div id="vignette"></div>
+      <div id="frenzy-tint"></div>
+      <div id="damage-flash"></div>
+
+      <div id="reticle">
+        <div class="bar t"></div><div class="bar b"></div>
+        <div class="bar l"></div><div class="bar r"></div>
+      </div>
+      <div id="hitmark"><div class="a"></div><div class="b"></div><div class="c"></div><div class="d"></div></div>
+
+      <div id="score-box">
+        <div id="score" class="display">0</div>
+        <div id="score-sub">Score</div>
+        <div id="combo" class="display"></div>
+      </div>
+
+      <div id="wave-box">
+        <div id="wave" class="display">Hunt 1</div>
+        <div id="objective">0 / 6 prey</div>
+        <div id="threat">Undetected</div>
+      </div>
+
+      <div id="meters">
+        <div class="meter">
+          <div class="meter-label"><span>Health</span></div>
+          <div class="meter-track"><div class="meter-fill" id="hp-fill"></div></div>
+        </div>
+        <div class="meter">
+          <div class="meter-label"><span>Stamina</span></div>
+          <div class="meter-track"><div class="meter-fill" id="stam-fill"></div></div>
+        </div>
+        <div class="meter" id="rage-meter">
+          <div class="meter-label"><span>Rage</span><span id="rage-hint"></span></div>
+          <div class="meter-track"><div class="meter-fill" id="rage-fill"></div></div>
+        </div>
+      </div>
+
+      <canvas id="radar" width="296" height="296"></canvas>
+      <div id="buffs"></div>
+      <div id="feed"></div>
+      <div id="announce"><div class="big display"></div><div class="small"></div></div>
+    </div>
+
+    <div id="menu" class="overlay hidden">
+      <h1 class="display">KILLER <span class="b">TIGER</span></h1>
+      <div class="tag">Apex predator &middot; first person</div>
+      <div class="keys">
+        <div class="k">W A S D</div><div class="d">Prowl</div>
+        <div class="k">MOUSE</div><div class="d">Look</div>
+        <div class="k">SHIFT</div><div class="d">Sprint (burns stamina)</div>
+        <div class="k">SPACE</div><div class="d">Pounce — leap at prey</div>
+        <div class="k">L-CLICK</div><div class="d">Claw swipe</div>
+        <div class="k">R-CLICK</div><div class="d">Killing bite — devour to heal</div>
+        <div class="k">R</div><div class="d">Roar — terrify everything nearby</div>
+        <div class="k">Q</div><div class="d">Blood Frenzy (needs full rage)</div>
+        <div class="k">CTRL</div><div class="d">Crouch — stalk unseen in grass</div>
+      </div>
+      <button class="cta display" id="start-btn">Begin the hunt</button>
+      <div class="fine">Click to lock mouse &middot; ESC to release</div>
+    </div>
+
+    <div id="paused" class="overlay hidden">
+      <h1 class="display">PAUSED</h1>
+      <div class="tag">The village holds its breath</div>
+      <button class="cta display" id="resume-btn">Resume hunt</button>
+    </div>
+
+    <div id="gameover" class="overlay hidden">
+      <h1 class="display" id="go-title">THE HUNT <span class="b">ENDS</span></h1>
+      <div class="tag" id="go-sub">The hunters brought you down</div>
+      <div id="stats">
+        <div class="s"><div class="v" id="go-score">0</div><div class="l">Score</div></div>
+        <div class="s"><div class="v" id="go-kills">0</div><div class="l">Kills</div></div>
+        <div class="s"><div class="v" id="go-wave">1</div><div class="l">Hunt</div></div>
+        <div class="s"><div class="v" id="go-best">0</div><div class="l">Best</div></div>
+      </div>
+      <button class="cta display" id="retry-btn">Hunt again</button>
+      <div class="fine">Press R to restart instantly</div>
+    </div>
+
+    <div id="loading">STALKING&hellip;</div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

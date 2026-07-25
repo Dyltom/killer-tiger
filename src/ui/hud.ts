@@ -1,0 +1,234 @@
+/** All DOM reads/writes live here so the game loop never touches the document. */
+
+import type { Human } from '../entities/human'
+import type { Pickup } from '../entities/pickup'
+import { PICKUP_TYPES } from '../entities/pickup'
+import { WORLD } from '../config'
+
+const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T
+
+export interface BuffChip {
+  label: string
+  remaining: number
+}
+
+export class Hud {
+  private hud = $('hud')
+  private scoreEl = $('score')
+  private comboEl = $('combo')
+  private waveEl = $('wave')
+  private objectiveEl = $('objective')
+  private threatEl = $('threat')
+  private hpFill = $('hp-fill')
+  private stamFill = $('stam-fill')
+  private rageFill = $('rage-fill')
+  private rageMeter = $('rage-meter')
+  private rageHint = $('rage-hint')
+  private buffsEl = $('buffs')
+  private feedEl = $('feed')
+  private announceEl = $('announce')
+  private announceBig = this.announceEl.querySelector('.big') as HTMLElement
+  private announceSmall = this.announceEl.querySelector('.small') as HTMLElement
+  private hitmark = $('hitmark')
+  private reticle = $('reticle')
+  private damageFlash = $('damage-flash')
+  private frenzyTint = $('frenzy-tint')
+  private vignette = $('vignette')
+  private radar = $<HTMLCanvasElement>('radar')
+  private radarCtx = this.radar.getContext('2d')!
+
+  private shownScore = 0
+  private feedItems: { el: HTMLElement; t: number }[] = []
+  private lastBuffKey = ''
+
+  show() { this.hud.classList.remove('hidden') }
+  hide() { this.hud.classList.add('hidden') }
+
+  setScore(score: number) {
+    // Roll the number up so kills feel like they pay out.
+    this.shownScore += (score - this.shownScore) * 0.24
+    if (Math.abs(score - this.shownScore) < 1) this.shownScore = score
+    this.scoreEl.textContent = String(Math.round(this.shownScore))
+  }
+
+  setCombo(chain: number, mult: number) {
+    if (chain <= 1) {
+      this.comboEl.style.opacity = '0'
+      return
+    }
+    this.comboEl.style.opacity = '1'
+    this.comboEl.textContent = `${chain} CHAIN  ×${mult.toFixed(2)}`
+  }
+
+  setWave(n: number, killed: number, needed: number) {
+    this.waveEl.textContent = `Hunt ${n}`
+    this.objectiveEl.textContent = `${Math.min(killed, needed)} / ${needed} prey`
+  }
+
+  setThreat(alerted: number, hunters: number) {
+    const alert = alerted > 0
+    this.threatEl.classList.toggle('alert', alert)
+    if (!alert) this.threatEl.textContent = 'Undetected'
+    else if (hunters > 0) this.threatEl.textContent = `Hunted — ${hunters} rifle${hunters > 1 ? 's' : ''} on you`
+    else this.threatEl.textContent = `Spotted — ${alerted} fleeing`
+  }
+
+  setMeters(hp: number, stam: number, rage: number, frenzyActive: boolean) {
+    this.hpFill.style.transform = `scaleX(${Math.max(0, hp)})`
+    this.stamFill.style.transform = `scaleX(${Math.max(0, stam)})`
+    this.rageFill.style.transform = `scaleX(${Math.max(0, rage)})`
+    const ready = rage >= 0.999 && !frenzyActive
+    this.rageMeter.classList.toggle('ready', ready)
+    this.rageHint.textContent = frenzyActive ? 'FRENZY' : ready ? 'PRESS Q' : ''
+    // Health vignette closes in as you bleed out.
+    const dark = 220 + (1 - hp) * 200
+    const spread = 60 + (1 - hp) * 90
+    this.vignette.style.boxShadow = `inset 0 0 ${dark}px ${spread}px rgba(${Math.round((1 - hp) * 40)}, 0, 0, ${0.72 + (1 - hp) * 0.2})`
+  }
+
+  setBuffs(chips: BuffChip[]) {
+    const key = chips.map((c) => c.label + Math.ceil(c.remaining)).join('|')
+    if (key === this.lastBuffKey) return
+    this.lastBuffKey = key
+    this.buffsEl.replaceChildren(
+      ...chips.map((c) => {
+        const el = document.createElement('div')
+        el.className = 'buff'
+        el.innerHTML = `<span>${c.label}</span><span class="t">${c.remaining.toFixed(0)}s</span>`
+        return el
+      }),
+    )
+  }
+
+  setReticleHot(hot: boolean) {
+    this.reticle.classList.toggle('hot', hot)
+  }
+
+  hitMarker(crit: boolean) {
+    this.hitmark.classList.toggle('crit', crit)
+    this.hitmark.classList.remove('pop')
+    void this.hitmark.offsetWidth // restart the animation
+    this.hitmark.classList.add('pop')
+  }
+
+  flashDamage() {
+    this.damageFlash.style.opacity = '0.9'
+    setTimeout(() => { this.damageFlash.style.opacity = '0' }, 90)
+  }
+
+  setFrenzy(on: boolean) {
+    this.frenzyTint.style.opacity = on ? '1' : '0'
+  }
+
+  toast(text: string, tone: 'kill' | 'good' | 'bad' = 'kill') {
+    const el = document.createElement('div')
+    el.className = `toast ${tone}`
+    el.textContent = text
+    this.feedEl.prepend(el)
+    this.feedItems.unshift({ el, t: 0 })
+    while (this.feedItems.length > 6) {
+      this.feedItems.pop()?.el.remove()
+    }
+  }
+
+  announce(big: string, small = '') {
+    this.announceBig.textContent = big
+    this.announceSmall.textContent = small
+    this.announceEl.classList.remove('show')
+    void this.announceEl.offsetWidth
+    this.announceEl.classList.add('show')
+  }
+
+  updateFeed(dt: number) {
+    for (let i = this.feedItems.length - 1; i >= 0; i--) {
+      const item = this.feedItems[i]!
+      item.t += dt
+      if (item.t > 3.2) {
+        item.el.style.opacity = String(Math.max(0, 1 - (item.t - 3.2) * 2))
+      }
+      if (item.t > 3.8) {
+        item.el.remove()
+        this.feedItems.splice(i, 1)
+      }
+    }
+  }
+
+  /** Top-down radar: prey as dots, hunters as triangles, pickups as diamonds. */
+  drawRadar(
+    tigerX: number, tigerZ: number, tigerYaw: number,
+    humans: Human[], pickups: Pickup[], bloodScent: boolean,
+  ) {
+    const c = this.radarCtx
+    const w = this.radar.width
+    const cx = w / 2
+    const R = w / 2 - 8
+    const range = bloodScent ? WORLD.bounds : 62
+    c.clearRect(0, 0, w, w)
+
+    // Rings + facing wedge.
+    c.strokeStyle = 'rgba(255,255,255,0.10)'
+    c.lineWidth = 2
+    for (const f of [0.34, 0.67, 1]) {
+      c.beginPath(); c.arc(cx, cx, R * f, 0, Math.PI * 2); c.stroke()
+    }
+    c.fillStyle = 'rgba(255,176,58,0.10)'
+    c.beginPath()
+    c.moveTo(cx, cx)
+    c.arc(cx, cx, R, -Math.PI / 2 - 0.5, -Math.PI / 2 + 0.5)
+    c.closePath()
+    c.fill()
+
+    const project = (x: number, z: number) => {
+      // Rotate world offset into radar space so "up" is where the tiger looks.
+      const dx = x - tigerX
+      const dz = z - tigerZ
+      const s = Math.sin(-tigerYaw)
+      const co = Math.cos(-tigerYaw)
+      // Screen-up is -Z in world; negate so forward maps to up.
+      const rx = dx * co - dz * s
+      const rz = dx * s + dz * co
+      return { x: cx + (rx / range) * R, y: cx + (rz / range) * R, d: Math.hypot(dx, dz) }
+    }
+
+    for (const p of pickups) {
+      if (!p.active) continue
+      const q = project(p.group.position.x, p.group.position.z)
+      if (q.d > range) continue
+      c.fillStyle = `#${PICKUP_TYPES[p.id].color.toString(16).padStart(6, '0')}`
+      c.save()
+      c.translate(q.x, q.y)
+      c.rotate(Math.PI / 4)
+      c.fillRect(-3.5, -3.5, 7, 7)
+      c.restore()
+    }
+
+    for (const h of humans) {
+      if (!h.alive || !h.group.visible) continue
+      const q = project(h.pos.x, h.pos.z)
+      if (q.d > range) continue
+      if (h.kind === 'hunter') {
+        c.fillStyle = h.alerted ? '#ff4d3d' : '#e0a24a'
+        c.beginPath()
+        c.moveTo(q.x, q.y - 6)
+        c.lineTo(q.x + 5, q.y + 5)
+        c.lineTo(q.x - 5, q.y + 5)
+        c.closePath()
+        c.fill()
+      } else {
+        c.fillStyle = h.alerted ? '#ffd9a0' : '#9fb08a'
+        c.beginPath()
+        c.arc(q.x, q.y, 3.6, 0, Math.PI * 2)
+        c.fill()
+      }
+    }
+
+    // Tiger.
+    c.fillStyle = '#ffb03a'
+    c.beginPath()
+    c.moveTo(cx, cx - 8)
+    c.lineTo(cx + 6, cx + 6)
+    c.lineTo(cx - 6, cx + 6)
+    c.closePath()
+    c.fill()
+  }
+}
