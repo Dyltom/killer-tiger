@@ -1428,7 +1428,11 @@ export class Audio {
   land(force = 1) {
     const dest = this.voice(PRI.normal, 0.6, LEVELS.land, {}, 0.8, true)
     if (!dest) return
-    const f = Math.max(0.35, Math.min(2.2, force))
+    // Clamp through a finite check, not just min/max: both of those pass NaN
+    // straight through, and a NaN gain makes the first ramp throw. This is
+    // called from inside the frame update, so that exception would take the
+    // rest of the tick with it — a physics glitch would become a dropped frame.
+    const f = Number.isFinite(force) ? Math.max(0.35, Math.min(2.2, force)) : 1
     const j = rand(0.9, 1.12)
 
     // Pad slap. Fast, but not a click — the cushion takes the edge off.
