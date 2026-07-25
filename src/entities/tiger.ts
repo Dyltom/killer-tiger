@@ -65,9 +65,28 @@ const PAW = {
    * now: at 0.66 m the feet subtend a far wider angle than they did at 1.74, so
    * the old 0.58 would have thrown them into the frame's corners.
    */
-  x: 0.30,
-  /** Mid-stance: how far ahead of the eye the foot is halfway through contact. */
-  z: -0.66,
+  x: 0.33,
+  /**
+   * Mid-stance: how far ahead of the eye the foot is halfway through contact.
+   *
+   * Down from 0.66, and this is the number that decides whether the limb has an
+   * elbow the player can see.
+   *
+   * At 0.66 the wrist was 1.006 m from the shoulder. Split against a 0.44 m
+   * humerus that leaves a 0.57 m forearm — a bone a third longer than the one
+   * above it, on an animal whose humerus and radius are the same length. Worse,
+   * the whole limb was then long enough to run from the corner of the frame to
+   * the middle of it, so what the player saw was a metre of unbroken tube with
+   * the joint somewhere off the bottom of the screen. That is a tail, and it is
+   * what the render showed.
+   *
+   * At 0.44 the reach is 0.86 m, the split is 0.44 against 0.42, and the elbow
+   * lands inside the frame at every pitch the paws are visible at. The cost is
+   * honest: the feet now enter the bottom of the frame at about 28 degrees of
+   * look-down rather than 18, and centre at 67 rather than 50. That is simply
+   * where a tiger's feet are — under its shoulders, not out in front of them.
+   */
+  z: -0.44,
   /**
    * Half the stride. The foot runs from z - stride (plant) to z + stride (lift),
    * scaled by the gait amplitude.
@@ -84,16 +103,22 @@ const PAW = {
    * covered over the animal's real stride length, so a sweep of 2 * stride against
    * a two-metre stride is what fixes the duty factor. See DUTY_MIN.
    */
-  stride: 0.28,
+  stride: 0.24,
   /** Peak of the swing above the ground. */
   lift: 0.20,
   /**
    * Height of the paw group's origin — the wrist joint — above the ground when
-   * the foot is planted. Measured off the geometry: the toe pads bottom out
-   * 0.104 m below the wrist, so this is that plus a millimetre so the pads press
-   * into the dirt rather than hovering a hair above it.
+   * the foot is planted. Measured off the geometry: the pads bottom out 0.106 m
+   * below the wrist.
+   *
+   * Deliberately six millimetres *under* that, so the pads sink into the dirt
+   * rather than resting exactly on it. The ground is a bilinear height field with
+   * a metre of grass standing in it, and a foot placed at the arithmetically
+   * correct height sits visibly above the surface the player can actually see —
+   * which is half of why the paws read as hovering. The other half is that
+   * nothing was casting a shadow; see the contact shadows in buildViewmodel().
    */
-  sole: 0.105,
+  sole: 0.100,
   /** Rest pose of a planted foot: nearly flat, toes barely down. */
   pitch: 0.12,
   yaw: 0.20,
@@ -362,6 +387,39 @@ function clawGeo(len: number, rad: number, bend: number, segs = 8, radial = 6): 
 }
 
 /**
+ * One marking on a limb segment. A *slash across* the upper face, not a band
+ * around it — and that distinction is the whole of why the forelegs used to read
+ * as two tails hanging in front of the camera.
+ *
+ * A tiger's tail is ringed: evenly spaced bands that close all the way round it.
+ * Its legs are not. The leg markings are sparse, irregular, crowded toward the
+ * elbow, and each one is a stroke that starts on the outer face, runs up over the
+ * top and dies before it reaches the inner one. The old code drew a stripe as a
+ * function of position along the limb alone, offset a little by a cosine of the
+ * azimuth — which is exactly the definition of a leaning ring, and paired with a
+ * tube tapering to a blunt tip it gave the player two tails.
+ *
+ * So a stripe now owns an arc as well as a position, and gets points on both ends
+ * of it. `az` is measured off the dorsal midline — the face that is actually
+ * pointed at the camera, see the note on `up` in limbGeo — and mirrored per side,
+ * so a positive value leans a stripe toward the outside of the animal.
+ */
+interface Stripe {
+  /** Position along the segment, 0 at the top. */
+  v: number
+  /** Half-width along the segment, at the near end of the arc. */
+  w: number
+  /** Centre of the arc, radians off the dorsal midline, positive outward. */
+  az: number
+  /** Half-extent of the arc, radians. Past ~1.3 it starts to close into a ring. */
+  arc: number
+  /** How far the stripe slides along the limb over its own arc — the lean. */
+  lean: number
+  /** How much narrower the far end is than the near one, 0..1. */
+  taper: number
+}
+
+/**
  * One segment of a foreleg: a tapered tube from the origin down to y = -1, so it
  * aims and stretches exactly like the CylinderGeometry it replaces.
  *
@@ -377,24 +435,31 @@ function clawGeo(len: number, rad: number, bend: number, segs = 8, radial = 6): 
  * dark bands; that is a thing this function knows the coordinates of, whereas a
  * texture only knows where its own pixels are.
  *
- * `bands` are positions along the segment, 0 at the top, and `stripeW` is their
- * half-width in the same units — so it has to be scaled per segment, because the
- * humerus is less than half the length of the forearm and a stripe is a fixed
- * number of centimetres on the animal either way. `radiusAt` is given the same
- * 0..1 coordinate, which is what lets the upper arm be a spindle — see the
- * profiles in buildViewmodel().
+ * `bands` are Stripes, whose `v` and `w` are in fractions of this segment — so
+ * they have to be scaled per segment, because the humerus and the forearm are
+ * different lengths and a stripe is a fixed number of centimetres on the animal
+ * either way. `radiusAt` is given the same 0..1 coordinate, which is what lets
+ * the upper arm be a spindle — see the profiles in buildViewmodel().
  *
- * `rings` has to stay well above 1/stripeW or the stripes fall between the rings
- * and come out as a flicker of uneven smudges, which is what two dozen rings and
- * a 2 cm stripe gave.
+ * `rings` is the one number here with a hard floor under it, and it has been
+ * under that floor twice. A marking is drawn into a vertex attribute, so a stripe
+ * narrower than the gap between two rings simply falls between them and does not
+ * exist. At 72 rings the spacing is 0.014 of the segment, and a 2 cm stripe on a
+ * 50 cm forearm is 0.04 wide — under three rings, with the tapered end of it
+ * under one. That is why the second attempt at these came out as a leg with two
+ * faint smudges on it when the arithmetic said full black.
+ *
+ * 180 puts eight rings across the widest stripe and three across the narrowest
+ * tail of one, which is enough for an edge that reads as an edge. It costs about
+ * 6 000 triangles a segment, paid once at build time, on a model that is the
+ * closest thing to the camera in the game.
  */
 function limbGeo(
   side: -1 | 1,
   radiusAt: (v: number) => number,
-  bands: number[],
-  stripeW: number,
-  rings = 52,
-  radial = 18,
+  bands: Stripe[],
+  rings = 180,
+  radial = 16,
 ): THREE.BufferGeometry {
   const pos: number[] = []
   const uv: number[] = []
@@ -428,20 +493,41 @@ function limbGeo(
       // abrupt, and the abruptness is most of what says "fur" at this distance.
       const up = smoothstep(0.5 - cz * 1.3 + side * cx * 0.22)
       c.copy(under).lerp(top, up)
-      // The stripes. Not rings: each one is offset along the limb by a cosine of
-      // the azimuth, so it leans across the tube the way a real marking does, and
-      // the widths alternate. A set of clean perpendicular bands is a barber pole,
-      // and that is what the first version of this looked like.
+      // Mottle. Real fur is never one flat tone — it is a mix of hairs banded at
+      // different heights, and at a metre away what that reads as is a coat that
+      // varies by a few percent over a hand's breadth. Without it the tawny is a
+      // single value across the whole limb and the tube reads as painted plastic
+      // no matter how good its silhouette is.
+      const mot = Math.sin(v * 21 + side * 2.1) * Math.sin(a * 3 + v * 13) * 0.5
+        + Math.sin(v * 47 + 1.3) * Math.sin(a * 7 - v * 29) * 0.25
+      c.offsetHSL(0, 0, mot * 0.035 * up)
+
+      // The markings. Each is a slash across the upper face with its own arc and
+      // its own lean, tapering to a point at both ends — see Stripe. A stripe
+      // that closes round the limb is a tail ring, and two ringed tubes is what
+      // this used to be.
       let dark = 0
-      for (let j = 0; j < bands.length; j++) {
-        const centre = bands[j]! + stripeW * 0.9 * Math.cos(a + j * 1.7)
-        const w = stripeW * (j % 3 === 1 ? 1.45 : j % 3 === 2 ? 0.75 : 1)
-        dark = Math.max(dark, 1 - smoothstep(Math.abs(v - centre) / w))
+      for (const s of bands) {
+        // Signed angle from this stripe's own azimuth, wrapped to -pi..pi so a
+        // stripe sitting near the seam does not tear in half.
+        const d0 = a - (-Math.PI / 2 + side * s.az)
+        const d = Math.atan2(Math.sin(d0), Math.cos(d0))
+        const k = d / s.arc
+        if (k <= -1 || k >= 1) continue
+        // Ends fade rather than stopping square, so the stripe has points on it
+        // the way a real marking does instead of ending in two blunt corners.
+        const ends = 1 - smoothstep((Math.abs(k) - 0.5) / 0.5)
+        const centre = s.v + s.lean * k
+        const w = s.w * (1 - s.taper * (k * 0.5 + 0.5))
+        dark = Math.max(dark, ends * (1 - smoothstep(Math.abs(v - centre) / w)))
       }
-      // Squared against the countershading, so a stripe reaches full black across
-      // the top of the leg and dies out before it gets to the pale underside —
-      // which is where they stop on the animal.
-      c.lerp(band, dark * up * up)
+      // Against the countershading as well, so whatever the arc leaves on the
+      // flank still dies out before it reaches the pale underside — which is
+      // where a marking stops on the animal. Scaled up first, though: `up` is
+      // already down to a half a third of the way round the tube, and multiplying
+      // straight by it left the stripes so faint on the visible face that the leg
+      // came out plain.
+      c.lerp(band, dark * Math.min(1, up * 1.6))
       col.push(c.r, c.g, c.b)
     }
   }
@@ -491,10 +577,18 @@ function limbGeo(
  * that the sunlit side is what looks bright, rather than the albedo doing it — and
  * the underside is a dirty cream, not paper.
  *
+ * Down again from 0x8e5620, which was still coming out of the tone mapper as a
+ * clean pumpkin. Direct sun in this game runs at intensity 3 and ACES lifts the
+ * midtones hard, so an albedo that looks correct in a swatch renders a full stop
+ * brighter and a good deal more saturated than the animal. This is a rust with
+ * brown in it, and the mottle in limbGeo breaks it up further — a coat that is
+ * one exact value everywhere is the tell of a painted model no matter what
+ * shape it is on.
+ *
  * The band is near black because it is. Tiger stripes are not brown.
  */
-const LIMB_TOP = 0x8e5620
-const LIMB_UNDER = 0xac9c80
+const LIMB_TOP = 0x7c4a20
+const LIMB_UNDER = 0xa8977c
 const LIMB_BAND = 0x120c08
 
 /**
@@ -541,6 +635,51 @@ function pawGrain(): THREE.CanvasTexture {
   return t
 }
 
+/**
+ * The blot a paw puts on the ground under it.
+ *
+ * This is the fix for the paws hovering, and no amount of work on the foot itself
+ * substitutes for it. The viewmodel does not cast into the shadow map — it is a
+ * camera child that would need its own pass, and at a low sun a shoulder joint
+ * that lives inside the animal's chest would throw a wall of shadow across the
+ * whole frame — so before this there was not one pixel anywhere in the render
+ * connecting a foot to the dirt it was standing on. A paw with no contact shadow
+ * reads as floating however accurately it is placed, because "floating" is
+ * precisely the absence of that cue.
+ *
+ * Soft-edged and quite small: it is ambient occlusion under a foot, not a sun
+ * shadow, so it does not stretch or take a direction. Its job is to say the foot
+ * is *touching*, and it fades out as the paw lifts through the swing — which is
+ * the other half of the cue, because a shadow that stays put while the foot rises
+ * is worse than none at all.
+ */
+function contactTex(): THREE.CanvasTexture {
+  const S = 128
+  const cv = document.createElement('canvas')
+  cv.width = cv.height = S
+  const c = cv.getContext('2d')!
+  // Squared falloff rather than a linear gradient: occlusion under a foot is
+  // dense right beneath the pads and gone within a paw's width, and a linear ramp
+  // reads as a painted grey disc.
+  //
+  // The dense core is deliberately wider than it looks like it should be. Seen
+  // from a standing player's eye the foot is almost directly below, so the paw
+  // covers its own contact shadow entirely — everything the player can see of it
+  // is the penumbra that reaches out past the toes. A tight blot is invisible in
+  // the one view the player spends the most time in.
+  const g = c.createRadialGradient(S / 2, S / 2, 0, S / 2, S / 2, S / 2)
+  g.addColorStop(0, 'rgba(0,0,0,0.88)')
+  g.addColorStop(0.42, 'rgba(0,0,0,0.68)')
+  g.addColorStop(0.68, 'rgba(0,0,0,0.30)')
+  g.addColorStop(0.86, 'rgba(0,0,0,0.07)')
+  g.addColorStop(1, 'rgba(0,0,0,0)')
+  c.fillStyle = g
+  c.fillRect(0, 0, S, S)
+  const t = new THREE.CanvasTexture(cv)
+  t.colorSpace = THREE.SRGBColorSpace
+  return t
+}
+
 /** Fresh arterial blood, for whatever the claws have been in. */
 const BLOOD = new THREE.Color(0x6d0a0c)
 /**
@@ -557,11 +696,23 @@ const lunge = new THREE.Vector3()
 /** Axis a fresh limb segment runs along once its top is put at the origin. */
 const DOWN = new THREE.Vector3(0, -1, 0)
 /**
- * Length of the humerus, shoulder to elbow. A tiger's is about a third of a metre
- * and it does not change, which is the point: this is a *fixed* bone now rather
- * than a fraction of however far away the foot happens to be. See updateArms().
+ * Length of the humerus, shoulder to elbow. Fixed, which is the point: this is a
+ * *bone* rather than a fraction of however far away the foot happens to be. See
+ * updateArms().
+ *
+ * It was 0.31 against a forearm that solved out at about 0.72, and that 1:2.3
+ * split is why there was no elbow to see. On a tiger the humerus and the radius
+ * are within a centimetre of each other — call it 1:1 — so at 0.31 the joint sat
+ * a third of the way down a limb whose top third is inside the animal's chest and
+ * below the bottom of the frame at every pitch. What the player got was one
+ * unbroken tapering tube from the corner of the screen to the foot: a tail.
+ *
+ * At 0.44 against a forearm of about 0.55 the split is 1:1.25, and the elbow
+ * lands out in the open where the bend can be seen. That is the single change
+ * that makes the thing read as a leg, because the eye does not measure how long a
+ * limb is in first person — it only checks whether it bends.
  */
-const UPPER_LEN = 0.31
+const UPPER_LEN = 0.44
 /**
  * Which way the elbow is pushed off the straight shoulder-to-wrist line.
  *
@@ -570,8 +721,15 @@ const UPPER_LEN = 0.31
  * per side. Without it the two-bone solve is ambiguous and the joint pops to
  * whichever side the arithmetic drifts to; with it the leg always folds the way a
  * leg folds, and the elbow is the part of the limb the player sees most of.
+ *
+ * Lengthened along with the humerus. The pole is added to a *unit* wrist
+ * direction, so its magnitude is what sets the angle between the two bones: at
+ * 0.39 the old one bent the limb 21 degrees, which over a 31 cm humerus bowed the
+ * leg 11 cm off straight — less than the width of the limb itself, so it was
+ * invisible. This is 0.62, which is a 32-degree bend and a 23 cm offset on a
+ * bone half again as long.
  */
-const ELBOW_POLE = { x: 0.10, y: -0.20, z: 0.32 }
+const ELBOW_POLE = { x: 0.17, y: -0.30, z: 0.52 }
 const elbowAt = new THREE.Vector3()
 const poleAt = new THREE.Vector3()
 const wristAt = new THREE.Vector3()
@@ -679,6 +837,9 @@ export class Tiger {
   private armR!: THREE.Mesh
   private foreL!: THREE.Mesh
   private foreR!: THREE.Mesh
+  /** The blot each paw puts on the ground. See contactTex(). */
+  private shadowL!: THREE.Mesh
+  private shadowR!: THREE.Mesh
   /** The five hooks on each foot, in build order, for sheathing. See setClaws(). */
   private clawsL: THREE.Group[] = []
   private clawsR: THREE.Group[] = []
@@ -777,7 +938,7 @@ export class Tiger {
     // foot is the same animal as the leg; it gets the same albedo.
     const FUR_TOP = LIMB_TOP // dorsal ochre, over the metacarpus
     const FUR_UNDER = LIMB_UNDER // the cream that comes round from the belly
-    const TOE_TOP = 0x9b6329 // toe knuckles catch the light, so a shade lighter
+    const TOE_TOP = 0x8a5626 // toe knuckles catch the light, so a shade lighter
     const CLEFT = 0x2c1a0c // the shadowed gap between two toes
     const PAD = 0x1b1210 // pads are near black and always in shadow
     const BAND = LIMB_BAND // the last of the leg's stripes, dying at the wrist
@@ -818,19 +979,26 @@ export class Tiger {
       // the aimed forearm arrives. The forearm's far end is a hard cylinder cap
       // and it is not parented to this group, so it does not rotate with the
       // paw — this is what hides the shear when the foot turns under.
-      fur.push(shade(ruffle(ellipsoid(0.078, 0.066, 0.072, 14, 11)
-        .translate(0, -0.006, 0.012), 0.004), FUR_TOP, FUR_UNDER, -0.055, 0.005))
+      //
+      // Shorter front-to-back than it was and wider across. The old foot was
+      // 20 cm wide and 26 cm long, which is the proportion of a hand; a cat's
+      // forepaw is as wide as it is long, and the roundness is a good part of what
+      // the eye is reading when it decides whether it is looking at a paw.
+      fur.push(shade(ruffle(ellipsoid(0.084, 0.068, 0.058, 16, 12)
+        .translate(0, -0.006, 0.030), 0.004), FUR_TOP, FUR_UNDER, -0.055, 0.005))
 
-      // Metacarpus. Stops at z = -0.104 so the toes are what the front of the
-      // foot is made of.
-      fur.push(shade(ruffle(ellipsoid(0.086, 0.050, 0.078, 16, 12)
-        .translate(0, -0.048, -0.026), 0.005), FUR_TOP, FUR_UNDER, -0.090, -0.015))
+      // Metacarpus. Stops at z = -0.078 so the toes are what the front of the
+      // foot is made of, and 19.6 cm across — wider than the 14.6 cm forearm
+      // above it, which is the flare that says "foot" before any detail on it
+      // gets a chance to.
+      fur.push(shade(ruffle(ellipsoid(0.098, 0.052, 0.062, 18, 12)
+        .translate(0, -0.048, -0.016), 0.005), FUR_TOP, FUR_UNDER, -0.090, -0.015))
 
       // The last stripe. A tiger's leg bands stop at the carpus; painting one
       // narrow band across the back of the foot is what ties the plain paw to the
       // striped foreleg above it, and it is the only marking on the foot itself.
-      fur.push(tint(ruffle(ellipsoid(0.080, 0.058, 0.016, 14, 8)
-        .translate(0, -0.020, 0.030), 0.003), BAND))
+      fur.push(tint(ruffle(ellipsoid(0.086, 0.060, 0.015, 14, 8)
+        .translate(0, -0.018, 0.034), 0.003), BAND))
 
       for (let i = 0; i < Tiger.TOES; i++) {
         // -1.5, -0.5, 0.5, 1.5 — an even spread with no toe on the centre line.
@@ -839,52 +1007,52 @@ export class Tiger {
         // The middle pair lead. The outer pair sit back and turn out, which is
         // the shape of a cat's foot from above and the reason a real paw reads as
         // an arc of four rather than as a row.
-        const back = t * t * 0.020
-        // Pitch and height both came down. A standing cat's toes are packed — the
-        // clefts between them are creases, not gaps — and they sit no higher than
-        // the metacarpus behind them. At 0.0545 apart and 0.026 tall they stood
-        // proud of the foot as four distinct balls, which is what a paw looks like
-        // only when the animal is holding something.
-        const tx = side * k * 0.0495
-        const tz = -0.132 + back
-        const toe = ellipsoid(0.027, 0.021, 0.046, 10, 8)
+        const back = t * t * 0.018
+        // Short, fat and packed. The old toe was 5.4 cm across and 9.2 cm long —
+        // a finger, and four of them splayed on the front of the foot is a hand.
+        // A cat's toe is 6 cm across and 7.6 long, wider than it is deep, and at
+        // 5.2 cm apart they overlap each other by nearly a centimetre: the clefts
+        // between them are creases, not gaps.
+        const tx = side * k * 0.052
+        const tz = -0.094 + back
+        const toe = ellipsoid(0.030, 0.025, 0.038, 12, 9)
         // Turned out, and the outer toes rolled over onto their sides a little.
         toe.rotateY(-side * t * 0.26)
         toe.rotateX(0.10)
-        toe.translate(tx, -0.060, tz)
-        fur.push(shade(ruffle(toe, 0.0035), TOE_TOP, FUR_UNDER, -0.088, -0.044))
+        toe.translate(tx, -0.058, tz)
+        fur.push(shade(ruffle(toe, 0.0035), TOE_TOP, FUR_UNDER, -0.088, -0.042))
 
         // The cleft. Three of them, between the four toes, sunk just under the
         // fur so what shows is a dark line rather than a shape — which is all a
         // gap between two toes ever is at this distance, and it is what stops the
         // four of them merging into one lump under a flat overhead sun.
         if (i < Tiger.TOES - 1) {
-          const cleft = ellipsoid(0.007, 0.022, 0.042, 6, 6)
-          cleft.translate(side * (k + 0.5) * 0.0495, -0.054, tz - 0.006)
+          const cleft = ellipsoid(0.006, 0.021, 0.034, 6, 6)
+          cleft.translate(side * (k + 0.5) * 0.052, -0.050, tz - 0.004)
           fur.push(tint(cleft, CLEFT))
         }
 
         // Digital pad, under its own toe and a few millimetres proud of the fur,
         // so the foot is standing on its pads and not on its hair.
-        const pad = ellipsoid(0.023, 0.013, 0.030, 8, 6)
-        pad.translate(tx, -0.095, tz + 0.002)
+        const pad = ellipsoid(0.026, 0.014, 0.026, 8, 6)
+        pad.translate(tx, -0.092, tz + 0.004)
         fur.push(tint(pad, PAD))
 
         // Claw, at the toe tip and angled down and out along the toe it belongs to.
-        addClaw(0.052, 0.0105, 0.62, tx, -0.056, tz - 0.038, 0.16, -side * t * 0.26, side * t * 0.20)
+        addClaw(0.060, 0.0115, 0.62, tx, -0.054, tz - 0.032, 0.16, -side * t * 0.26, side * t * 0.20)
       }
 
       // Metacarpal pad: one broad central lobe with two smaller ones, which is
       // the trilobed shape a cat leaves in mud.
-      fur.push(tint(ellipsoid(0.055, 0.014, 0.040, 10, 6).translate(0, -0.092, -0.048), PAD))
-      fur.push(tint(ellipsoid(0.026, 0.012, 0.026, 8, 6).translate(-0.050, -0.089, -0.030), PAD))
-      fur.push(tint(ellipsoid(0.026, 0.012, 0.026, 8, 6).translate(0.050, -0.089, -0.030), PAD))
+      fur.push(tint(ellipsoid(0.062, 0.015, 0.038, 10, 6).translate(0, -0.090, -0.036), PAD))
+      fur.push(tint(ellipsoid(0.028, 0.013, 0.026, 8, 6).translate(-0.056, -0.087, -0.020), PAD))
+      fur.push(tint(ellipsoid(0.028, 0.013, 0.026, 8, 6).translate(0.056, -0.087, -0.020), PAD))
 
       // Dewclaw, high on the inside of the wrist and off the ground. Nobody would
       // miss it, but it is the kind of thing that is only ever on the real animal
       // — and it is visible on the inner edge of the frame, which is where the eye
       // goes when the two paws are symmetrical about the reticle.
-      addClaw(0.036, 0.0085, 0.7, -side * 0.070, -0.026, -0.036, -0.25, side * 0.75, -side * 0.5)
+      addClaw(0.038, 0.0090, 0.7, -side * 0.080, -0.022, -0.008, -0.25, side * 0.75, -side * 0.5)
 
       const merged = mergeGeometries(fur.map((p) => (p.index ? p.toNonIndexed() : p)), false)!
       for (const p of fur) p.dispose()
@@ -936,43 +1104,62 @@ export class Tiger {
     // It costs nothing to look at, because the shoulder end is below the frame at
     // every pitch but the very steepest and a thin tip even there; what shows is
     // the elbow half, at full size.
-    // Stripe positions and widths are in fractions of each segment, and the widths
-    // are set so both come out at about 2 cm on the animal: the humerus is 0.31 m
-    // and the forearm 0.72, so the same number in both would put finger-width
-    // stripes on one and hand-width bands on the other.
-    // 0.076 at the elbow, not 0.070: the forearm below it starts at 0.076 and the
-    // two used to meet with 6 mm of step between them, which reads as a cuff.
+    // Stripe positions and widths are in fractions of each segment, so they have
+    // to be set per segment: the humerus is 0.44 m and the forearm about 0.55,
+    // and the same fraction in both would put finger-width stripes on one and
+    // hand-width bands on the other.
+    //
+    // The humerus now necks in over its last quarter. That is the olecranon: the
+    // triceps mass sits above the elbow and the joint itself is bone close under
+    // the skin, so a foreleg is at its thickest a hand's breadth *above* the
+    // bend. Without the neck the two segments met at their widest and the elbow
+    // was the one place on the limb with no shape at all — which is most of why
+    // the whole thing read as one continuous tube. It ends at 0.062, which is
+    // exactly where the forearm below it starts, so there is no cuff.
     const arm = (side: -1 | 1) => new THREE.Mesh(
-      limbGeo(side, (v) => 0.020 + 0.056 * smoothstep((v - 0.10) / 0.80),
-        [0.34, 0.58, 0.80, 0.95], 0.055), pawMat)
+      limbGeo(side, (v) => 0.018 + 0.060 * smoothstep((v - 0.06) / 0.52)
+        - 0.016 * smoothstep((v - 0.70) / 0.30),
+      [
+        { v: 0.46, w: 0.052, az: 0.15, arc: 1.15, lean: 0.10, taper: 0.45 },
+        { v: 0.68, w: 0.040, az: -0.30, arc: 0.95, lean: -0.09, taper: 0.55 },
+        { v: 0.86, w: 0.046, az: 0.34, arc: 1.05, lean: 0.11, taper: 0.40 },
+      ]), pawMat)
     // The forearm is honest: a taper from the elbow to the wrist, with a belly of
     // flexor muscle in the top third and the bones close under the skin at the
     // carpus. Cats carry a lot of the foreleg's mass high, and a straight cone from
     // joint to joint is the silhouette of a table leg.
     //
-    // The previous profile went 80 mm at the belly to 56 mm at the wrist, and 30%
-    // over 72 cm is not a taper you can see: on the render both forelegs were
-    // cylinders, and a cylinder ending in a paw is a broom. This one loses three
-    // fifths — 85 mm to 33 mm — and most of it goes in two places rather than
-    // evenly, because that is where it goes on the animal. The shaft sheds its
-    // girth through the middle third, and then the carpus necks in hard over the
-    // last 20 cm. The neck is the important half: the paw's own carpal mass is
-    // 78 mm across, so a wrist that arrives at 56 mm barely flares into it, and
-    // what makes a cat's foot read as a foot is that it is visibly wider than the
-    // leg it is on.
+    // The previous profile peaked at 172 mm across and ended at 66 mm. The first
+    // of those is the number that mattered: at 172 mm the forearm was as wide as
+    // the paw on the end of it, and the flare that makes a cat's foot read as a
+    // foot cannot exist if the leg is already that thick. A tiger's forearm is
+    // about 110 mm at the thickest and its forepaw is 170 mm across — the foot is
+    // half again wider than the leg, and that ratio is doing more work than any
+    // amount of detail on the foot itself.
+    //
+    // So this peaks at 146 mm (110 on the animal, at the viewmodel's scale) and
+    // necks to 56 at the carpus. The loss goes in two places rather than evenly,
+    // because that is where it goes on the animal: the shaft sheds its girth
+    // through the middle third, and then the carpus necks in hard over the last
+    // 20 cm.
     const fore = (side: -1 | 1) => new THREE.Mesh(
       limbGeo(side, (v) => {
-        const shaft = 0.076 - 0.030 * smoothstep((v - 0.12) / 0.70)
-        const belly = 0.010 * Math.sin(Math.PI * Math.min(1, v * 2.4))
-        const wrist = 0.013 * smoothstep((v - 0.80) / 0.17)
+        const shaft = 0.062 - 0.022 * smoothstep((v - 0.12) / 0.66)
+        const belly = 0.011 * Math.sin(Math.PI * Math.min(1, v * 2.2))
+        const wrist = 0.012 * smoothstep((v - 0.78) / 0.19)
         return shaft + belly - wrist
       },
-      // Four bands, irregularly spaced, and none below two thirds. Six evenly
-      // spaced ones down the whole length is a rugby sock, which is exactly what
-      // it looked like; a tiger's foreleg markings crowd toward the elbow and the
-      // lower leg is plain but for the single band across the carpus, which the
-      // paw draws itself.
-      [0.09, 0.26, 0.45, 0.64], 0.021), pawMat)
+      // Three markings, all of them in the top half. A tiger's foreleg stripes
+      // crowd toward the elbow and the lower leg is plain but for the single band
+      // across the carpus, which the paw draws itself. The previous set ran four
+      // bands down to two thirds of the way to the wrist and closed each of them
+      // round the tube, which is a tail.
+      [
+        { v: 0.10, w: 0.030, az: 0.12, arc: 1.30, lean: 0.060, taper: 0.40 },
+        { v: 0.29, w: 0.021, az: -0.38, arc: 1.00, lean: -0.045, taper: 0.60 },
+        { v: 0.47, w: 0.026, az: 0.30, arc: 1.15, lean: 0.050, taper: 0.50 },
+        { v: 0.66, w: 0.017, az: -0.12, arc: 0.90, lean: -0.034, taper: 0.55 },
+      ]), pawMat)
     this.armL = arm(-1)
     this.armR = arm(1)
     this.foreL = fore(-1)
@@ -981,12 +1168,54 @@ export class Tiger {
     this.shoulderR.add(this.armR, this.foreR)
 
     this.vm.add(this.shoulderL, this.shoulderR)
+
+    // Contact shadows. Parented to the viewmodel rather than to a paw, because
+    // they belong to the *ground*: the foot rolls and pitches through a stride
+    // and its shadow does not, so hanging them off the foot would tip them off
+    // the dirt at every plant.
+    const contact = new THREE.MeshBasicMaterial({
+      color: 0x000000,
+      map: contactTex(),
+      // Plain alpha blending of black, which works out to a multiply: the result
+      // is dst * (1 - a). So the blot darkens whatever it lands on rather than
+      // painting a grey disc over it — grass, wet mud and pale dirt all take it
+      // differently, and that is what stops it reading as a decal.
+      //
+      // Not THREE.MultiplyBlending, which is dst * src.rgb and ignores alpha
+      // entirely: with an all-black source that is a black square with hard
+      // edges, which is what the first version of this drew.
+      transparent: true,
+      depthWrite: false,
+      // Depth-tested, so grass and the lip of a rise in front of the foot cut into
+      // the blot the way they would cut into a real one. Taking it off the depth
+      // buffer instead — which is the usual dodge for a decal sitting on a
+      // bilinear height field — draws the whole disc over everything in front of
+      // it, and at this range that is a black hole the size of a quarter of the
+      // screen. The polygon offset is what keeps it off the dirt without that.
+      polygonOffset: true,
+      polygonOffsetFactor: -4,
+      polygonOffsetUnits: -8,
+      toneMapped: false,
+    })
+    // -PI/2. A PlaneGeometry faces +z, and R_x(θ) takes that to (0, -sinθ, cosθ),
+    // so it is the *negative* quarter turn that lays the quad face-up. Getting the
+    // sign wrong points it at the dirt, and back-face culling then eats it whole.
+    const quad = new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2)
+    // A material each: the two feet are at different heights for most of a
+    // stride, and opacity is how the blot reports height. Sharing one would give
+    // both feet whichever fade updateContact() wrote last.
+    this.shadowL = new THREE.Mesh(quad, contact)
+    this.shadowR = new THREE.Mesh(quad, contact.clone())
+    this.vm.add(this.shadowL, this.shadowR)
+
     // Viewmodel renders slightly in front of the world; keep it out of walls.
     this.vm.traverse((o) => {
       if (o instanceof THREE.Mesh) {
         o.renderOrder = 10
         o.castShadow = false
-        ;(o.material as THREE.Material).depthTest = true
+        // ...except the contact shadows, which have to draw under the limb.
+        if (o === this.shadowL || o === this.shadowR) o.renderOrder = 9
+        else (o.material as THREE.Material).depthTest = true
       }
     })
     this.resetPaws()
@@ -1651,6 +1880,41 @@ export class Tiger {
       fore.position.copy(elbowAt)
       fore.quaternion.setFromUnitVectors(DOWN, segDir.divideScalar(lower))
       fore.scale.y = lower + 0.03
+    }
+    this.updateContact()
+  }
+
+  /**
+   * Put each paw's blot on the ground under it, and fade it as the foot lifts.
+   *
+   * Both halves matter. A shadow that appears under a planted foot is what says
+   * the foot is on the dirt; a shadow that then *stays* while the foot swings
+   * forward would say the opposite about every other frame of a stride. So it
+   * tracks the foot horizontally, sits on the ground vertically, and trades size
+   * for opacity with height exactly the way a real contact shadow does — wider
+   * and weaker as the thing casting it climbs away.
+   */
+  private updateContact() {
+    for (const [paw, blot, side] of [
+      [this.pawL, this.shadowL, -1],
+      [this.pawR, this.shadowR, 1],
+    ] as const) {
+      const ground = -this.eyeAbove + this.slopeAt(side)
+      // Back out of shoulder space; see place().
+      const px = side * SHOULDER.x + paw.position.x
+      const pz = SHOULDER.z + paw.position.z
+      const h = Math.max(0, SHOULDER.y + paw.position.y - ground - PAW.sole)
+      // Gone by a third of a metre up, which is well above the gait's peak lift
+      // but not so high that a pounce leaves a blot hanging under the animal.
+      const near = Math.max(0, 1 - h / 0.34)
+      blot.position.set(px, ground + 0.02, pz)
+      // Two and a half times the foot at contact, and wider still as it climbs.
+      // The paw is 0.22 m across and hides everything directly under it, so the
+      // blot has to be big enough to show past the toes or it shows nowhere.
+      blot.scale.setScalar(0.54 + h * 1.1)
+      const m = blot.material as THREE.MeshBasicMaterial
+      m.opacity = near * near * 0.8
+      blot.visible = m.opacity > 0.01
     }
   }
 

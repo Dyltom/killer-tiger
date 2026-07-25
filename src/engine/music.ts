@@ -717,7 +717,14 @@ export class Music {
     this.nextStepTime = t + dur
 
     // Riser: noise sweeping up through a resonant bandpass.
-    const out = this.voice(0.5, 0.6)
+    //
+    // The whole stinger used to sustain at 0.81 of full scale for well over a
+    // second, which is a long way past the limiter's threshold — so every wave
+    // change clamped the entire mix and held it there while the horn rang. The
+    // footsteps and shots underneath it did not fade, they were pushed down by
+    // the one thing that was supposed to be playing over them, and the drop of
+    // the wave impact itself was inaudible under its own fanfare.
+    const out = this.voice(0.5, 0.5)
     const src = this.noiseSource(t, dur)
     const bp = ctx.createBiquadFilter()
     bp.type = 'bandpass'
@@ -726,7 +733,7 @@ export class Music {
     bp.Q.value = 3
     const env = ctx.createGain()
     env.gain.setValueAtTime(0.0001, t)
-    env.gain.exponentialRampToValueAtTime(0.5, t + dur * 0.92)
+    env.gain.exponentialRampToValueAtTime(0.38, t + dur * 0.92)
     env.gain.exponentialRampToValueAtTime(0.0001, t + dur + 0.08)
     src.connect(bp)
     bp.connect(env)
@@ -735,8 +742,8 @@ export class Music {
     // Horn call on the new mode's root, so the key change is announced.
     const stack = [this.pitch(0, 1), this.pitch(4, 1)]
     if (wave >= MUSIC.exoticFrom) stack.push(this.pitch(1, 2))
-    this.brassStab(t + dur - 0.05, stack, 2.2, 1.0)
-    this.taikoHit(t + dur, 1.1, 0.9)
-    this.taikoHit(t + dur, 0.8, 1.4)
+    this.brassStab(t + dur - 0.05, stack, 2.2, 0.6)
+    this.taikoHit(t + dur, 0.78, 0.9)
+    this.taikoHit(t + dur, 0.58, 1.4)
   }
 }

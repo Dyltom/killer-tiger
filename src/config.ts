@@ -959,7 +959,7 @@ export const LEVELS = {
 
   // Stingers. These were eating the whole headroom; they are deliberately
   // under the gun now, and they duck the score instead of shouting over it.
-  waveStart: 0.2,
+  waveStart: 0.3,
   gameOver: 0.4,
   frenzy: 0.26,
   powerup: 0.5,

@@ -477,7 +477,7 @@ export class Audio {
   // ------------------------------------------------------------ primitives
   /** A pitched voice with an exponential frequency glide and AD envelope. */
   private tone(
-    dest: GainNode,
+    dest: AudioNode,
     type: OscillatorType,
     f0: number,
     f1: number,
@@ -505,7 +505,7 @@ export class Audio {
 
   /** A filtered noise burst. `q` above 1 turns it from air into resonance. */
   private noise(
-    dest: GainNode,
+    dest: AudioNode,
     dur: number,
     gain: number,
     filterType: BiquadFilterType,
@@ -562,7 +562,7 @@ export class Audio {
    * all at once and then peters out, rather than arriving evenly.
    */
   private grains(
-    dest: GainNode,
+    dest: AudioNode,
     count: number,
     spread: number,
     gain: number,
@@ -577,14 +577,16 @@ export class Audio {
     const ctx = this.ctx
     if (!ctx) return
     for (let i = 0; i < count; i++) {
-      let d = dest
+      // The panner is the only node a grain needs to be placed. This used to
+      // put a unity-gain pass-through in front of it, which is a fifth of every
+      // grain's node count doing nothing — and grains are the densest thing in
+      // the file, sixteen of them in a single roar.
+      let d: AudioNode = dest
       if (width > 0 && ctx.createStereoPanner) {
-        const g = ctx.createGain()
         const p = ctx.createStereoPanner()
         p.pan.value = rand(-width, width)
-        g.connect(p)
         p.connect(dest)
-        d = g
+        d = p
       }
       const f = rand(fLo, fHi)
       this.noise(
@@ -608,7 +610,7 @@ export class Audio {
    * is what turns a scream into a word.
    */
   private formants(
-    dest: GainNode,
+    dest: AudioNode,
     source: AudioNode,
     freqs: readonly [number, number, number],
     levels: readonly [number, number, number],
@@ -646,7 +648,7 @@ export class Audio {
    * and where a voice under strain rings hardest.
    */
   private breath(
-    dest: GainNode,
+    dest: AudioNode,
     at: number,
     dur: number,
     gain: number,
@@ -938,8 +940,8 @@ export class Audio {
     this.noise(dest, 0.022, 0.2, 'highpass', 3600 * j, 2200, 0, 0.7, 0.0012)
     // Flat impact on a torso. Short, and cornered well above where a rifle
     // blasts: this is a body taking weight, not powder going off.
-    this.noise(dest, 0.085, 0.4, 'lowpass', 1100 * j, 400, 0.004, 1.2, 0.002)
-    this.tone(dest, 'triangle', 330 * j, 110, 0.1, 0.3, 0.004, 0.002)
+    this.noise(dest, 0.08, 0.4, 'lowpass', 1300 * j, 600, 0.004, 1.2, 0.002)
+    this.tone(dest, 'triangle', 330 * j, 150, 0.1, 0.3, 0.004, 0.002)
     // Wet drag. Bandpassed noise with a slow tail is cloth and skin opening —
     // and it is the claw's identity, so it carries rather than garnishes.
     this.noise(dest, 0.24, 0.6, 'bandpass', 1400 * j, 620, 0.02, 2.4, 0.012)
@@ -955,7 +957,7 @@ export class Audio {
     // below 250 Hz. A rifle's identity is that blast and the long roll after
     // it; a claw has neither. Taking the boom out is what separates them, and
     // it costs nothing, because the force of the strike reads from the tear.
-    this.tone(dest, 'sine', 185, 78, 0.12, 0.22, 0, 0.003)
+    this.tone(dest, 'sine', 210, 120, 0.11, 0.17, 0, 0.003)
   }
 
   /**
@@ -1491,6 +1493,10 @@ export class Audio {
     this.noise(dest, big ? 0.26 : 0.18, big ? 0.24 : 0.17, 'bandpass', 900 * j, 260 * j, 0, 2.8, 0.015)
     this.tone(dest, 'sine', 260 * j, 90 * j, big ? 0.3 : 0.22, big ? 0.2 : 0.14, 0.01, 0.02)
     this.grains(dest, big ? 5 : 3, 0.1, 0.07, 500, 2200, 0.006, 0.022, 0.02, 2.4, 0.35)
+    // The tongue coming off the palate. Tiny, and the only part of a swallow
+    // that lives above three kilohertz — without it the pickup is felt but not
+    // heard, which is why it measured forty-six decibels down at the top.
+    this.noise(dest, 0.008, 0.085, 'highpass', 4000, 2500, 0.002, 0.8, 0.0006)
     // Settling.
     if (big) this.tone(dest, 'sine', 70, 44, 0.4, 0.22, 0.1, 0.03)
   }
@@ -1508,14 +1514,27 @@ export class Audio {
     const dest = this.voice(PRI.normal, 0.7, LEVELS.powerup, {}, 1.4, true)
     if (!dest) return
     const root = 220
+    // The strike. A stack of tones with a slow attack does not begin, it
+    // appears — and something appearing is what a menu does, not what a buff
+    // landing on you does.
+    this.noise(dest, 0.02, 0.18, 'highpass', 5000, 3000, 0, 0.7, 0.0008)
     // A rising fourth-stack, which is the interval every "you got stronger"
     // cue in the medium is built on.
     for (const [i, mult] of [1, 1.5, 2, 3].entries()) {
       this.tone(dest, 'triangle', root * mult, root * mult * 1.002, 0.42, 0.13, i * 0.05, 0.01)
       this.tone(dest, 'sine', root * mult * 2, root * mult * 2, 0.3, 0.05, i * 0.05, 0.01)
+      // Struck-metal partials. Deliberately not whole multiples of the note:
+      // inharmonic upper partials that decay faster than the fundamental are
+      // the whole difference between a bell and an organ, and this measured
+      // thirty-six decibels down through presence — an organ, in a game about
+      // a tiger.
+      this.tone(dest, 'sine', root * mult * 4.1, root * mult * 4.1, 0.5, 0.035, i * 0.05, 0.004)
+      this.tone(dest, 'sine', root * mult * 6.8, root * mult * 6.8, 0.32, 0.02, i * 0.05, 0.004)
     }
     this.tone(dest, 'sine', 55, 55, 0.7, 0.28, 0, 0.02)
-    this.noise(dest, 0.5, 0.05, 'highpass', 3000, 8000, 0, 0.7, 0.2)
+    // Shimmer, at a level you can actually hear rather than as a token.
+    this.noise(dest, 0.6, 0.15, 'highpass', 3500, 9000, 0, 0.7, 0.18)
+    this.grains(dest, 9, 0.45, 0.055, 4000, 11000, 0.004, 0.02, 0.02, 3, 0.6)
   }
 
   /**
@@ -1676,16 +1695,29 @@ export class Audio {
 
   /** The hunt turning over. A cinematic drop, and the score answers it. */
   waveStart(wave = 1) {
-    const dest = this.voice(PRI.high, 3, LEVELS.waveStart, {}, 2.5, true)
+    const dest = this.voice(PRI.high, 3, LEVELS.waveStart, {}, 2.0, true)
     if (!dest) return
     this.duck(0.35)
+    // The strike, first and hardest.
+    //
+    // This measured its peak nearly three seconds in, which is to say the
+    // reverb wash was louder than the hit that caused it — the cue arrived as
+    // a swell rather than as something landing, and it was the loudest thing
+    // in the game by six decibels while it did so. A title-card gong is a
+    // transient with a long tail, not a long tail with a transient somewhere
+    // inside it, so the edge goes on the front and the send comes down.
+    this.noise(dest, 0.05, 0.5, 'highpass', 2500, 900, 0, 0.8, 0.0008)
+    // Impact.
+    this.noise(dest, 0.3, 0.32, 'lowpass', 2200, 200, 0, 1.1, 0.002)
     // Sub drop.
     this.tone(dest, 'sine', 96, 30, 1.8, 0.55, 0, 0.02)
     this.tone(dest, 'sawtooth', 144, 45, 1.4, 0.1, 0, 0.05)
-    // Impact.
-    this.noise(dest, 0.3, 0.32, 'lowpass', 2200, 200, 0, 1.1, 0.002)
     // A struck metal edge — the gong under a title card.
     this.noise(dest, 2.2, 0.09, 'bandpass', 1400, 500, 0.01, 2.4, 0.006)
+    // Metal rings above where the fundamental sits, and that ring is what
+    // carries the cue over a mix that is otherwise all low end.
+    this.noise(dest, 1.6, 0.075, 'bandpass', 4200, 2600, 0.005, 1.8, 0.004)
+    this.grains(dest, 10, 0.5, 0.085, 3000, 9000, 0.005, 0.03, 0.004, 2.6, 0.6)
     this.music?.stinger(wave)
   }
 
@@ -1695,11 +1727,33 @@ export class Audio {
     if (!dest) return
     this.music?.setMode('dead')
     this.tone(dest, 'sine', 150, 32, 3.0, 0.45, 0, 0.05)
+    // The floor under it. A cue whose whole idea is that everything falls
+    // measured thirty-two decibels down in the sub — the glide from 150 Hz
+    // spends almost none of its length low enough to be felt, so the drop was
+    // something you heard described rather than something that dropped.
+    this.tone(dest, 'sine', 62, 26, 2.6, 0.4, 0.02, 0.08)
     this.tone(dest, 'sawtooth', 224, 47, 2.6, 0.13, 0.05, 0.1)
     this.tone(dest, 'sawtooth', 226, 47.5, 2.6, 0.13, 0.05, 0.1)
     this.noise(dest, 2.8, 0.1, 'lowpass', 1200, 90, 0, 1, 0.02)
-    // One last breath out.
-    this.noise(dest, 1.2, 0.07, 'bandpass', 700, 300, 0.5, 1.6, 0.2)
+    // A struck edge falling with it. Dark is the right answer for a death
+    // sting; featureless is not, and this measured thirty decibels down across
+    // the whole top half of the spectrum — a mud puddle with a pitch. What it
+    // was missing is the one thing that rings: inharmonic partials sliding
+    // down with the fundamental, so the fall has something to be heard against.
+    for (const [m, lvl] of [[3.1, 0.1], [5.6, 0.06], [9.2, 0.035]] as const) {
+      this.tone(dest, 'sine', 224 * m, 47 * m, 2.4, lvl, 0.04, 0.06)
+    }
+    // One last breath out, on a tract rather than as a band of hiss.
+    this.breath(dest, 0.45, 1.5, 0.55, [320, 780, 1900], 2.2)
+    // The body settling — sparse, slowing, and the last thing you hear.
+    this.grains(dest, 13, 1.4, 0.42, 1300, 7500, 0.008, 0.05, 0.1, 2.4, 0.55)
+    // Tinnitus. The ring swells after the blow rather than with it, holds, and
+    // is still there when everything else has gone — which is both what the top
+    // of this cue was missing and the only honest thing to put up there. A
+    // death does not get brighter; the listener's ears do.
+    this.tone(dest, 'sine', 5100, 4700, 2.6, 0.05, 0.12, 0.45)
+    this.tone(dest, 'sine', 3300, 3150, 2.4, 0.03, 0.16, 0.5)
+    this.noise(dest, 2.2, 0.06, 'bandpass', 6200, 5200, 0.2, 4, 0.5)
   }
 
   /** Chain kills climb the score's own scale, so the combo is musical. */
@@ -1712,6 +1766,11 @@ export class Audio {
     const f = 330 * Math.pow(2, semi / 12)
     this.tone(dest, 'triangle', f, f, 0.16, 0.13, 0, 0.004)
     this.tone(dest, 'sine', f * 2, f * 2, 0.1, 0.05, 0.01, 0.004)
+    // Struck, not beeped. Two inharmonic partials that die before the
+    // fundamental does is the cheapest bell there is, and it costs two
+    // oscillators to stop the combo sounding like a menu confirming something.
+    this.tone(dest, 'sine', f * 2.76, f * 2.76, 0.13, 0.042, 0, 0.002)
+    this.tone(dest, 'sine', f * 5.4, f * 5.4, 0.075, 0.02, 0, 0.002)
     this.noise(dest, 0.05, 0.03, 'highpass', 6000, 9000, 0, 0.8, 0.001)
   }
 
@@ -1721,7 +1780,19 @@ export class Audio {
     if (!dest) return
     this.duck(0.6)
     this.noise(dest, 0.5, 0.14, 'bandpass', 200, 3000, 0, 2.5, 0.4)
+    // The top of the riser. A rise that stops at three kilohertz does not read
+    // as tightening, it reads as a filter opening and then thinking better of
+    // it; the tension is in the part that keeps going.
+    this.noise(dest, 0.5, 0.17, 'highpass', 1800, 11000, 0, 0.7, 0.42)
+    this.grains(dest, 10, 0.48, 0.09, 3500, 10000, 0.004, 0.02, 0.02, 2.6, 0.6)
     this.tone(dest, 'sine', 42, 62, 0.6, 0.4, 0.35, 0.05)
+    // Two heartbeats under the rise, the second harder than the first. This is
+    // the tiger's own body, and it is the only thing in the cue that says the
+    // rage is happening to something rather than being applied to the mix.
+    for (const [i, at] of [0, 0.3].entries()) {
+      this.tone(dest, 'sine', 62, 34, 0.16, 0.3 + i * 0.12, at, 0.01)
+      this.noise(dest, 0.1, 0.09, 'lowpass', 260, 90, at, 1.1, 0.004)
+    }
     this.roar()
   }
 
