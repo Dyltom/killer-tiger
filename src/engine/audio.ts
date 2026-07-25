@@ -68,6 +68,25 @@ function rand(a: number, b: number): number {
   return a + Math.random() * (b - a)
 }
 
+/**
+ * A clamp that actually clamps.
+ *
+ * `Math.max(lo, Math.min(hi, x))` passes NaN straight through, so the obvious
+ * spelling is not a clamp at all for the one input that most needs clamping.
+ * That matters here more than it usually would: a NaN reaching an AudioParam
+ * throws, sounds are scheduled from inside the update loop, and so a single
+ * bad position takes the rest of the frame — physics, render and all — with
+ * it. This is the third separate instance of that bug found in this file, so
+ * it gets a name rather than a fourth hand-rolled guard.
+ *
+ * `fallback` defaults to `lo` because most of these are distances, where zero
+ * is the safe answer; pan passes 0, since the safe answer for a broken
+ * position is the centre of the field, not hard left.
+ */
+function clamp(x: number, lo: number, hi: number, fallback = lo): number {
+  return Number.isFinite(x) ? Math.max(lo, Math.min(hi, x)) : fallback
+}
+
 /** Soft saturation. Adds the odd harmonics that make a growl sound like meat. */
 function driveCurve(amount: number): Float32Array<ArrayBuffer> {
   const n = 1024
@@ -326,6 +345,28 @@ export class Audio {
     return this.ctx ? this.ctx.currentTime : 0
   }
 
+  /**
+   * Absolute start time for a layer scheduled `at` seconds into a sound.
+   *
+   * A layer can legitimately want to sit slightly ahead of the event it
+   * belongs to: the firing pin goes before the muzzle blast. But "ahead" is
+   * relative to when the sound *arrives*, and a rifle fired from two feet away
+   * arrives in well under a millisecond — so the pin landed before the start
+   * of the audio context, which throws. Every shot from closer than about
+   * seventy centimetres did this, and because gunfire is scheduled from inside
+   * the update loop, the throw took the rest of the frame with it.
+   *
+   * Clamping here rather than at the one call site that happened to be caught
+   * is deliberate. Scheduling into the past is never meaningful — the clock
+   * rounds it up to now regardless — so there is no call site that wants the
+   * unclamped value, and the next one written will not have to remember.
+   */
+  private when(at: number): number {
+    const now = this.t
+    const t = now + at
+    return Number.isFinite(t) ? Math.max(now, t) : now
+  }
+
   // ------------------------------------------------------------ voice pool
   /** True if there is room for this sound. Quiet texture yields to loud events. */
   private budget(pri: Pri, dur: number): boolean {
@@ -411,10 +452,10 @@ export class Audio {
   private out(gain: number, place: Place = {}, wetMult = 1, chain?: AudioNode[]): GainNode | null {
     const ctx = this.ctx
     if (!ctx || !this.sfxBus || !this.nearSend || !this.farSend) return null
-    const dist = Math.max(0, place.dist ?? 0)
-    const pan = Math.max(-1, Math.min(1, place.pan ?? 0))
+    const dist = clamp(place.dist ?? 0, 0, 2000)
+    const pan = clamp(place.pan ?? 0, -1, 1, 0)
 
-    const roll = place.roll ?? 1
+    const roll = clamp(place.roll ?? 1, 0, 8, 1)
     const atten = 1 / (1 + dist * AUDIO.falloff * roll + dist * dist * AUDIO.falloffSq * roll)
     const g = ctx.createGain()
     g.gain.value = gain * atten
@@ -471,7 +512,7 @@ export class Audio {
 
   /** Seconds before a sound made `dist` metres away reaches the ear. */
   private travel(place: Place): number {
-    return (place.dist ?? 0) / AUDIO.speedOfSound
+    return clamp(place.dist ?? 0, 0, 2000) / AUDIO.speedOfSound
   }
 
   // ------------------------------------------------------------ primitives
@@ -488,7 +529,7 @@ export class Audio {
   ) {
     const ctx = this.ctx
     if (!ctx) return
-    const t = this.t + at
+    const t = this.when(at)
     const osc = ctx.createOscillator()
     osc.type = type
     osc.frequency.setValueAtTime(Math.max(1, f0), t)
@@ -519,7 +560,7 @@ export class Audio {
     if (!ctx) return
     const buf = dur > 0.9 ? this.noiseLong : this.noiseShort
     if (!buf) return
-    const t = this.t + at
+    const t = this.when(at)
     const src = ctx.createBufferSource()
     src.buffer = buf
     src.loop = true
@@ -666,6 +707,7 @@ export class Audio {
   private duck(amount = AUDIO.duckAmount) {
     const ctx = this.ctx
     if (!ctx || !this.musicBus) return
+    amount = clamp(amount, 0, 0.95)
     const t = ctx.currentTime
     const g = this.musicBus.gain
     g.cancelScheduledValues(t)
@@ -693,8 +735,8 @@ export class Audio {
     if (!ctx || !this.muffle) return
     const t = ctx.currentTime
     const f = this.muffle.frequency
-    const already = Math.max(0, Math.min(1, 1 - f.value / 20000))
-    const depth = Math.max(already, Math.min(0.72, amount * (1 - already * 0.55)))
+    const already = clamp(1 - f.value / 20000, 0, 1)
+    const depth = clamp(amount * (1 - already * 0.55), already, 0.72, already)
     f.cancelScheduledValues(t)
     f.setValueAtTime(Math.max(1200, 20000 * (1 - depth)), t)
     f.exponentialRampToValueAtTime(20000, t + 0.3 + depth * 0.55)
@@ -1004,6 +1046,7 @@ export class Audio {
   scream(place: Place = {}, pitch = 1) {
     const ctx = this.ctx
     if (!ctx) return
+    pitch = clamp(pitch, 0.4, 2.5, 1)
     const dest = this.voice(PRI.normal, 0.9, LEVELS.scream, place, 1.3)
     if (!dest) return
     const t = this.t + this.travel(place)
@@ -1089,6 +1132,7 @@ export class Audio {
   shout(place: Place = {}, pitch = 1) {
     const ctx = this.ctx
     if (!ctx) return
+    pitch = clamp(pitch, 0.4, 2.5, 1)
     const dest = this.voice(PRI.normal, 0.5, LEVELS.shout, place, 1.2)
     if (!dest) return
     const t = this.t + this.travel(place)
@@ -1159,6 +1203,7 @@ export class Audio {
    * cross a hundred metres and this game will make you feel that.
    */
   gunshot(place: Place = {}, distance = 0) {
+    distance = clamp(distance, 0, 2000)
     const p: Place = { pan: place.pan, dist: distance, roll: AUDIO.gunRoll }
     const dest = this.voice(PRI.high, 1.2, LEVELS.gunshot, p, 1.6, true)
     if (!dest) return
@@ -1252,7 +1297,7 @@ export class Audio {
         if (ctx.createStereoPanner) {
           const g = ctx.createGain()
           const pan = ctx.createStereoPanner()
-          pan.pan.value = -(place.pan ?? 0) * rand(0.4, 0.9) + rand(-0.3, 0.3)
+          pan.pan.value = clamp(-(place.pan ?? 0) * rand(0.4, 0.9) + rand(-0.3, 0.3), -1, 1, 0)
           g.connect(pan)
           pan.connect(dest)
           d = g
@@ -1628,7 +1673,7 @@ export class Audio {
     // straight through, and a NaN gain makes the first ramp throw. This is
     // called from inside the frame update, so that exception would take the
     // rest of the tick with it — a physics glitch would become a dropped frame.
-    const f = Number.isFinite(force) ? Math.max(0.35, Math.min(2.2, force)) : 1
+    const f = clamp(force, 0.35, 2.2, 1)
     const j = rand(0.9, 1.12)
 
     // Pad slap. Fast, but not a click — the cushion takes the edge off.
@@ -1762,7 +1807,7 @@ export class Audio {
     if (!dest) return
     // Minor pentatonic degrees, so a long chain arpeggiates rather than sirens.
     const steps = [0, 3, 5, 7, 10, 12, 15, 17, 19, 22, 24, 27]
-    const semi = steps[Math.min(chain - 1, steps.length - 1)]!
+    const semi = steps[Math.round(clamp(chain, 1, steps.length, 1)) - 1]!
     const f = 330 * Math.pow(2, semi / 12)
     this.tone(dest, 'triangle', f, f, 0.16, 0.13, 0, 0.004)
     this.tone(dest, 'sine', f * 2, f * 2, 0.1, 0.05, 0.01, 0.004)
