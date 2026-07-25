@@ -38,31 +38,91 @@ export class Sky {
     this.dome = new SkyDome()
     this.dome.scale.setScalar(SKY.radius)
     const u = this.dome.material.uniforms
-    u.cloudCoverage!.value = 0.44
-    u.cloudDensity!.value = 0.55
-    u.cloudScale!.value = 0.00016
+    u.cloudCoverage!.value = SKY.cloudCoverage
+    u.cloudDensity!.value = SKY.cloudDensity
+    u.cloudScale!.value = SKY.cloudScale
     u.cloudSpeed!.value = SKY.cloudDrift
-    u.cloudElevation!.value = 0.62
+    u.cloudElevation!.value = SKY.cloudElevation
     // See SKY.domeIntensity: the model's absolute radiance is far too hot to
     // composite against, so scale it at the point it is written.
     const mat = this.dome.material
     mat.uniforms.skyIntensity = { value: SKY.domeIntensity }
     mat.uniforms.nightZenith = { value: new THREE.Color(DAY.nightZenith) }
     mat.uniforms.nightHorizon = { value: new THREE.Color(DAY.nightHorizon) }
+    mat.uniforms.cloudMoon = { value: new THREE.Color(SKY.cloudMoon) }
+    mat.uniforms.cloudBright = { value: SKY.cloudBright }
     mat.uniforms.nightAmount = { value: 0 }
     mat.fragmentShader = mat.fragmentShader
       .replace('void main() {', /* glsl */ `
         uniform float skyIntensity;
         uniform vec3 nightZenith;
         uniform vec3 nightHorizon;
+        uniform vec3 cloudMoon;
+        uniform float cloudBright;
         uniform float nightAmount;
-        void main() {`)
+        // How much cloud this pixel ended up with, carried out of the stock
+        // cloud block below so the night gradient can be occluded by it.
+        float gCloud;
+        void main() {
+          gCloud = 0.0;`)
+      // The stock shader projects the view ray onto a flat cloud plane by
+      // dividing by direction.y, which goes to zero at the horizon — so the
+      // noise coordinate goes to infinity there and `fract( sin( dot( huge,
+      // ... ) ) )` runs out of mantissa. The horizon fade hides the result
+      // either way, so this is insurance rather than a fix for anything
+      // observed; it costs one instruction and caps the coordinate at a sane
+      // value. 0.06 is about 3.5 degrees up, already inside the fade.
+      .replace(
+        'vec2 cloudUV = direction.xz / ( direction.y * elevation );',
+        'vec2 cloudUV = direction.xz / ( max( direction.y, 0.06 ) * elevation );',
+      )
+      // Warp the noise lookup by a low-frequency sample of itself. Two octaves
+      // of unwarped fbm on a flat plane read as a grid of soft blobs; pushing
+      // the domain around bends the cell edges into something the wind has been
+      // dragging, which is most of the difference between "noise" and "cloud".
+      .replace('float cloudNoise = fbm( cloudUV * 1000.0 );', /* glsl */ `
+        vec2 cq = cloudUV * 1000.0;
+        vec2 cwarp = vec2( noise( cq * 0.5 + 11.3 ), noise( cq * 0.5 + 41.7 ) ) - 0.5;
+        float cloudNoise = fbm( cq + cwarp * 1.4 );`)
+      // The stock threshold is miscalibrated. This noise has a mean near 0.86
+      // and a spread of about +/-0.07, so every coverage above roughly 0.2 puts
+      // the entire dome over the threshold and the "clouds" become a flat grey
+      // veil that just dims the sky — which is what an overcast-looking clear
+      // day was. Renormalising onto 0..1 first makes cloudCoverage mean the
+      // fraction of sky it says it does, and the narrower ramp gives the mask an
+      // edge instead of a fifty-degree gradient.
+      .replace(
+        'float cloudMask = smoothstep( 1.0 - cloudCoverage, 1.0 - cloudCoverage + 0.3, cloudNoise );',
+        /* glsl */ `
+        float shaped = clamp( ( cloudNoise - 0.73 ) / 0.27, 0.0, 1.0 );
+        float cloudMask = smoothstep( 1.0 - cloudCoverage, 1.0 - cloudCoverage + 0.2, shaped );`,
+      )
+      // See SKY.cloudBright: the stock constant leaves a lit cloud far darker
+      // than the sky behind it, so cloud always subtracted light from the dome.
+      //
+      // The thickness term is the other half of it. We are underneath this deck,
+      // so the fat middle of a cumulus is its shadowed base and the thin edges
+      // are where the sun is coming through — without that gradient every cloud
+      // is one flat value and the whole layer reads as cut paper.
+      .replace('cloudColor *= vSunE * 0.00002;', /* glsl */ `
+        cloudColor *= mix( 1.2, 0.4, smoothstep( 0.3, 0.95, shaped ) );
+        cloudColor *= vSunE * cloudBright;`)
+      // The stock shader multiplies cloud colour by the sun's intensity term,
+      // which is zero once the sun is under the horizon — so without this the
+      // night sky has black cumulus punched through the stars. Capture the mask
+      // on the way past and give the cloud a moonlit floor.
+      .replace('texColor = mix( texColor, cloudColor, cloudMask * cloudDensity );', /* glsl */ `
+        gCloud = cloudMask * cloudDensity;
+        cloudColor = max( cloudColor, cloudMoon * nightAmount );
+        texColor = mix( texColor, cloudColor, gCloud );`)
       // See DAY.nightZenith: the scattering model bottoms out at black once the
       // sun is under the horizon, so the night sky is a gradient added on top
-      // rather than anything the model produces.
+      // rather than anything the model produces. Cloud shades it — an overcast
+      // patch is darker than clear sky and hides the stars behind it.
       .replace('gl_FragColor = vec4( texColor, 1.0 );', /* glsl */ `
         float upness = clamp( normalize( vWorldPosition ).y, 0.0, 1.0 );
         vec3 night = mix( nightHorizon, nightZenith, pow( upness, 0.55 ) );
+        night = mix( night, night * 0.4 + cloudMoon * 0.5, gCloud );
         gl_FragColor = vec4( texColor * skyIntensity + night * nightAmount, 1.0 );`)
     // The dome writes linear HDR; the composer's OutputPass owns tone mapping
     // and the transfer function. Leaving this on double-tone-maps the sky.

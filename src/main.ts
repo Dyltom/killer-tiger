@@ -172,6 +172,7 @@ const clock = new THREE.Clock()
 function frame(dt: number) {
   if (game.state === 'playing') quality.sample(dt)
   const controlling = (input.locked || NOLOCK) && game.state === 'playing'
+  game.darkness = sky.day.darkness
   game.update(dt, input, controlling)
   input.endFrame()
 
@@ -185,7 +186,7 @@ function frame(dt: number) {
   // snapping off; hurt is driven by how close to death the tiger is.
   const frenzy = Math.min(1, game.tiger.frenzy / 1.0)
   const hurt = 1 - Math.min(1, game.tiger.health / (TIGER.maxHealth * 0.45))
-  postfx.render(dt, frenzy, game.state === 'playing' ? hurt : 0)
+  postfx.render(dt, frenzy, game.state === 'playing' ? hurt : 0, sky.day.darkness)
 }
 
 function animate() {

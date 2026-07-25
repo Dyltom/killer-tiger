@@ -13,19 +13,58 @@
 import * as THREE from 'three'
 import { WORLD } from '../config'
 import { Rng } from '../engine/rng'
+import type { LampAnchor } from './lamps'
 import { surface } from './materials'
 import type { Collider } from './world'
+
+/** An additive glow the world fades up at dusk and down again at dawn. */
+export interface NightGlow {
+  mat: THREE.MeshBasicMaterial
+  base: number
+  /** Desynchronises the slow guttering so the village doesn't breathe in unison. */
+  phase: number
+}
 
 export interface VillageContext {
   rng: Rng
   height: (x: number, z: number) => number
   colliders: Collider[]
   campfires: THREE.Vector3[]
-  /** Fire lights the world will flicker each frame. */
-  fireLights: { light: THREE.PointLight; base: number; phase: number }[]
+  /**
+   * Where the pooled practical lights may be spent. The village registers a
+   * point per fire and per doorway; world/lamps.ts decides which of them are
+   * worth a real light right now.
+   */
+  lamps: LampAnchor[]
+  /** Doorway and shutter glows, lit from dusk. */
+  nightGlows: NightGlow[]
   /** Flame meshes, animated by the world. Each carries its own phase so the
    *  village doesn't pulse in unison. */
   flames: { obj: THREE.Object3D; phase: number }[]
+}
+
+/**
+ * The warm patch an oil lamp throws on the inside of a doorway.
+ *
+ * Additive and unlit, so it survives whatever the tone map does to the rest of
+ * the frame, and drawn just proud of the dark recess it fills. This is what
+ * makes a hut read as inhabited from two hundred metres away, where the pooled
+ * point lights have long since been dealt to something nearer.
+ */
+function lampGlow(ctx: VillageContext, w: number, h: number, color = 0xffa233, base = 0.85): THREE.Mesh {
+  const mat = new THREE.MeshBasicMaterial({
+    color,
+    transparent: true,
+    opacity: 0,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+    fog: true,
+    toneMapped: false,
+  })
+  ctx.nightGlows.push({ mat, base, phase: ctx.rng.range(0, 20) })
+  const mesh = new THREE.Mesh(new THREE.PlaneGeometry(w, h), mat)
+  mesh.renderOrder = 3
+  return mesh
 }
 
 /** Shared across every hut and prop; built once on first use. */
@@ -218,7 +257,7 @@ function fenceRun(kit: Kit, rng: Rng, height: (x: number, z: number) => number, 
 }
 
 // -------------------------------------------------------------------- huts
-function roundHut(kit: Kit, rng: Rng): { group: THREE.Group; radius: number; height: number } {
+function roundHut(kit: Kit, rng: Rng, ctx: VillageContext): { group: THREE.Group; radius: number; height: number; door: THREE.Vector3 } {
   const g = new THREE.Group()
   const r = rng.range(1.9, 2.9)
   const h = rng.range(2.1, 2.8)
@@ -275,6 +314,12 @@ function roundHut(kit: Kit, rng: Rng): { group: THREE.Group; radius: number; hei
   const hole = new THREE.Mesh(new THREE.PlaneGeometry(doorW, doorH), kit.dark)
   hole.position.y = 0.3 + doorH / 2
   door.add(hole)
+  // The lamp inside, seen from the clearing. Drawn a hair proud of the recess
+  // so it isn't z-fighting with it, and slightly narrower so a dark jamb line
+  // survives around the edge.
+  const glow = lampGlow(ctx, doorW * 0.82, doorH * 0.86)
+  glow.position.set(0, 0.3 + doorH / 2, 0.02)
+  door.add(glow)
   const lintel = new THREE.Mesh(new THREE.BoxGeometry(doorW + 0.4, 0.16, 0.3), kit.wood)
   lintel.position.set(0, 0.3 + doorH + 0.08, -0.02)
   lintel.castShadow = true
@@ -291,10 +336,17 @@ function roundHut(kit: Kit, rng: Rng): { group: THREE.Group; radius: number; hei
   door.position.set(Math.sin(da) * r * 1.05, 0, Math.cos(da) * r * 1.05)
   g.add(door)
 
-  return { group: g, radius: eave, height: 0.3 + h + roofH }
+  // Where a pooled light goes if this hut wins one: half a metre outside the
+  // opening, head height. Point lights here cast no shadows, so putting it
+  // *inside* would light straight through the wall and turn the hut into a
+  // paper lantern; outside, it pools on the veranda the way spill should.
+  const lamp = new THREE.Vector3(Math.sin(da), 0, Math.cos(da)).multiplyScalar(r * 1.05 + 0.5)
+  lamp.y = 1.7
+
+  return { group: g, radius: eave, height: 0.3 + h + roofH, door: lamp }
 }
 
-function squareHut(kit: Kit, rng: Rng): { group: THREE.Group; radius: number; height: number; hw: number; hd: number } {
+function squareHut(kit: Kit, rng: Rng, ctx: VillageContext): { group: THREE.Group; radius: number; height: number; hw: number; hd: number; door: THREE.Vector3 } {
   const g = new THREE.Group()
   const w = rng.range(3.4, 5.0)
   const d = rng.range(3.0, 4.4)
@@ -349,13 +401,25 @@ function squareHut(kit: Kit, rng: Rng): { group: THREE.Group; radius: number; he
   const lintel = new THREE.Mesh(new THREE.BoxGeometry(1.4, 0.15, 0.34), kit.wood)
   lintel.position.set(0, 0.3 + doorH + 0.07, d / 2)
   g.add(lintel)
+  const doorGlow = lampGlow(ctx, 0.82, doorH * 0.86)
+  doorGlow.position.set(0, 0.3 + doorH / 2, d / 2 + 0.026)
+  g.add(doorGlow)
+
   // Small shuttered window on one side.
   const win = new THREE.Mesh(new THREE.PlaneGeometry(0.6, 0.5), kit.dark)
   win.position.set(w / 2 + 0.012, 0.3 + h * 0.6, 0)
   win.rotation.y = Math.PI / 2
   g.add(win)
+  // Dimmer than the doorway and cooler — it's lamplight through a shutter slat,
+  // not an open door.
+  const winGlow = lampGlow(ctx, 0.5, 0.4, 0xffb15a, 0.5)
+  winGlow.position.set(w / 2 + 0.026, 0.3 + h * 0.6, 0)
+  winGlow.rotation.y = Math.PI / 2
+  g.add(winGlow)
 
-  return { group: g, radius: Math.hypot(w, d) / 2, height: 0.3 + h + roofH, hw: w / 2, hd: d / 2 }
+  const lamp = new THREE.Vector3(0, 1.7, d / 2 + 0.5)
+
+  return { group: g, radius: Math.hypot(w, d) / 2, height: 0.3 + h + roofH, hw: w / 2, hd: d / 2, door: lamp }
 }
 
 // --------------------------------------------------------------- campfires
@@ -479,19 +543,37 @@ export function buildVillage(ctx: VillageContext): THREE.Group {
     const rot = rng.range(0, Math.PI * 2)
 
     // Round dwellings dominate; the square ones read as stores and granaries.
+    let hutY: number
+    let doorLocal: THREE.Vector3
     if (rng.chance(0.68)) {
-      const hut = roundHut(kit, rng)
-      hut.group.position.set(x, groundUnder(ctx.height, x, z, hut.radius * 0.85), z)
+      const hut = roundHut(kit, rng, ctx)
+      hutY = groundUnder(ctx.height, x, z, hut.radius * 0.85)
+      hut.group.position.set(x, hutY, z)
       hut.group.rotation.y = rot
       root.add(hut.group)
       ctx.colliders.push({ kind: 'circle', x, z, r: hut.radius * 0.78, h: hut.height })
+      doorLocal = hut.door
     } else {
-      const hut = squareHut(kit, rng)
-      hut.group.position.set(x, groundUnder(ctx.height, x, z, Math.max(hut.hw, hut.hd)), z)
+      const hut = squareHut(kit, rng, ctx)
+      hutY = groundUnder(ctx.height, x, z, Math.max(hut.hw, hut.hd))
+      hut.group.position.set(x, hutY, z)
       hut.group.rotation.y = rot
       root.add(hut.group)
       ctx.colliders.push({ kind: 'box', x, z, hw: hut.hw, hd: hut.hd, rot, h: hut.height })
+      doorLocal = hut.door
     }
+
+    // Register the doorway for the light pool, in world space. rotation.y = rot
+    // takes hut-local (x, z) to (x cos + z sin, -x sin + z cos).
+    const cr = Math.cos(rot)
+    const sr = Math.sin(rot)
+    ctx.lamps.push({
+      x: x + doorLocal.x * cr + doorLocal.z * sr,
+      y: hutY + doorLocal.y,
+      z: z - doorLocal.x * sr + doorLocal.z * cr,
+      kind: 'lamp',
+      phase: rng.range(0, 10),
+    })
 
     // Clutter in the lee of the hut.
     const props = rng.int(2, 5)
@@ -535,13 +617,9 @@ export function buildVillage(ctx: VillageContext): THREE.Group {
     const flame = fire.getObjectByName('flame')
     if (flame) ctx.flames.push({ obj: flame, phase: rng.range(0, 20) })
 
-    // Warm, short-range and physically falling off, so it pools on the ground
-    // and the huts around it rather than lighting the whole village.
-    const light = new THREE.PointLight(0xff7a22, 22, 26, 2)
-    light.position.set(x, y + 1.0, z)
-    light.castShadow = false
-    root.add(light)
-    ctx.fireLights.push({ light, base: 22, phase: rng.range(0, 10) })
+    // The fire asks for a light rather than owning one — see world/lamps.ts for
+    // why the pool is fixed and dealt out instead of one light per fire.
+    ctx.lamps.push({ x, y: y + 1.0, z, kind: 'fire', phase: rng.range(0, 10) })
     ctx.colliders.push({ kind: 'circle', x, z, r: 1.1, h: 0.5 })
 
     // A ring of seating logs — gives the AI's "safe zone" a visible reason.

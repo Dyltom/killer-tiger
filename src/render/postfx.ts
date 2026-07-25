@@ -121,9 +121,10 @@ const GradeShader = {
     tDiffuse: { value: null as THREE.Texture | null },
     uTexel: { value: new THREE.Vector2() },
     uTime: { value: 0 },
-    /** 0..1 blood frenzy, 0..1 near-death. */
+    /** 0..1 blood frenzy, 0..1 near-death, 0..1 nightfall. */
     uFrenzy: { value: 0 },
     uHurt: { value: 0 },
+    uNight: { value: 0 },
     uVignette: { value: POST.vignette },
     uGrain: { value: POST.grain },
     uChroma: { value: POST.chromatic },
@@ -147,6 +148,7 @@ const GradeShader = {
     uniform float uTime;
     uniform float uFrenzy;
     uniform float uHurt;
+    uniform float uNight;
     uniform float uVignette;
     uniform float uGrain;
     uniform float uChroma;
@@ -197,6 +199,28 @@ const GradeShader = {
       col = mix( vec3( luma( col ) ), col, uSaturation );
       col = ( col - 0.5 ) * uContrast + 0.5;
 
+      // Night eye. Adding more lights to the world can only ever fix the places
+      // that have lamps in them; the other 95% of a 240 m plain is lit by the
+      // moon and nothing else, and no amount of point lights reaches it. So the
+      // dark is handled here instead, where it costs one pass and no shader
+      // recompiles: the eye adapts rather than the world getting brighter.
+      if ( uNight > 0.0 ) {
+        // A gamma toe. An exponent below one lifts the shadows hard and leaves
+        // white exactly where it was, so the moonlit ground comes up out of the
+        // black without the sky or a campfire blowing out.
+        vec3 lifted = pow( max( col, 0.0 ), vec3( 1.0 / ( 1.0 + uNight * 0.9 ) ) );
+        col = mix( col, lifted, 0.85 );
+
+        // Rods carry no colour, and they only carry anything at all below about
+        // a tenth of daylight. Weighting the drain by how dim the pixel already
+        // is means fire, lamps and lit doorways keep their warmth while the
+        // hillside behind them goes to moonlight blue — which is the whole
+        // reason this reads as an eye adapting instead of a blue filter.
+        float nl = luma( col );
+        float rods = uNight * ( 1.0 - smoothstep( 0.06, 0.42, nl ) );
+        col = mix( col, vec3( nl ) * vec3( 0.70, 0.85, 1.16 ), rods * 0.55 );
+      }
+
       // Frenzy: everything runs hot and red, and the world desaturates around it.
       if ( uFrenzy > 0.0 ) {
         vec3 hot = vec3( luma( col ) ) * vec3( 1.55, 0.42, 0.3 );
@@ -224,13 +248,18 @@ const GradeShader = {
       }
 
       // Vignette. Uses a smooth radial falloff rather than a hard ellipse so
-      // it never shows a visible ring on a bright sky.
-      float vig = 1.0 - uVignette * ( 1.0 + uHurt * 1.5 ) * smoothstep( 0.12, 0.78, r2 );
+      // it never shows a visible ring on a bright sky. It backs off at night:
+      // darkening the corners of an already dark frame costs the player the
+      // peripheral vision they need to spot a hunter, and buys nothing.
+      float vig = 1.0 - uVignette * ( 1.0 - uNight * 0.55 ) * ( 1.0 + uHurt * 1.5 )
+                * smoothstep( 0.12, 0.78, r2 );
       col *= vig;
 
-      // Grain, scaled down in the highlights the way film actually behaves.
+      // Grain, scaled down in the highlights the way film actually behaves, and
+      // up at night — a dark-adapted eye is a noisy one, and the grain is also
+      // what keeps the lifted shadows from banding.
       float g = hash( vUv * 900.0 + fract( uTime ) * 137.0 ) - 0.5;
-      col += g * uGrain * ( 1.0 - smoothstep( 0.35, 1.0, luma( col ) ) * 0.7 );
+      col += g * uGrain * ( 1.0 + uNight * 1.2 ) * ( 1.0 - smoothstep( 0.35, 1.0, luma( col ) ) * 0.7 );
 
       gl_FragColor = vec4( clamp( col, 0.0, 1.0 ), 1.0 );
     }
@@ -314,8 +343,8 @@ export class PostFX {
     this.godrays.uniforms.uAspect!.value = w / h
   }
 
-  /** @param frenzy 0..1 @param hurt 0..1 */
-  render(dt: number, frenzy: number, hurt: number) {
+  /** @param frenzy 0..1 @param hurt 0..1 @param night 0..1, DayNight.darkness */
+  render(dt: number, frenzy: number, hurt: number, night = 0) {
     this.time += dt
 
     const visible = sunScreenPosition(this.sunDir, this.camera, this.sunUv)
@@ -326,6 +355,7 @@ export class PostFX {
     g.uTime!.value = this.time
     g.uFrenzy!.value = frenzy
     g.uHurt!.value = hurt
+    g.uNight!.value = night * POST.nightEye
     // Frenzy also blows the bloom out, which is what makes it read as a rush
     // rather than a colour filter.
     this.bloom.strength = POST.bloomStrength * (1 + frenzy * 1.6)

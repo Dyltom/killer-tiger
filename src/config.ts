@@ -284,12 +284,52 @@ export const SKY = {
   /** Sky dome radius. Rides with the camera, so it only has to clear the props. */
   radius: 4000,
   /**
-   * Cloud drift. The dome shader multiplies this by time and adds it to a UV
-   * that has already been scaled up by 1000 for the fbm lookup, so 0.0035 moved
-   * the cloud field 3.5 noise cells a second — the whole sky boiling. At 1.2e-5
-   * a cloud takes about a minute and a half to cross its own width.
+   * The cloud layer. The dome projects the view direction onto a flat plane at
+   * `cloudElevation` and looks up two octaves of fbm at `cloudScale * 1000`.
+   *
+   * That 1000x is the trap. At the old 0.00016 the whole visible sky spanned
+   * well under one noise cell, so there were no clouds — there was one smooth
+   * gradient smeared across the dome that brightened and dimmed as you turned.
+   * This puts a handful of cells between the zenith and the haze line, which is
+   * the point separate cumulus start to read as separate rather than as two
+   * wisps sitting on the horizon with an empty blue dome above them.
    */
-  cloudDrift: 0.000012,
+  cloudScale: 0.0026,
+  /**
+   * Fraction of the sky with cloud in it. Only means that because sky.ts
+   * renormalises the noise first — see the comment on the mask there. A bit
+   * under half is a good afternoon: enough gaps that the blue still reads.
+   */
+  cloudCoverage: 0.44,
+  /** Opacity of a fully-masked cloud. Near 1, so cumulus actually hide the sky. */
+  cloudDensity: 0.95,
+  /**
+   * Cloud radiance, as a multiple of the sun intensity term. The stock 0.00002
+   * puts a lit cloud two orders of magnitude below the sky it sits in front of,
+   * so "clouds" came out as a grey wash that dimmed the dome. Calibrated in the
+   * renderer so a white cloud away from the sun is a little brighter than the
+   * zenith behind it, which is what makes it read as lit rather than as a hole.
+   */
+  cloudBright: 0.0026,
+  /**
+   * How low the cloud deck sits. Lower numbers push the plane further away, so
+   * the clouds spread up the dome instead of piling into a band just above the
+   * haze — which is what an empty zenith looks like when you fix it.
+   */
+  cloudElevation: 0.38,
+  /**
+   * Drift, in the same pre-1000x units: this times 1000 is noise cells per
+   * second. 2.2e-5 walks the field about one cell every forty-five seconds, so
+   * a cloud crosses the sky in a few minutes — weather, not a boiling shader.
+   */
+  cloudDrift: 0.000022,
+  /**
+   * Moonlit cloud. The stock shader multiplies cloud colour by the sun's
+   * intensity term, which is zero once the sun is down — so at night the clouds
+   * turn into black holes punched in the star field. This is the floor they are
+   * lit to instead, faded in by the same `stars` ramp as the night sky.
+   */
+  cloudMoon: 0x38507e,
   /** Directional (sun) light. */
   sunLight: 0xffd0a0,
   sunIntensity: 3.3,
@@ -312,6 +352,10 @@ export const SKY = {
  * threading another value through four files.
  */
 export const DAY = {
+  /**
+   * Nominal seconds per rotation, *before* `dwell` stretches and squeezes it.
+   * The real cycle is `period` times the average dwell — about fourteen minutes.
+   */
   period: 720,
   /** Late golden hour: the hunt opens on the light the game was designed for. */
   start: 0.472,
@@ -343,23 +387,67 @@ export const DAY = {
   moonSize: 34,
   moonGlow: 4.5,
 
+  /**
+   * `dwell` is why the cycle no longer sprints. It is a multiplier on how long
+   * the clock lingers at that point in the rotation: `t` advances by
+   * `dt / (period * dwell)`, so 3.2 means the golden hour passes at under a
+   * third of nominal speed and 0.42 means midnight passes at nearly two and a
+   * half times it.
+   *
+   * A uniform clock cannot give a good hunt. Elevation follows sin(2*pi*t), so
+   * the interesting light — the twenty degrees either side of the horizon — is
+   * only a tenth of the rotation, and at a flat rate the whole sunset was over
+   * in twenty seconds and the player then sat in six minutes of darkness. With
+   * these weights the same rotation spends about five minutes in golden hour and
+   * dusk, two and a half in true night, and comes back up through three minutes
+   * of dawn into daylight. Fourteen minutes round, and it never parks anywhere
+   * you cannot hunt in.
+   */
   phases: [
-    // t      turbidity rayleigh  mie    dome   sun       sunI  skyBounce gndBounce bounceI env   fogSun    fogAway   density  stars exposure
-    { t: 0.000, turbidity: 4.2, rayleigh: 3.4, mie: 0.010, dome: 0.55, sun: 0xffb070, sunI: 1.4,  skyB: 0x9fb6d8, gndB: 0x6a5a38, bounceI: 0.85, env: 1.6, fogSun: 0xffb98a, fogAway: 0x9aa9bd, density: 0.0075, stars: 0.25, exposure: 1.00 },
-    { t: 0.120, turbidity: 2.6, rayleigh: 2.2, mie: 0.005, dome: 0.34, sun: 0xfff0d8, sunI: 3.6,  skyB: 0x8fb4e6, gndB: 0x7a6a48, bounceI: 1.00, env: 2.2, fogSun: 0xdfe6f0, fogAway: 0xa8bcd6, density: 0.0040, stars: 0.00, exposure: 0.95 },
-    { t: 0.250, turbidity: 2.2, rayleigh: 1.6, mie: 0.004, dome: 0.30, sun: 0xfffaf0, sunI: 4.2,  skyB: 0x9cc4ff, gndB: 0x8a7a58, bounceI: 1.05, env: 2.4, fogSun: 0xe8eef6, fogAway: 0xb4c6dc, density: 0.0032, stars: 0.00, exposure: 0.92 },
-    { t: 0.400, turbidity: 2.8, rayleigh: 2.4, mie: 0.005, dome: 0.36, sun: 0xffe6c0, sunI: 3.8,  skyB: 0x8fb0dd, gndB: 0x7d6a44, bounceI: 1.05, env: 2.3, fogSun: 0xffd7a8, fogAway: 0xa3b4cc, density: 0.0042, stars: 0.00, exposure: 0.96 },
-    { t: 0.472, turbidity: 3.2, rayleigh: 3.0, mie: 0.006, dome: 0.42, sun: 0xffd0a0, sunI: 3.3,  skyB: 0x6f90bd, gndB: 0x6a5a38, bounceI: 1.15, env: 2.4, fogSun: 0xffc286, fogAway: 0x8fa2ba, density: 0.0055, stars: 0.05, exposure: 1.00 },
-    { t: 0.520, turbidity: 4.6, rayleigh: 4.0, mie: 0.011, dome: 0.46, sun: 0xff8b46, sunI: 1.5,  skyB: 0x50648c, gndB: 0x50432c, bounceI: 1.20, env: 2.1, fogSun: 0xff9a5a, fogAway: 0x6d7e9c, density: 0.0075, stars: 0.30, exposure: 1.05 },
+    // t      turbidity rayleigh  mie    dome   sun       sunI  skyBounce gndBounce bounceI env   fogSun    fogAway   density  stars exposure dwell
+    { t: 0.000, turbidity: 4.2, rayleigh: 3.4, mie: 0.010, dome: 0.55, sun: 0xffb070, sunI: 1.4,  skyB: 0x9fb6d8, gndB: 0x6a5a38, bounceI: 0.85, env: 1.6, fogSun: 0xffb98a, fogAway: 0x9aa9bd, density: 0.0075, stars: 0.25, exposure: 1.00, dwell: 1.60 },
+    { t: 0.120, turbidity: 2.6, rayleigh: 2.2, mie: 0.005, dome: 0.34, sun: 0xfff0d8, sunI: 3.6,  skyB: 0x8fb4e6, gndB: 0x7a6a48, bounceI: 1.00, env: 2.2, fogSun: 0xdfe6f0, fogAway: 0xa8bcd6, density: 0.0040, stars: 0.00, exposure: 0.95, dwell: 1.00 },
+    { t: 0.250, turbidity: 2.2, rayleigh: 1.6, mie: 0.004, dome: 0.30, sun: 0xfffaf0, sunI: 4.2,  skyB: 0x9cc4ff, gndB: 0x8a7a58, bounceI: 1.05, env: 2.4, fogSun: 0xe8eef6, fogAway: 0xb4c6dc, density: 0.0032, stars: 0.00, exposure: 0.92, dwell: 0.85 },
+    { t: 0.400, turbidity: 2.8, rayleigh: 2.4, mie: 0.005, dome: 0.36, sun: 0xffe6c0, sunI: 3.8,  skyB: 0x8fb0dd, gndB: 0x7d6a44, bounceI: 1.05, env: 2.3, fogSun: 0xffd7a8, fogAway: 0xa3b4cc, density: 0.0042, stars: 0.00, exposure: 0.96, dwell: 1.60 },
+    { t: 0.472, turbidity: 3.2, rayleigh: 3.0, mie: 0.006, dome: 0.42, sun: 0xffd0a0, sunI: 3.3,  skyB: 0x6f90bd, gndB: 0x6a5a38, bounceI: 1.15, env: 2.4, fogSun: 0xffc286, fogAway: 0x8fa2ba, density: 0.0055, stars: 0.05, exposure: 1.00, dwell: 3.20 },
+    { t: 0.520, turbidity: 4.6, rayleigh: 4.0, mie: 0.011, dome: 0.46, sun: 0xff8b46, sunI: 1.5,  skyB: 0x50648c, gndB: 0x50432c, bounceI: 1.20, env: 2.1, fogSun: 0xff9a5a, fogAway: 0x6d7e9c, density: 0.0075, stars: 0.30, exposure: 1.05, dwell: 2.40 },
     // Night is lit by a moon, not by nothing. Real moonlight is about a
     // millionth of daylight, which on screen is an unplayable black frame — so
     // the night rows are a stylised moonlit blue: bright enough to read the
     // terrain and the prey, cold and low-contrast enough to still feel like
-    // night. The exposure lift and the desaturated key light do most of it.
-    { t: 0.580, turbidity: 5.4, rayleigh: 4.6, mie: 0.008, dome: 1.10, sun: 0xa8c0f0, sunI: 1.90, skyB: 0x54739f, gndB: 0x35342e, bounceI: 2.20, env: 2.4, fogSun: 0x6f7fa8, fogAway: 0x3f4b68, density: 0.0080, stars: 0.85, exposure: 1.15 },
-    { t: 0.750, turbidity: 6.0, rayleigh: 3.0, mie: 0.004, dome: 1.40, sun: 0xc2d4ff, sunI: 2.60, skyB: 0x5878b0, gndB: 0x333844, bounceI: 2.40, env: 2.6, fogSun: 0x7f9ad4, fogAway: 0x2c3a58, density: 0.0075, stars: 1.00, exposure: 1.25 },
-    { t: 0.920, turbidity: 5.0, rayleigh: 4.2, mie: 0.006, dome: 1.15, sun: 0xb6c8ec, sunI: 2.00, skyB: 0x56749f, gndB: 0x36342e, bounceI: 2.20, env: 2.4, fogSun: 0x7d8cb4, fogAway: 0x45526e, density: 0.0085, stars: 0.70, exposure: 1.15 },
+    // night. The exposure lift and the desaturated key light do most of it,
+    // the village practicals in world/lamps.ts light the rest, and the grade's
+    // night-eye lift in postfx.ts catches whatever is left in the shadows.
+    { t: 0.580, turbidity: 5.4, rayleigh: 4.6, mie: 0.008, dome: 1.25, sun: 0xa8c0f0, sunI: 2.40, skyB: 0x5c7cab, gndB: 0x3b3d3c, bounceI: 2.50, env: 2.7, fogSun: 0x7787b2, fogAway: 0x46536f, density: 0.0080, stars: 0.85, exposure: 1.22, dwell: 0.90 },
+    { t: 0.750, turbidity: 6.0, rayleigh: 3.0, mie: 0.004, dome: 1.55, sun: 0xc2d4ff, sunI: 3.10, skyB: 0x6284bd, gndB: 0x3f4656, bounceI: 2.80, env: 3.0, fogSun: 0x88a2d8, fogAway: 0x33415f, density: 0.0075, stars: 1.00, exposure: 1.32, dwell: 0.42 },
+    { t: 0.920, turbidity: 5.0, rayleigh: 4.2, mie: 0.006, dome: 1.30, sun: 0xb6c8ec, sunI: 2.50, skyB: 0x5e7dab, gndB: 0x3c3f42, bounceI: 2.60, env: 2.8, fogSun: 0x8594bc, fogAway: 0x4b5875, density: 0.0085, stars: 0.70, exposure: 1.22, dwell: 0.75 },
   ],
+}
+
+/**
+ * The village after dark.
+ *
+ * A fixed pool of point lights, because three keys every material's shader
+ * program on the scene's light count — a light appearing or disappearing
+ * recompiles the world and stalls the frame. The pool is allocated once and
+ * never resized; each frame it is dealt out to the nearest fires and doorways,
+ * so the budget is always spent on what the player can actually see.
+ */
+export const LIGHTS = {
+  /** Lights in the pool. Every one of them exists for the whole session. */
+  pool: 10,
+  /** Warm, short-range and physically falling off, so it pools on the ground. */
+  fireColor: 0xff7a22,
+  fireIntensity: 30,
+  fireRange: 30,
+  /** Oil lamps behind the doorways and window shutters. */
+  lampColor: 0xffa845,
+  lampIntensity: 11,
+  lampRange: 15,
+  /** Practicals fade out in daylight, where they would only wash the huts. */
+  dayFloor: 0.12,
+  /** Lamps are lit from dusk; this is the `stars` value they come up over. */
+  lightUpAt: 0.18,
 }
 
 export type DayPhase = (typeof DAY.phases)[number]
@@ -417,6 +505,17 @@ export const POST = {
   highlightTint: 0xffd7a8,
   toneStrength: 0.16,
   sharpen: 0.28,
+  /**
+   * Night eye. A tiger's tapetum lucidum gives it roughly six times a human's
+   * low-light sensitivity, and this is the grade that stands in for it: the
+   * shadows are lifted, dim colour drains toward blue because rods can't see
+   * hue, and the vignette gets out of the way so the dark corners of frame stay
+   * legible. Anything bright — fire, a lamp, a lit doorway — keeps its colour,
+   * which is what sells it as an eye adapting rather than a blue filter.
+   *
+   * Scaled by DayNight.darkness, so 1.0 here is the look at true midnight.
+   */
+  nightEye: 1.0,
 }
 
 export const STORAGE_KEY = 'killer-tiger:best'

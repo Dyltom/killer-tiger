@@ -30,6 +30,8 @@ export interface SkyState {
   density: number
   stars: number
   exposure: number
+  /** Clock rate divisor at this point in the cycle. See DAY.phases. */
+  dwell: number
   sun: THREE.Color
   skyB: THREE.Color
   gndB: THREE.Color
@@ -41,7 +43,7 @@ export interface SkyState {
   night: boolean
 }
 
-const NUMERIC = ['turbidity', 'rayleigh', 'mie', 'dome', 'sunI', 'bounceI', 'env', 'density', 'stars', 'exposure'] as const
+const NUMERIC = ['turbidity', 'rayleigh', 'mie', 'dome', 'sunI', 'bounceI', 'env', 'density', 'stars', 'exposure', 'dwell'] as const
 const COLOURS = ['sun', 'skyB', 'gndB', 'fogSun', 'fogAway'] as const
 
 export class DayNight {
@@ -57,7 +59,7 @@ export class DayNight {
 
   readonly state: SkyState = {
     turbidity: 0, rayleigh: 0, mie: 0, dome: 0, sunI: 0, bounceI: 0,
-    env: 0, density: 0, stars: 0, exposure: 1,
+    env: 0, density: 0, stars: 0, exposure: 1, dwell: 1,
     sun: new THREE.Color(), skyB: new THREE.Color(), gndB: new THREE.Color(),
     fogSun: new THREE.Color(), fogAway: new THREE.Color(),
     elevation: 0, night: false,
@@ -67,8 +69,17 @@ export class DayNight {
     this.evaluate()
   }
 
+  /**
+   * Step the clock. The rate is divided by `dwell`, so the cycle crawls through
+   * the golden hour and hurries through the small hours — see DAY.phases for
+   * why a uniform clock cannot give a playable night.
+   *
+   * `dwell` is read from the state the last evaluate() left behind rather than
+   * re-derived here. It is a slow, smooth curve and dt is a frame, so the lag is
+   * far below anything visible, and it keeps the clock a single line.
+   */
   advance(dt: number) {
-    this.t = (this.t + dt / this.period) % 1
+    this.t = (this.t + dt / (this.period * Math.max(0.05, this.state.dwell))) % 1
     this.evaluate()
   }
 
@@ -118,6 +129,20 @@ export class DayNight {
   /** Where the dome's sun goes: held near the horizon so Preetham stays sane. */
   domeElevation(): number {
     return Math.max(this.state.elevation, DAY.domeMinElevation)
+  }
+
+  /**
+   * How dark it is, 0..1. Everything that has to respond to nightfall — the
+   * village lamps, the moonlit clouds, the grade's night-eye lift — keys off
+   * this one number rather than re-deriving nightfall from the elevation with
+   * its own thresholds, which is how three systems end up disagreeing about
+   * when dusk was.
+   *
+   * It is the same ramp that fades the stars in, because "you can see stars" and
+   * "it is dark enough to need a lamp" are the same statement.
+   */
+  get darkness(): number {
+    return this.state.stars
   }
 }
 

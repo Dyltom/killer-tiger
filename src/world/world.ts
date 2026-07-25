@@ -16,7 +16,8 @@ import type { ChunkedScatter } from './scatter'
 import { surface, terrainMaterial } from './materials'
 import { terrainHeight, terrainNormal, TERRAIN_SIZE } from './terrain'
 import { textures } from './textures'
-import { buildVillage } from './village'
+import { Lamps } from './lamps'
+import { buildVillage, type NightGlow } from './village'
 import { updateWind } from './wind'
 
 interface ColliderBase {
@@ -167,7 +168,9 @@ export class World {
   /** Good open spots to drop pickups. */
   readonly spawnPoints: THREE.Vector3[] = []
 
-  private fireLights: { light: THREE.PointLight; base: number; phase: number }[] = []
+  /** The fixed pool of practical lights and the fires/doorways it is dealt to. */
+  private lamps = new Lamps(this.group)
+  private nightGlows: NightGlow[] = []
   private flames: { obj: THREE.Object3D; phase: number }[] = []
   private decals: THREE.Mesh[] = []
   private decalPool = 0
@@ -186,10 +189,14 @@ export class World {
         height: terrainHeight,
         colliders: this.colliders,
         campfires: this.campfires,
-        fireLights: this.fireLights,
+        lamps: this.lamps.anchors,
+        nightGlows: this.nightGlows,
         flames: this.flames,
       }),
     )
+    // Allocate the pool now that every fire and doorway has registered. It is
+    // never resized after this — see world/lamps.ts.
+    this.lamps.build()
 
     const flora = {
       rng: this.rng,
@@ -636,17 +643,28 @@ export class World {
     return new THREE.Vector3(0, terrainHeight(0, 0), 0)
   }
 
-  update(dt: number, time: number, viewer?: THREE.Vector3) {
+  /**
+   * @param darkness 0 in daylight, 1 at midnight — see DayNight.darkness. The
+   *   village's practical lights and window glows key off it.
+   */
+  update(dt: number, time: number, viewer?: THREE.Vector3, darkness = 0) {
     updateWind(time)
 
     if (viewer) {
       this.horizon.position.set(viewer.x, 0, viewer.z)
       for (const f of this.fields) f.update(viewer.x, viewer.z)
+      this.lamps.update(dt, time, viewer, darkness)
     }
 
-    for (const f of this.fireLights) {
-      f.light.intensity = f.base * (0.72 + Math.abs(fbm(time * 2.4 + f.phase, f.phase, 2)) * 0.85)
+    // Doorway and shutter glows. These cost nothing and carry the far half of
+    // the village, where the pool's ten lights have long since run out — a hut
+    // two hundred metres off still reads as lived in.
+    const glow = THREE.MathUtils.smoothstep(darkness, 0.12, 0.62)
+    for (const g of this.nightGlows) {
+      g.mat.opacity = g.base * glow * (0.9 + Math.abs(fbm(time * 1.3 + g.phase, g.phase, 2)) * 0.22)
+      g.mat.visible = g.mat.opacity > 0.004
     }
+
     for (const f of this.flames) {
       const t = time + f.phase
       f.obj.scale.set(

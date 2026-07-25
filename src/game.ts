@@ -30,6 +30,14 @@ interface ActiveBuff {
 export class Game {
   state: GameState = 'menu'
 
+  /**
+   * How dark it is outside, 0..1. Written by the frame loop from the sky clock
+   * before update(); the world reads it to decide whether the village lamps are
+   * burning. Game does not own the sky, so it takes this rather than reaching
+   * for it.
+   */
+  darkness = 0
+
   readonly tiger: Tiger
   private humans: Human[] = []
   private pickups: Pickup[] = []
@@ -549,7 +557,7 @@ export class Game {
   // ---------------------------------------------------------------- update
   update(dt: number, input: Input, locked: boolean) {
     this.time += dt
-    this.world.update(dt, this.time, this.tiger.pos)
+    this.world.update(dt, this.time, this.tiger.pos, this.darkness)
     this.particles.update(dt)
     this.hud.updateFeed(dt)
 

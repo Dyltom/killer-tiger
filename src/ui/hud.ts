@@ -203,16 +203,37 @@ export class Hud {
     c.closePath()
     c.fill()
 
+    /**
+     * World offset into radar space, so "up" is wherever the tiger is looking.
+     *
+     * Worth deriving rather than eyeballing, because the sign errors here are
+     * invisible when you're standing still and mirror the whole world the moment
+     * you turn. The tiger's basis (see tiger.ts) is
+     *   forward = (-sin y, -cos y)   right = (cos y, -sin y)
+     * so a blip's radar-right is `d · right` and its radar-up is `d · forward`;
+     * canvas y grows downward, so screen y is the negation of that:
+     *   rx =  dx cos y - dz sin y
+     *   ry = -(-dx sin y - dz cos y) = dx sin y + dz cos y
+     * The old form rotated by -yaw, which is that same pair reflected — every
+     * contact appeared on the wrong side of you as soon as you weren't facing
+     * north.
+     */
     const project = (x: number, z: number) => {
-      // Rotate world offset into radar space so "up" is where the tiger looks.
       const dx = x - tigerX
       const dz = z - tigerZ
-      const s = Math.sin(-tigerYaw)
-      const co = Math.cos(-tigerYaw)
-      // Screen-up is -Z in world; negate so forward maps to up.
+      const s = Math.sin(tigerYaw)
+      const co = Math.cos(tigerYaw)
       const rx = dx * co - dz * s
-      const rz = dx * s + dz * co
-      return { x: cx + (rx / range) * R, y: cx + (rz / range) * R, d: Math.hypot(dx, dz) }
+      const ry = dx * s + dz * co
+      return { x: cx + (rx / range) * R, y: cx + (ry / range) * R, d: Math.hypot(dx, dz) }
+    }
+
+    /** Pin an off-radar contact to the rim, keeping its bearing. */
+    const rim = (q: { x: number; y: number }) => {
+      const ox = q.x - cx
+      const oy = q.y - cx
+      const m = Math.hypot(ox, oy) || 1
+      return { x: cx + (ox / m) * R, y: cx + (oy / m) * R, a: Math.atan2(oy, ox) }
     }
 
     for (const p of pickups) {
@@ -230,7 +251,24 @@ export class Hud {
     for (const h of humans) {
       if (!h.group.visible) continue
       const q = project(h.pos.x, h.pos.z)
-      if (q.d > range) continue
+      if (q.d > range) {
+        // A hunter who has seen you is the one thing worth knowing about from
+        // outside radar range: pin the bearing to the rim rather than dropping
+        // the contact, so you can tell which way the shot is coming from.
+        if (!h.alive || h.kind !== 'hunter' || !h.alerted) continue
+        const r = rim(q)
+        c.fillStyle = '#ff4d3d'
+        c.save()
+        c.translate(r.x, r.y)
+        c.rotate(r.a)
+        c.globalAlpha = 0.8
+        c.beginPath()
+        c.moveTo(3, 0); c.lineTo(-3, 3.5); c.lineTo(-3, -3.5)
+        c.closePath()
+        c.fill()
+        c.restore()
+        continue
+      }
       // Bodies you can still eat. Health comes from the kills you already made,
       // so they need to be as findable as the prey is.
       if (!h.alive) {

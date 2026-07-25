@@ -30,11 +30,16 @@ type PawState = 'idle' | 'swipeL' | 'swipeR' | 'bite'
  * here, so it lived as the same four literals repeated across four methods and
  * moving the paws meant finding all eight copies.
  *
- * `y` is set so the toe row and the claws clear the bottom edge of the frame:
- * the vertical FOV is fixed, so at z the visible half-height is |z|*tan(fov/2),
- * and anything below that is gone regardless of how wide the window is.
+ * `y` is set against the bottom edge of the frame: the vertical FOV is fixed, so
+ * at z the visible half-height is |z|*tan(fov/2), and anything below that is
+ * gone regardless of how wide the window is. At z = -0.95 that edge is 0.77, and
+ * -0.50 puts the paw about two thirds of the way down — low and well forward,
+ * which is where a quadruped's forefeet actually are when you are looking out of
+ * its skull. The old -0.36 at -0.84 held them up around chest height, and that
+ * is what made them read as two arms carried in front rather than as legs the
+ * animal is running on.
  */
-const PAW = { x: 0.40, y: -0.36, z: -0.84, pitch: 0.42 }
+const PAW = { x: 0.40, y: -0.50, z: -0.95, pitch: 0.42 }
 
 /**
  * Where the foreleg is joined to the animal, in camera space: down, back and
@@ -54,6 +59,36 @@ const PAW = { x: 0.40, y: -0.36, z: -0.84, pitch: 0.42 }
 const SHOULDER = { x: 0.52, y: -0.78, z: 0.35 }
 /** Paw offset from its shoulder. Chosen so the rest pose is unchanged. */
 const LOCAL = { x: PAW.x - SHOULDER.x, y: PAW.y - SHOULDER.y, z: PAW.z - SHOULDER.z }
+
+/**
+ * Fraction of the stride a forefoot spends on the ground. A running cat's foot
+ * is planted for most of the cycle and whips forward in what's left; a sine wave
+ * splits it evenly, which is why the old gait read as paddling at the air rather
+ * than as feet driving against the ground.
+ */
+const STANCE = 0.62
+
+/**
+ * Where one forepaw is in its stride: +1 fully forward at the instant it plants,
+ * falling linearly to -1 as it sweeps back under the chest at ground speed, then
+ * whipping forward again through the swing phase.
+ *
+ * The stance half is deliberately linear — a foot in contact with the ground
+ * travels backward at a constant rate, and easing it would be the paw sliding.
+ * The swing half is smoothstepped so the whip doesn't snap at either end.
+ */
+function stride(phase: number): number {
+  const c = phase - Math.floor(phase)
+  if (c < STANCE) return 1 - 2 * (c / STANCE)
+  const s = (c - STANCE) / (1 - STANCE)
+  return -1 + 2 * (s * s * (3 - 2 * s))
+}
+
+/** How far off the ground the paw is, 0 through the whole stance phase. */
+function lift(phase: number): number {
+  const c = phase - Math.floor(phase)
+  return c < STANCE ? 0 : Math.sin(((c - STANCE) / (1 - STANCE)) * Math.PI)
+}
 
 /** Fresh arterial blood, for whatever the claws have been in. */
 const BLOOD = new THREE.Color(0x6d0a0c)
@@ -580,18 +615,36 @@ export class Tiger {
       // together, so the two paws share a phase instead of alternating the way
       // a walking biped's arms do; the small offset between them is just enough
       // to stop them looking welded to each other.
-      const t = this.bobPhase
+      const ph = this.bobPhase / (Math.PI * 2)
       const amp = Math.min(1, speed / TIGER.sprintSpeed)
-      const reachL = Math.sin(t)
-      const reachR = Math.sin(t + 0.5)
       const zBase = this.crouching ? LOCAL.z + 0.1 : LOCAL.z
 
-      this.shoulderL.rotation.set(-reachL * 0.34 * amp, 0, 0)
-      this.shoulderR.rotation.set(-reachR * 0.34 * amp, 0, 0)
-      this.pawL.position.set(-LOCAL.x, LOCAL.y + Math.max(0, reachL) * 0.06 * amp, zBase)
-      this.pawR.position.set(LOCAL.x, LOCAL.y + Math.max(0, reachR) * 0.06 * amp, zBase)
-      this.pawL.rotation.set(PAW.pitch + reachL * 0.3 * amp, 0.32, 0.18)
-      this.pawR.rotation.set(PAW.pitch + reachR * 0.3 * amp, -0.32, -0.18)
+      // `side` is -1 for the left leg throughout the viewmodel: LOCAL.x is
+      // already negative, so positions multiply by it and the paw's own yaw and
+      // roll negate it.
+      for (const [paw, shoulder, side, phase] of [
+        [this.pawL, this.shoulderL, -1, ph],
+        [this.pawR, this.shoulderR, 1, ph + 0.08],
+      ] as const) {
+        const reach = stride(phase)
+        const air = lift(phase)
+
+        // The swing is biased forward: the pivot goes from level at the back of
+        // the stride to -0.26 rad at the plant, rather than swinging symmetric
+        // about rest. Rotating the leg *backward* past the shoulder would bring
+        // the thick end of it up past the lens, and from a pivot this far behind
+        // the eye a small forward angle is already a long stride at the foot.
+        shoulder.rotation.set((-0.03 - reach * 0.23) * amp, 0, 0)
+        // The last of the reach comes out of the leg rather than the shoulder,
+        // which is what puts the paw far enough forward — and so far enough from
+        // the lens — that the plant lands inside the bottom of the frame instead
+        // of below it. Only on the reaching half; a foot dragging back doesn't
+        // telescope.
+        const extend = Math.max(0, reach) * 0.18 * amp
+        paw.position.set(side * LOCAL.x, LOCAL.y + air * 0.05 * amp, zBase - extend)
+        // Toe down into the plant, up through the swing.
+        paw.rotation.set(PAW.pitch + reach * 0.3 * amp, -side * 0.32, -side * 0.18)
+      }
       this.updateArms()
       return
     }
@@ -649,24 +702,36 @@ export class Tiger {
       // the paw sits on the centre line at about eye level — on the reticle, and
       // so on whatever the hit trace is about to pick.
       shoulder.rotation.set(
-        // Pitch: drop and cock back, then lift the leg up to reticle height on
-        // the drive and let it fall away through the follow-through.
-        -windE * 0.2 + driveE * 0.53 - follow * 0.38,
+        // Pitch: drop and cock back, then lift the leg on the drive and let it
+        // fall away through the follow-through. 0.34 rather than the old 0.53
+        // because the rest pose is now much lower — the same lift from down
+        // there would carry the paw up over the reticle and out of the top of
+        // the frame instead of through it.
+        -windE * 0.2 + driveE * 0.34 - follow * 0.38,
         // Yaw: out to its own side on the wind-up, then across the centre line.
         side * (driveE * 0.66 - follow * 0.4 - windE * 0.2),
         side * (windE * 0.2 - driveE * 0.5 + follow * 0.26),
       )
-      // A little extension out of the shoulder at full stretch — a cat's swipe
-      // is not a rigid lever, the leg lengthens into the blow.
-      paw.position.set(side * LOCAL.x, LOCAL.y, LOCAL.z - driveE * 0.3 + follow * 0.16)
+      // The reach out of the shoulder. This is most of what makes the blow land
+      // in front of you rather than beside you: at the contact frame the leg is
+      // 0.37 longer than at rest, which puts the paw roughly on the reticle at
+      // 1.2 m — out where the hit trace actually is. A cat's swipe is not a
+      // rigid lever; the whole leg lengthens into it.
+      paw.position.set(side * LOCAL.x, LOCAL.y, LOCAL.z - driveE * 0.45 + follow * 0.16)
       // Turn the foot into the stroke as it goes, so the four claws lead it
-      // rather than the camera watching the back of the paw go past. Rolling it
-      // any further than this brings the sphere's own pole into view.
-      paw.rotation.set(PAW.pitch - driveE * 0.7, side * (0.32 + driveE * 0.45), side * (0.18 - driveE * 0.9))
+      // rather than the camera watching the back of the paw go past. Offsets
+      // from the rest yaw and roll rather than replacing them — the old form
+      // negated both on frame one of the swing, so the paw snapped through 0.64
+      // radians the instant you clicked.
+      paw.rotation.set(
+        PAW.pitch - driveE * 0.7,
+        -side * (0.32 - driveE * 0.72),
+        -side * (0.18 + driveE * 0.7),
+      )
       // The other foreleg braces: a cat swiping shifts its weight onto it.
       otherShoulder.rotation.set(-driveE * 0.22, 0, 0)
       other.position.set(-side * LOCAL.x, LOCAL.y, LOCAL.z)
-      other.rotation.set(PAW.pitch, -side * 0.32, -side * 0.18)
+      other.rotation.set(PAW.pitch, side * 0.32, side * 0.18)
 
       this.recoilY = -driveE * 0.045 + follow * 0.02
     }
