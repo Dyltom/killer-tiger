@@ -161,32 +161,46 @@ type Ring = readonly [number, number, number, number]
  * a waist genuinely narrower than both the hips and the ribs above it (a cone
  * can only taper one way), and a per-ring fore-aft offset, which is the lumbar
  * curve and the seat.
+ *
+ * An end ring with no width and no depth is a cap: one apex vertex and a fan,
+ * the way loft() closes its top. That is what lets a limb end — a hand, a foot —
+ * be one closed surface rather than a tube with a lid butted onto it. Note that
+ * sweepSplit() below indexes rows off the head of the buffer and so may only be
+ * given uncapped rings; the torso, its only caller, has none.
  */
 function sweep(rings: readonly Ring[], radial = 12): THREE.BufferGeometry {
   const n = radial + 1
-  const pos = new Float32Array(rings.length * n * 3)
-  const uv = new Float32Array(rings.length * n * 2)
+  const capped = (r: Ring) => r[1] <= 0 && r[2] <= 0
+  const capLo = capped(rings[0]!)
+  const capHi = capped(rings[rings.length - 1]!)
+  const first = capLo ? 1 : 0
+  const rows = rings.length - first - (capHi ? 1 : 0)
+  const count = rows * n + (capLo ? 1 : 0) + (capHi ? 1 : 0)
+  const pos = new Float32Array(count * 3)
+  const uv = new Float32Array(count * 2)
   const idx: number[] = []
-  for (let r = 0; r < rings.length; r++) {
-    const ring = rings[r]!
+  // UVs in tiles of the cloth weave, not 0..1 over the whole surface. The weave
+  // map is 64 px; stretched once round a metre of torso each thread is a
+  // centimetre and a half wide, so it stops reading as cloth and becomes a soft
+  // mottle over a shell that has nothing else on it. Twelve tiles round and one
+  // per eight centimetres of height puts it back at the scale it was drawn at.
+  // Twelve is an integer, so the seam still meets.
+  const put = (i: number, x: number, y: number, z: number, u: number) => {
+    pos[i * 3] = x
+    pos[i * 3 + 1] = y
+    pos[i * 3 + 2] = z
+    uv[i * 2] = u * 12
+    uv[i * 2 + 1] = y / 0.08
+  }
+  for (let r = 0; r < rows; r++) {
+    const ring = rings[first + r]!
     for (let c = 0; c < n; c++) {
       const t = c / radial
       const a = t * TAU
-      const i = r * n + c
-      pos[i * 3] = Math.sin(a) * ring[1]
-      pos[i * 3 + 1] = ring[0]
-      pos[i * 3 + 2] = ring[3] - Math.cos(a) * ring[2]
-      // UVs in tiles of the cloth weave, not 0..1 over the whole surface. The
-      // weave map is 64 px; stretched once round a metre of torso each thread
-      // is a centimetre and a half wide, so it stops reading as cloth and
-      // becomes a soft mottle over a shell that has nothing else on it. Twelve
-      // tiles round and one per eight centimetres of height puts it back at the
-      // scale it was drawn at. Twelve is an integer, so the seam still meets.
-      uv[i * 2] = t * 12
-      uv[i * 2 + 1] = ring[0] / 0.08
+      put(r * n + c, Math.sin(a) * ring[1], ring[0], ring[3] - Math.cos(a) * ring[2], t)
     }
   }
-  for (let r = 0; r < rings.length - 1; r++) {
+  for (let r = 0; r < rows - 1; r++) {
     for (let c = 0; c < radial; c++) {
       const a = r * n + c
       const b = (r + 1) * n + c
@@ -195,13 +209,45 @@ function sweep(rings: readonly Ring[], radial = 12): THREE.BufferGeometry {
       idx.push(a, b, a + 1, a + 1, b, b + 1)
     }
   }
+  // The apexes go on the end of the buffer, and each fan keeps the winding the
+  // quad it replaces would have had. Collapsing a whole ring onto the point
+  // instead would leave every triangle on it degenerate, and a degenerate
+  // triangle contributes nothing to computeVertexNormals, so the tip would come
+  // back with a null normal and render black.
+  let apex = rows * n
+  if (capLo) {
+    const ring = rings[0]!
+    put(apex, 0, ring[0], ring[3], 0.5)
+    for (let c = 0; c < radial; c++) idx.push(apex, c, c + 1)
+    apex++
+  }
+  if (capHi) {
+    const ring = rings[rings.length - 1]!
+    const base = (rows - 1) * n
+    put(apex, 0, ring[0], ring[3], 0.5)
+    for (let c = 0; c < radial; c++) idx.push(base + c, apex, base + c + 1)
+  }
   const g = new THREE.BufferGeometry()
   g.setAttribute('position', new THREE.BufferAttribute(pos, 3))
   g.setAttribute('uv', new THREE.BufferAttribute(uv, 2))
   g.setIndex(idx)
   g.computeVertexNormals()
-  weldSeam(g, radial, rings.length)
+  weldSeam(g, radial, rows)
   return g
+}
+
+/**
+ * A sweep laid on its side: local +y becomes world -z, so the rings stack from
+ * the heel forward and each one reads as [how far along the foot, half-width
+ * across it, half-height, and how high its centre sits].
+ *
+ * A foot is a wedge and a wedge is a stack of sections that change width,
+ * height and ground clearance independently along its length — which is exactly
+ * a sweep's four numbers, and is exactly what a tube cannot do. Rigid, so the
+ * welded seam normals survive the turn.
+ */
+function lie(g: THREE.BufferGeometry, x: number, z: number): THREE.BufferGeometry {
+  return g.applyMatrix4(new THREE.Matrix4().makeRotationX(-Math.PI / 2).setPosition(x, 0, z))
 }
 
 /**
@@ -502,7 +548,6 @@ const B_HEAD = ['head']
 const B_NECK = ['chest', 'neck', 'head']
 const B_ARM = (s: string) => [`clav${s}`, `arm${s}`, `fore${s}`, `hand${s}`]
 const B_LEG = (s: string) => ['hips', `thigh${s}`, `shin${s}`, `foot${s}`]
-const B_FOOT = (s: string) => [`shin${s}`, `foot${s}`, `toe${s}`]
 
 type Layer = 'skin' | 'cloth'
 interface Part {
@@ -805,8 +850,20 @@ const CREASE: Crease[] = (() => {
   // Limbs: the flexion creases, which are the only shading a straight tube gets.
   two(0.176, 1.056, -0.032, 0.036, 0.046, 0.030, 0.38)   // inner elbow
   two(0.090, 0.498, 0.052, 0.052, 0.046, 0.030, 0.42)    // back of the knee
-  two(0.196, 0.688, 0.000, 0.030, 0.046, 0.042, 0.32)    // between the fingers
+  // The hand's old single well was 6.0 x 9.2 x 8.4 cm centred on the knuckles,
+  // which is the whole hand and then some: it took a flat 32% off every vertex
+  // of it at once, and a uniform darkening is the opposite of form. It is why
+  // the hands read as dark paddles even before you got to their shape. What
+  // actually shades a hanging hand is the line at the base of the fingers, the
+  // valleys between them, and the hollow under the wrist bones — all narrow.
+  two(0.194, 0.7065, -0.014, 0.026, 0.011, 0.040, 0.34)  // the web
+  two(0.190, 0.672, -0.030, 0.024, 0.028, 0.036, 0.18)   // down between the fingers
+  two(0.196, 0.786, 0.000, 0.032, 0.009, 0.032, 0.20)    // wrist crease
   two(0.092, 0.098, 0.006, 0.046, 0.034, 0.042, 0.26)    // ankle hollow
+  // A bare foot has two shadows worth the name, and the second is standing in
+  // for the four toes that have no geometry of their own.
+  two(0.072, 0.014, -0.022, 0.024, 0.018, 0.042, 0.30)   // under the arch
+  two(0.082, 0.016, -0.156, 0.008, 0.014, 0.030, 0.34)   // beside the big toe
 
   // Face. The eye socket does most of the work: an eye is a wet ball at the
   // bottom of a hole, and the hole is the reason you can read a gaze at all.
@@ -1551,19 +1608,57 @@ export class Human {
       skin(bones, ell(sg * 0.182, 1.053, 0.004, r(0.050), 0.046, r(0.050)))   // elbow
       skin(bones, tube(el, wr, r(0.052), r(0.032)))
       skin(bones, ell(sg * 0.186, 0.982, -0.004, r(0.049), 0.058, r(0.046)))  // forearm belly
-      skin(bones, ell(sg * 0.198, 0.757, -0.004, 0.034, 0.04, 0.024))         // palm
-      skin(bones, ell(sg * 0.198, 0.722, -0.002, 0.032, 0.014, 0.032, 6, 4))  // knuckles
-      // Fingers spread front-to-back and curl medially: a relaxed hand, not a
-      // flat paddle. Index longest, little shortest.
-      const digit = [[-0.021, 0.658], [-0.001, 0.652], [0.019, 0.658], [0.037, 0.672]] as const
+      // The hand. Measured off the built mesh before touching it: the palm was
+      // an ellipsoid 6.8 cm through the body axis and 4.8 cm fore-aft, with a
+      // 6.4 x 6.4 x 2.8 cm flat disc of knuckles under it and four tubes on
+      // 2.0 cm centres fanned across 8.0 cm — wider than the palm they came out
+      // of. Every one of those numbers is the wrong way round.
+      //
+      // An arm hangs with the palm facing the thigh, so on this body *breadth
+      // across the knuckles* is the fore-aft axis and *thickness* is the
+      // across-body one. A hand is 8.5 cm across and 3 cm through. The old palm
+      // had the two swapped, which is the flat paddle, and the digits were
+      // splayed wider than the mass behind them, which is the fork.
+      //
+      // One swept mass now carries the carpus, the metacarpals and the web, and
+      // the fingers leave it already touching. A relaxed hand at the side is a
+      // soft curl, not a plumb line: its fore-aft centre walks 1.5 cm forward
+      // between the wrist and the web and the digits carry on forward from
+      // there, so the tips finish 3.5 cm in front of the wrist.
+      //
+      // The top two rings are the wrist and they are circular and cut from the
+      // arm's own girth. The forearm tube ends here on an open rim of r(0.032)
+      // and anything narrower leaves an annulus of daylight straight into the
+      // model — which the old ellipsoid did, along the front and back of every
+      // wrist, since it was only 4.8 cm deep against a 6.4 cm rim.
+      const palm: Ring[] = [
+        [0.6965, 0, 0, -0.016],                 // closed under the fingers
+        [0.7040, 0.0120, 0.0320, -0.014],
+        [0.7200, 0.0152, 0.0415, -0.008],       // knuckles: 3.0 through, 8.3 across
+        [0.7450, 0.0165, 0.0390, -0.002],
+        [0.7720, 0.0190, 0.0310, 0.001],
+        [0.7955, r(0.0360), r(0.0360), 0.001],  // seals the forearm's rim
+        [0.8120, r(0.0320), r(0.0320), 0.001],  // and is inside it from here up
+      ]
+      skin(bones, sweep(palm, 8).translate(sg * 0.196, 0, 0))
+      // Fingers on 1.9 cm centres at 2.0 cm across, so they touch at the web and
+      // open to a 5 mm gap at the tips: together, but readable as four. They
+      // leave the mass 1.2 cm inside it, curl forward as they go and lean 1.3 cm
+      // medially. Middle longest, little shortest and set back.
+      const digit = [[-0.0385, 0.6555], [-0.0195, 0.6505], [-0.0005, 0.6560], [0.0175, 0.6720]] as const
       for (const [dz, tipY] of digit) {
         skin(bones, tube(
-          V(sg * 0.198, 0.719, dz),
-          V(sg * 0.182, tipY, dz - 0.012),
-          0.011, 0.006, 5,
+          V(sg * 0.196, 0.7160, dz),
+          V(sg * 0.183, tipY, dz * 0.88 - 0.016),
+          0.0100, 0.0068, 5,
         ))
       }
-      skin(bones, tube(V(sg * 0.184, 0.766, -0.018), V(sg * 0.166, 0.712, -0.042), 0.016, 0.009, 5))  // thumb
+      // Thumb: forward off the radial edge and inboard, which is where a hanging
+      // one sits. Short, because only the distal half of it clears the thenar —
+      // and it starts on the palm's *axis*, 1.4 cm inside the front face, not on
+      // it. Started flush, the tube's flat end cap is a visible facet and the
+      // thumb reads as a slab stuck on the side rather than as part of the hand.
+      skin(bones, tube(V(sg * 0.196, 0.770, -0.020), V(sg * 0.180, 0.7125, -0.053), 0.0125, 0.0082, 5))
       if (cuff > 0) {
         // Sleeve head, sleeve and cuff as one lofted surface on the arm's axis.
         //
@@ -1667,17 +1762,80 @@ export class Human {
       // of the shin at the side and 2 cm behind it, and is set 1.2 cm higher,
       // because a calf's widest point is just below the knee and not halfway.
       skin(bones, ell(sg * 0.092, 0.372, 0.018, r(0.058), 0.090, r(0.050)))  // calf
-      // Foot. The malleoli belong to the shin, the heel and arch to the foot, the
-      // pad to the toes — bound one bone each. Distance weighting split the heel
-      // fifty-fifty with the shin, so it only lifted half as far as the ankle
-      // rolled and the push-off never left the ground.
-      skin([`shin${s}`], ell(sg * 0.092, 0.088, 0.004, 0.038, 0.036, 0.04))
-      skin([`foot${s}`], ell(sg * 0.092, 0.05, 0.043, 0.038, 0.05, 0.04))
-      skin([`foot${s}`], tube(V(sg * 0.092, 0.05, 0.02), V(sg * 0.092, 0.032, -0.11), 0.048, 0.04, 6))
-      skin([`toe${s}`], ell(sg * 0.092, 0.026, -0.148, 0.042, 0.024, 0.038))
+      /**
+       * Foot. The malleoli belong to the shin; everything past the ankle is one
+       * swept wedge shared between the ankle and toe bones.
+       *
+       * It was a horizontal tube of radius 0.048 with an ellipsoid stuck on each
+       * end, and measured off the built mesh that came out 9.5-10.0 cm wide and
+       * 7.4-7.9 cm tall from the heel right through to the toe pad, with the sole
+       * a flat line at y 0.002 the whole way and 7.6 mm of it below the ground.
+       * A barrel of constant section is a clog. A foot is 26.9 cm long — which
+       * this already was, and is the one number that was right — 9.6 cm across
+       * the ball, 6.2 across the heel, 4.7 tall at the ball and 2.7 at the toes,
+       * and it has an arch: the sole leaves the ground for the 8 cm between the
+       * heel pad and the ball. Those are the sections below.
+       *
+       * The sole sits 4 mm under y = 0 at the two contact patches on purpose. An
+       * ellipse touches a plane at one point, so a section whose bottom is exactly
+       * on the ground gives a foot standing on a knife edge; sinking it gives a
+       * 5 cm flat where the ball meets the ground and 3 cm at the heel, and the
+       * buried part only ever surfaces at push-off, when it reads as the arch.
+       *
+       * Bound to the ankle and toe bones together rather than one piece each:
+       * distance weighting across those two alone puts 93% of the heel on the
+       * ankle and all of the pad on the toe, and blends them over the ball, which
+       * is where the joint actually is. Excluding the shin is what the old hard
+       * split was really for — a set containing it took half the heel, so the
+       * heel only lifted half as far as the ankle rolled and push-off never left
+       * the ground.
+       */
+      skin([`shin${s}`], ell(sg * 0.092, 0.086, 0.004, 0.037, 0.040, 0.034, 8, 5))
+      /** [how far forward, half-width, half-height, height of the centre]. */
+      const section = (z: number, w: number, h: number, y: number): Ring => [0.083 - z, w, h, y]
+      skin([`foot${s}`, `toe${s}`], lie(sweep([
+        section(0.083, 0, 0, 0.050),            // back of the heel
+        section(0.070, 0.0230, 0.0300, 0.040),
+        section(0.048, 0.0310, 0.0420, 0.038),  // heel: 6.2 across, sole 4 mm under
+        section(0.015, 0.0345, 0.0400, 0.046),  // under the ankle
+        section(-0.020, 0.0390, 0.0280, 0.040), // arch: sole 1.2 cm clear
+        section(-0.058, 0.0450, 0.0250, 0.029),
+        section(-0.095, 0.0480, 0.0250, 0.021), // ball: 9.6 across, 4.6 tall
+        section(-0.130, 0.0440, 0.0195, 0.017),
+        section(-0.155, 0.0350, 0.0150, 0.014),
+        section(-0.174, 0, 0, 0.012),           // ends on the lesser toes
+      ], 8), sg * 0.092, 0.083))
+      // The big toe is the one that reads, and it is the only one worth its own
+      // geometry: set on the medial third, a centimetre longer than the rest, and
+      // what actually sets the 26.9 cm. The other four are a shading job.
+      skin([`toe${s}`], tube(V(sg * 0.072, 0.019, -0.135), V(sg * 0.070, 0.013, -0.186), 0.0125, 0.0100, 5))
       if (shod) {
-        fixed(B_FOOT(s), slab(0.1, 0.022, 0.245, sg * 0.092, 0.014, -0.052), LEATHER, 'cloth')
-        fixed([`foot${s}`], ell(sg * 0.092, 0.048, -0.012, 0.05, 0.046, 0.088, 8, 5), LEATHER, 'cloth')
+        // Sandals, not clogs. The old pair was a 10 x 24.5 cm rectangular plank
+        // — as wide at the heel as at the ball, so it stood 1.9 cm proud of the
+        // new heel on each side — under an ellipsoid that swallowed the whole
+        // midfoot. A footbed cut to the foot's own plan and a single band over
+        // the instep leave the heel and the toes out in the open, which is the
+        // whole difference between a sandal and a shoe.
+        // Bottomed on the same plane as the bare sole, y -0.004, because the gait
+        // plants the ankle at one height whether or not there is a sandal under
+        // it. A bed hung below that plane is a centimetre of leather in the dirt
+        // on every planted step — measured at -1.4 cm against -0.4 for a bare
+        // foot before this was pulled up.
+        const bed = (z: number, w: number): Ring => section(z, w, w > 0 ? 0.009 : 0, 0.005)
+        fixed([`foot${s}`, `toe${s}`], lie(sweep([
+          bed(0.086, 0), bed(0.070, 0.028), bed(0.030, 0.038), bed(-0.020, 0.044),
+          bed(-0.070, 0.050), bed(-0.120, 0.052), bed(-0.165, 0.042), bed(-0.192, 0),
+        ], 6), sg * 0.092, 0.083), LEATHER, 'cloth')
+        // Over the instep in two runs, because a strip is straight and one run
+        // across a foot 4.5 cm tall passes through it. They meet 3 mm proud of
+        // the instep and overrun so the bend cannot open.
+        const peak = V(sg * 0.092, 0.062, -0.060)
+        for (const e of [-1, 1]) {
+          fixed([`foot${s}`], strip(
+            peak, V(sg * 0.092 + e * sg * 0.046, 0.014, -0.060),
+            0.036, 0.006, V(e * sg * 0.7, 0.7, 0), 0.008,
+          ), LEATHER, 'cloth')
+        }
       }
 
       /**
