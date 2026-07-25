@@ -13,7 +13,17 @@ export const WORLD = {
   fogFar: 210,
   /** How many grass patches (stalking cover) to scatter. */
   grassPatches: 220,
+  /** Blades per stalking patch — these are the tall ones you hide in. */
+  bladesPerPatch: 88,
+  /**
+   * Short filler grass scattered everywhere so the ground is never bare.
+   * Spread over a 120 m disc this is ~1 tuft/m2; much below that and the
+   * ground reads as bare dirt with weeds dotted on it.
+   */
+  groundCover: 155000,
   trees: 130,
+  /** Low scrub between the trees — the midground layer that hides the horizon. */
+  bushes: 300,
   rocks: 45,
   huts: 22,
   campfires: 5,
@@ -186,6 +196,100 @@ export const COLORS = {
   grass: 0x4a5c33,
   dirt: 0x6b5539,
   blood: 0x8e0f14,
+}
+
+/**
+ * Atmosphere. The sun sits just above the horizon and behind the village, so
+ * the player stalks in toward the light and everything they hunt is rimmed by
+ * it. Elevation below about 1.5 degrees makes the Preetham model collapse to
+ * near-black, so this is as low as the sun can usefully go.
+ */
+export const SKY = {
+  // Late golden hour rather than dead-on sunset. At 2-3 degrees everything
+  // downsun is a pure silhouette; ~10 degrees still rakes long shadows across
+  // the plain but leaves enough front light to read thatch, fur and faces.
+  sunElevation: 10.5, // degrees above the horizon
+  sunAzimuth: 168, // degrees; the village sits between the tiger and the sun
+  // High turbidity plus a 10-degree sun gives a milky grey dome. Dropping it
+  // lets the Rayleigh blue back into the zenith while the Mie lobe keeps the
+  // gold concentrated around the sun, which is what reads as golden hour.
+  turbidity: 3.2,
+  rayleigh: 3.0,
+  mieCoefficient: 0.006,
+  mieDirectionalG: 0.86,
+  /**
+   * Scales the dome's radiance. Preetham is physically normalised, not
+   * art-directed: at this sun elevation the horizon band comes out tens of
+   * units of linear white, which swamps the tone map and leaves the whole
+   * frame milky. This is the exposure knob for the sky alone, so the ground
+   * can stay lit while the sky sits in a sane range.
+   */
+  domeIntensity: 0.42,
+  /** Sky dome radius. Rides with the camera, so it only has to clear the props. */
+  radius: 4000,
+  /** Cloud dome drift, radians/second. */
+  cloudDrift: 0.0035,
+  /** Directional (sun) light. */
+  sunLight: 0xffd0a0,
+  sunIntensity: 3.3,
+  /** Sky/ground hemisphere bounce. */
+  skyBounce: 0x6f90bd,
+  groundBounce: 0x6a5a38,
+  bounceIntensity: 1.15,
+  /** Image-based lighting from the sky dome. */
+  envIntensity: 2.4,
+}
+
+/**
+ * Height-attenuated, view-direction-tinted fog. Baked into the shader as
+ * constants — see render/atmosphere.ts.
+ */
+export const FOG = {
+  // Tuned so a hut at 40 m still shows its thatch texture (~15% fogged) and
+  // only the far treeline dissolves. Anything above ~0.01 turns the midground
+  // into flat orange cut-outs.
+  density: 0.0055,
+  /** Larger = fog hugs the ground more tightly. */
+  heightFalloff: 0.075,
+  /** Colour looking straight into the sun... */
+  sunColor: 0xffc286,
+  /** ...and looking away from it. */
+  awayColor: 0x8fa2ba,
+  /** Distance at which fog is fully saturated regardless of height. */
+  maxDistance: 300,
+  /** How much of the far-plane haze floor to apply (0..1). */
+  farFloor: 0.75,
+}
+
+/** Post-processing chain. See render/postfx.ts. */
+export const POST = {
+  exposure: 1.0,
+  // Threshold is in linear HDR and the pre-bloom clamp is 3.5, so 2.6 means
+  // "only the sun's core and the campfire flames bloom". Wider than this and
+  // the whole sky-facing half of the frame turns to milk — the sky near a low
+  // sun is a very large area of very bright pixels.
+  bloomStrength: 0.06,
+  bloomRadius: 0.35,
+  bloomThreshold: 2.6,
+  /** Screen-space god rays from the sun. The pass returns an average shaft
+   *  brightness in the 0..4 range, so this is close to a direct multiplier. */
+  godrayStrength: 0.22,
+  godrayDecay: 0.955,
+  godraySamples: 48,
+  /** Final grade. */
+  vignette: 0.42,
+  grain: 0.032,
+  // Kept low. The viewmodel paws sit in the screen corners where lateral
+  // chromatic aberration is strongest, and above ~0.0012 their silhouettes
+  // pick up visible red/cyan fringes.
+  chromatic: 0.001,
+  saturation: 1.12,
+  contrast: 1.06,
+  /** Split-tone: cool shadows, warm highlights. */
+  shadowTint: 0x2c3a52,
+  highlightTint: 0xffd7a8,
+  toneStrength: 0.16,
+  sharpen: 0.28,
 }
 
 export const STORAGE_KEY = 'killer-tiger:best'

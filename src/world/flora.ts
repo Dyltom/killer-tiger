@@ -1,0 +1,453 @@
+/**
+ * Trees, scrub and grass.
+ *
+ * Everything here is an InstancedMesh built once at load. The visual jump over
+ * the first pass comes from three changes:
+ *
+ *   - canopies are alpha cut-out cards scattered through a crown volume, not a
+ *     solid icosahedron. A silhouette with holes in it is the single biggest
+ *     tell between "placeholder tree" and "tree";
+ *   - a second, much denser layer of short grass covers the ground everywhere,
+ *     so the terrain texture is never the outermost thing you see; and
+ *   - all of it moves, with a travelling gust rather than per-plant jitter.
+ *
+ * The ground layer only exists near the camera — addDistanceFade collapses it
+ * before it becomes 14,000 quads of overdraw at the horizon.
+ */
+import * as THREE from 'three'
+import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
+import { WORLD } from '../config'
+import { Rng } from '../engine/rng'
+import { surface } from './materials'
+import { textures } from './textures'
+import { addDistanceFade, addTranslucency, addWind } from './wind'
+import type { Collider } from './world'
+
+export interface FloraContext {
+  rng: Rng
+  /** Ground height at a world position. */
+  height: (x: number, z: number) => number
+  /** Is this spot far enough from everything already placed? */
+  clearOf: (x: number, z: number, pad: number) => boolean
+  colliders: Collider[]
+}
+
+/**
+ * A dome of small cards jittered through a unit hemisphere, merged into one
+ * geometry. Three big crossed quads of the same leaf texture read as a flat
+ * cut-out from every angle; a dozen small ones at random tilts read as a mass
+ * of foliage for the same instance count.
+ */
+function cardClump(count: number, radius: number, cardSize: number, seed: number): THREE.BufferGeometry {
+  const rng = new Rng(seed)
+  const parts: THREE.BufferGeometry[] = []
+  for (let i = 0; i < count; i++) {
+    const q = new THREE.PlaneGeometry(cardSize, cardSize)
+    q.translate(0, cardSize * 0.4, 0)
+    q.rotateX(rng.range(-0.7, 0.7))
+    q.rotateZ(rng.range(-0.7, 0.7))
+    q.rotateY(rng.range(0, Math.PI * 2))
+    // sqrt keeps the cards from bunching at the centre of the dome.
+    const a = rng.range(0, Math.PI * 2)
+    const r = Math.sqrt(rng.next()) * radius
+    q.translate(Math.cos(a) * r, rng.range(0.05, 1) * radius, Math.sin(a) * r)
+    parts.push(q)
+  }
+  return mergeGeometries(parts)!
+}
+
+/** Crossed quads, pivoting about the base so wind bends them like a plant. */
+function crossedQuads(planes: number, width: number, height: number): THREE.BufferGeometry {
+  const parts: THREE.BufferGeometry[] = []
+  for (let i = 0; i < planes; i++) {
+    const q = new THREE.PlaneGeometry(width, height)
+    q.translate(0, height / 2, 0)
+    q.rotateY((i / planes) * Math.PI)
+    parts.push(q)
+  }
+  return mergeGeometries(parts)!
+}
+
+/** Foliage lit as a thin surface: no metal, no gloss, lit from both sides. */
+function leafMaterial(map: THREE.Texture, color: number): THREE.MeshStandardMaterial {
+  return new THREE.MeshStandardMaterial({
+    map,
+    color,
+    alphaTest: 0.42,
+    side: THREE.DoubleSide,
+    roughness: 0.92,
+    metalness: 0,
+    // Alpha-tested foliage renders as opaque, so it casts and receives real
+    // shadows — a transparent material would drop out of the shadow map.
+    transparent: false,
+  })
+}
+
+const M = new THREE.Matrix4()
+const P = new THREE.Vector3()
+const Q = new THREE.Quaternion()
+const S = new THREE.Vector3()
+const E = new THREE.Euler()
+/** Separate from M/E — used to resolve a limb's tip while composing matrices. */
+const DIR = new THREE.Vector3()
+const DE = new THREE.Euler()
+const YAXIS = new THREE.Vector3(0, 1, 0)
+const QT = new THREE.Quaternion()
+const QS = new THREE.Quaternion()
+
+/**
+ * Tilt a card away from vertical, then spin it about its own stem.
+ *
+ * Doing the spin as the middle term of an XYZ Euler does not work: three.js
+ * builds that as Rx·Ry·Rz, so the Z tilt lands first, the yaw swings the
+ * already-tilted card around the world axis, and the X tilt piles on top. Cards
+ * came out pointing in arbitrary directions, including a few hanging straight
+ * down like willow fronds. Composing the spin *inside* the tilt keeps the
+ * stem-to-leaf axis where the limb put it and only changes which way the flat
+ * of the card faces.
+ */
+function composeCard(
+  x: number, y: number, z: number,
+  rx: number, rz: number, spin: number,
+  sx: number, sy: number, sz: number,
+) {
+  QT.setFromEuler(DE.set(rx, 0, rz))
+  QS.setFromAxisAngle(YAXIS, spin)
+  P.set(x, y, z)
+  S.set(sx, sy, sz)
+  return M.compose(P, QT.multiply(QS), S)
+}
+
+function compose(x: number, y: number, z: number, rx: number, ry: number, rz: number, sx: number, sy: number, sz: number) {
+  P.set(x, y, z)
+  E.set(rx, ry, rz)
+  Q.setFromEuler(E)
+  S.set(sx, sy, sz)
+  return M.compose(P, Q, S)
+}
+
+/** Park an unused instance somewhere it will never be drawn. */
+function hide(mesh: THREE.InstancedMesh, from: number) {
+  const m = compose(0, -9999, 0, 0, 0, 0, 1e-4, 1e-4, 1e-4)
+  for (let i = from; i < mesh.count; i++) mesh.setMatrixAt(i, m)
+}
+
+// ------------------------------------------------------------------- trees
+/**
+ * Canopy cards per tree. Enough to close the silhouette from any angle.
+ * Many small cards beat few large ones: a card wider than about a third of the
+ * crown reads as a printed cut-out no matter how good the alpha map is.
+ *
+ * These are spent in clumps at the ends of the limbs rather than sprinkled
+ * evenly through the crown volume. Even scatter is the trap: it spreads a fixed
+ * budget of cards thin, so no part of the crown is dense enough to be opaque
+ * and the tree reads as a scattering of leaf blobs floating around a bare pole.
+ * A real canopy is lumpy — dense masses of foliage with daylight between them —
+ * and you get that by concentrating the same cards into a handful of clusters
+ * anchored to branches you can actually see.
+ */
+const CARDS_PER_TREE = 88
+const BRANCHES_PER_TREE = 8
+const CARDS_PER_LIMB = CARDS_PER_TREE / BRANCHES_PER_TREE
+
+export function buildTrees(ctx: FloraContext): THREE.Group {
+  const { rng } = ctx
+  const tex = textures()
+  const group = new THREE.Group()
+  const n = WORLD.trees
+
+  // ---- geometry
+  // Three height segments so the trunk can taper and still light smoothly.
+  const trunkGeo = new THREE.CylinderGeometry(0.11, 0.22, 1, 9, 3)
+  trunkGeo.translate(0, 0.5, 0)
+  // A flare at the base. Trees meeting the ground at a hard cylinder edge is
+  // one of those details you don't notice until it's fixed.
+  const flareGeo = new THREE.ConeGeometry(1, 1, 9, 1, true)
+  flareGeo.translate(0, 0.5, 0)
+  const branchGeo = new THREE.CylinderGeometry(0.025, 0.09, 1, 5)
+  branchGeo.translate(0, 0.5, 0)
+  const cardGeo = new THREE.PlaneGeometry(1, 1)
+  cardGeo.translate(0, 0.5, 0)
+
+  // ---- materials
+  // Repeats are set from the real size of the thing they're on. The bark set is
+  // about a metre across, and these trunks run 5-12 m tall on a ~1.3 m
+  // circumference, so 2 x 7 puts the plates at life size. At the 2 x 3 this used
+  // to be, one bark tile stretched over four metres of trunk and the trees read
+  // as smooth peeled poles.
+  const barkMat = surface('bark', { repeat: [2, 7], roughness: 1, normalScale: 1.3 })
+  const branchMat = surface('bark', { repeat: [2, 3], roughness: 1, normalScale: 1.3 })
+  const flareMat = surface('bark', { repeat: [2, 1], roughness: 1, color: 0x9a8b76 })
+  const leafMat = leafMaterial(tex.leafCard!, 0xd6e0b4)
+  addWind(leafMat, { amplitude: 0.42, height: 1, speed: 1.15, gust: 1.35 })
+  // Canopy leaves are the strongest case: a crown between you and the sun
+  // should read as a lantern, not a black stencil.
+  addTranslucency(leafMat, 0.85, 2.6)
+
+  const trunks = new THREE.InstancedMesh(trunkGeo, barkMat, n)
+  const flares = new THREE.InstancedMesh(flareGeo, flareMat, n)
+  const branches = new THREE.InstancedMesh(branchGeo, branchMat, n * BRANCHES_PER_TREE)
+  const cards = new THREE.InstancedMesh(cardGeo, leafMat, n * CARDS_PER_TREE)
+  for (const m of [trunks, flares, branches, cards]) {
+    m.castShadow = true
+    m.receiveShadow = true
+    m.frustumCulled = false
+  }
+  // Cards get their own tint per tree so the treeline isn't one flat green.
+  cards.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(n * CARDS_PER_TREE * 3), 3)
+
+  const tint = new THREE.Color()
+  let bi = 0
+  let ci = 0
+
+  for (let i = 0; i < n; i++) {
+    let x = 0
+    let z = 0
+    for (let tries = 0; tries < 30; tries++) {
+      // Dense treeline at the edge, sparse inside the village.
+      const edge = rng.chance(0.62)
+      const r = edge ? rng.range(78, WORLD.bounds - 3) : rng.range(34, 78)
+      const a = rng.range(0, Math.PI * 2)
+      x = Math.cos(a) * r
+      z = Math.sin(a) * r
+      if (ctx.clearOf(x, z, 4)) break
+    }
+    const y = ctx.height(x, z)
+
+    // Two silhouettes: flat-topped acacias, and taller rounded crowns.
+    const acacia = rng.chance(0.55)
+    const h = acacia ? rng.range(5.0, 8.0) : rng.range(7.0, 12.5)
+    // Trunk radius is thick * the geometry's 0.22 m base, so this tops out at
+    // ~0.6 m across on an 8 m acacia. Anything fatter reads as a redwood.
+    const thick = rng.range(0.85, 1.35) * (acacia ? 1.2 : 1)
+    const yaw = rng.range(0, Math.PI * 2)
+    const lean = rng.range(-0.06, 0.06)
+    const lean2 = rng.range(-0.06, 0.06)
+
+    trunks.setMatrixAt(i, compose(x, y, z, lean, yaw, lean2, thick, h, thick))
+    const fh = rng.range(0.35, 0.6) * thick
+    flares.setMatrixAt(i, compose(x, y - 0.05, z, 0, yaw, 0, thick * 0.4, fh, thick * 0.4))
+
+    // Crown volume: acacias spread wide and flat, the others build a dome.
+    // The round crowns start halfway up rather than at 0.62 — any higher and a
+    // 12 m tree is six metres of bare pole with a hat on.
+    const crownR = acacia ? h * rng.range(0.5, 0.68) : h * rng.range(0.34, 0.46)
+    const forkY = y + h * (acacia ? 0.72 : 0.46)
+
+    // Warm, dusty green near the sunlit top; deeper and cooler underneath.
+    const hue = rng.range(0.16, 0.24)
+
+    for (let b = 0; b < BRANCHES_PER_TREE; b++) {
+      const ba = yaw + (b / BRANCHES_PER_TREE) * Math.PI * 2 + rng.range(-0.35, 0.35)
+      // Pitch away from vertical: acacia branches reach almost sideways.
+      const pitch = acacia ? rng.range(0.88, 1.18) : rng.range(0.42, 0.78)
+      const len = crownR * rng.range(0.62, 1.0)
+      const rx = Math.cos(ba) * pitch
+      const rz = -Math.sin(ba) * pitch
+      branches.setMatrixAt(bi++, compose(x, forkY, z, rx, 0, rz, thick * 0.95, len, thick * 0.95))
+
+      // Where that limb actually ends, so the foliage hangs off it instead of
+      // floating in the general vicinity.
+      DIR.set(0, 1, 0).applyEuler(DE.set(rx, 0, rz))
+      const tipX = x + DIR.x * len
+      const tipY = forkY + DIR.y * len
+      const tipZ = z + DIR.z * len
+      // Wide enough that neighbouring limbs' clumps overlap. Eight tips on a
+      // circle sit about 0.77 R apart, so a clump narrower than ~0.5 R leaves a
+      // ring of daylight gaps between them and the crown reads as a handful of
+      // separate broccoli florets stuck on a pole.
+      const clump = crownR * (acacia ? 0.46 : 0.54)
+
+      for (let k = 0; k < CARDS_PER_LIMB; k++) {
+        // Bias along the limb past its tip: foliage sits on the outer third of
+        // a branch, not evenly along it.
+        const along = rng.range(0.66, 1.1)
+        // Jitter inside a ball, cube-rooted so the clump is solid in the middle
+        // and ragged at the edge.
+        const ja = rng.range(0, Math.PI * 2)
+        const jp = Math.acos(rng.range(-1, 1))
+        const jr = Math.cbrt(rng.next()) * clump
+        const cx = x + (tipX - x) * along + Math.sin(jp) * Math.cos(ja) * jr
+        const cy = forkY + (tipY - forkY) * along + Math.cos(jp) * jr * (acacia ? 0.55 : 1)
+        const cz = z + (tipZ - z) * along + Math.sin(jp) * Math.sin(ja) * jr
+
+        // Smaller than the old even scatter used — the density now comes from
+        // overlap inside the clump, so oversized cards only cost silhouette.
+        const size = crownR * rng.range(0.34, 0.56)
+        // The spray follows its limb but flops off it, more so on the acacias
+        // whose foliage lies flat across the top of the branch.
+        const cp = pitch * rng.range(0.55, 1.15) + rng.range(-0.28, 0.28)
+        cards.setMatrixAt(
+          ci,
+          composeCard(
+            cx, cy, cz,
+            Math.cos(ba) * cp, -Math.sin(ba) * cp, rng.range(0, Math.PI * 2),
+            size, size * rng.range(0.85, 1.15), size,
+          ),
+        )
+        tint.setHSL(hue + rng.range(-0.02, 0.02), rng.range(0.26, 0.48), rng.range(0.42, 0.72))
+        cards.setColorAt(ci, tint)
+        ci++
+      }
+    }
+
+    ctx.colliders.push({ kind: 'circle', x, z, r: 0.55 * thick, h })
+  }
+
+  hide(branches, bi)
+  hide(cards, ci)
+  for (const m of [trunks, flares, branches, cards]) m.instanceMatrix.needsUpdate = true
+  cards.instanceColor.needsUpdate = true
+
+  group.add(trunks, flares, branches, cards)
+  return group
+}
+
+// ------------------------------------------------------------------ bushes
+/** Low scrub. Cheap, and it does most of the work of making the plain look full. */
+export function buildBushes(ctx: FloraContext): THREE.InstancedMesh {
+  const { rng } = ctx
+  const tex = textures()
+  const geo = cardClump(11, 0.5, 0.62, 5150)
+  const mat = leafMaterial(tex.leafCard!, 0xc8d2a4)
+  addWind(mat, { amplitude: 0.14, height: 1, speed: 1.7, gust: 1.0 })
+  addTranslucency(mat, 0.6, 3.0)
+  addDistanceFade(mat, 105, 150)
+
+  const n = WORLD.bushes
+  const mesh = new THREE.InstancedMesh(geo, mat, n)
+  mesh.castShadow = true
+  mesh.receiveShadow = true
+  mesh.frustumCulled = false
+  mesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(n * 3), 3)
+  const tint = new THREE.Color()
+
+  for (let i = 0; i < n; i++) {
+    let x = 0
+    let z = 0
+    for (let tries = 0; tries < 20; tries++) {
+      const d = rng.inDisc(WORLD.bounds - 4)
+      x = d.x
+      z = d.z
+      if (Math.hypot(x, z) > 20 && ctx.clearOf(x, z, 1.6)) break
+    }
+    const s = rng.range(1.1, 2.6)
+    mesh.setMatrixAt(i, compose(x, ctx.height(x, z) - 0.15, z, 0, rng.range(0, Math.PI), 0, s, s * rng.range(0.55, 0.85), s))
+    tint.setHSL(rng.range(0.14, 0.22), rng.range(0.22, 0.42), rng.range(0.42, 0.66))
+    mesh.setColorAt(i, tint)
+  }
+  mesh.instanceMatrix.needsUpdate = true
+  mesh.instanceColor.needsUpdate = true
+  return mesh
+}
+
+// ------------------------------------------------------------------- grass
+export interface GrassPatch {
+  x: number
+  z: number
+  r: number
+}
+
+export interface GrassResult {
+  tall: THREE.InstancedMesh
+  cover: THREE.InstancedMesh
+  patches: GrassPatch[]
+  /** Patch centres, useful as pickup spawn points. */
+  centres: THREE.Vector3[]
+}
+
+export function buildGrass(ctx: FloraContext): GrassResult {
+  const { rng } = ctx
+  const tex = textures()
+  const tint = new THREE.Color()
+
+  // ---- tall stalking grass, clustered into patches the AI knows about
+  // Wider than it is tall: a card taller than it is wide reads as a bulrush.
+  // Top of the card lands around 1.2 m, which hides a crouched tiger (0.85 m
+  // eye) while a standing one (1.55 m) can still see over it.
+  const tallGeo = crossedQuads(3, 1.12, 1.0)
+  const tallMat = leafMaterial(tex.grassBlade!, 0xffffff)
+  tallMat.alphaTest = 0.28
+  addWind(tallMat, { amplitude: 0.26, height: 1.05, speed: 2.1, gust: 1.2 })
+  // Tighter lobe than the canopy — dry grass is stiffer and less translucent,
+  // and a wide lobe here washes out the whole plain.
+  addTranslucency(tallMat, 0.9, 4.0)
+  addDistanceFade(tallMat, 120, 165)
+
+  const patches: GrassPatch[] = []
+  const centres: THREE.Vector3[] = []
+  const perPatch = WORLD.bladesPerPatch
+  const tall = new THREE.InstancedMesh(tallGeo, tallMat, WORLD.grassPatches * perPatch)
+  tall.receiveShadow = true
+  tall.castShadow = true
+  tall.frustumCulled = false
+  tall.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(tall.count * 3), 3)
+
+  let i = 0
+  for (let p = 0; p < WORLD.grassPatches; p++) {
+    let px = 0
+    let pz = 0
+    for (let tries = 0; tries < 20; tries++) {
+      const d = rng.inDisc(WORLD.bounds - 4)
+      px = d.x
+      pz = d.z
+      if (Math.hypot(px, pz) > 16) break
+    }
+    const pr = rng.range(2.6, 6.5)
+    patches.push({ x: px, z: pz, r: pr })
+    centres.push(new THREE.Vector3(px, ctx.height(px, pz), pz))
+
+    for (let b = 0; b < perPatch; b++) {
+      const a = rng.range(0, Math.PI * 2)
+      const r = Math.sqrt(rng.next()) * pr
+      const x = px + Math.cos(a) * r
+      const z = pz + Math.sin(a) * r
+      const s = rng.range(0.8, 1.15)
+      // Sunk slightly so no clump shows a floating hard edge on a slope.
+      tall.setMatrixAt(i, compose(x, ctx.height(x, z) - 0.08, z, 0, rng.range(0, Math.PI), 0, s, s * rng.range(0.8, 1.15), s))
+      // Dry-season savanna: olive and straw, never lime. Hues below ~0.12 come
+      // out fluorescent yellow once the low sun rakes across them.
+      tint.setHSL(rng.range(0.13, 0.2), rng.range(0.18, 0.36), rng.range(0.3, 0.48))
+      tall.setColorAt(i, tint)
+      i++
+    }
+  }
+  hide(tall, i)
+  tall.instanceMatrix.needsUpdate = true
+  tall.instanceColor.needsUpdate = true
+
+  // ---- short ground cover, everywhere, close to the camera only
+  // Wide and low. A cover card taller than it is wide reads as a planted shrub;
+  // real ground cover is a mat, and its job is to hide the terrain texture's
+  // tiling, not to be individually legible.
+  const coverGeo = crossedQuads(2, 0.62, 0.46)
+  const coverMat = leafMaterial(tex.grassBlade!, 0xffffff)
+  coverMat.alphaTest = 0.28
+  addWind(coverMat, { amplitude: 0.08, height: 0.44, speed: 2.6, gust: 0.9 })
+  addTranslucency(coverMat, 0.9, 4.0)
+  // Pushed well out: a fade ring at 50 m sits inside the village and shows as a
+  // visible circle of bare ground around the player. Past ~70 m the tufts are
+  // sub-pixel anyway and only cost overdraw.
+  addDistanceFade(coverMat, 44, 68)
+
+  const cover = new THREE.InstancedMesh(coverGeo, coverMat, WORLD.groundCover)
+  cover.receiveShadow = true
+  cover.frustumCulled = false
+  cover.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(WORLD.groundCover * 3), 3)
+
+  for (let c = 0; c < WORLD.groundCover; c++) {
+    // Bias inward: the fade radius is 52 m, so blades out at the boundary
+    // would never be visible anyway.
+    const d = rng.inDisc(WORLD.bounds - 2)
+    const s = rng.range(0.85, 1.65)
+    cover.setMatrixAt(c, compose(d.x, ctx.height(d.x, d.z) - 0.05, d.z, 0, rng.range(0, Math.PI), 0, s, s * rng.range(0.8, 1.25), s))
+    // Desaturated and pulled toward the ground's own hue: high-contrast tufts
+    // on pale dirt read as scattered props rather than a continuous sward.
+    tint.setHSL(rng.range(0.12, 0.19), rng.range(0.12, 0.28), rng.range(0.28, 0.46))
+    cover.setColorAt(c, tint)
+  }
+  cover.instanceMatrix.needsUpdate = true
+  cover.instanceColor.needsUpdate = true
+
+  return { tall, cover, patches, centres }
+}

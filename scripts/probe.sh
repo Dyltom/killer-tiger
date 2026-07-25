@@ -1,9 +1,6 @@
 #!/usr/bin/env bash
-# Drive the game in a cmux browser surface at a fixed timestep and screenshot it.
-# Backgrounded webviews get no requestAnimationFrame, so we step the loop by hand
-# via the __kt debug handle instead of waiting on wall-clock frames.
-#
-# usage: scripts/drive.sh <surface> <out.png> [js-to-run-after-start]
+# Like drive.sh, but with the post chain off so you can read the raw render.
+# usage: scripts/probe.sh <surface> <out.png> [js]
 set -euo pipefail
 SURFACE="${1:?surface}"
 OUT="${2:?out png}"
@@ -19,8 +16,12 @@ cmux browser --surface "$SURFACE" eval --script "
   const _ce = console.error;
   console.error = (...a) => { window.__errs.push(String(a[0]).slice(0, 400)); _ce(...a); };
   document.getElementById('start-btn').click();
-  k.step(60);
+  k.postfx.godrays.enabled = false;
+  k.postfx.bloom.enabled = false;
+  k.postfx.grade.enabled = false;
+  k.step(30);
   ${EXTRA}
+  k.step(2);
   JSON.stringify({ state: k.game.state, errs: window.__errs.slice(0, 3) })
 " | tail -2
 cmux browser --surface "$SURFACE" screenshot --out "$OUT" >/dev/null

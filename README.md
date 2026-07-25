@@ -16,8 +16,9 @@ npm run preview    # serve the production build
 npm run typecheck
 ```
 
-No build-time asset pipeline and no network fetches — see
-[Assets](#assets-everything-is-generated-at-runtime).
+Nothing is fetched at run time and there is no build-time asset pipeline: the six
+CC0 texture sets in `public/assets/textures/` are committed, and everything else
+is generated in code. See [Assets](#assets).
 
 ## Controls
 
@@ -63,25 +64,35 @@ adrenaline (speed), iron claws (damage), iron hide (damage resistance), a relic
 **Hunts.** Each hunt asks for a prey quota. Clear it and the next hunt brings more
 villagers, more hunters, and tougher stats. It ends when you die.
 
-## Assets: everything is generated at runtime
+## Assets
 
-There are no image, model, audio, or font files in this repository, and nothing is
-downloaded at runtime. Every asset is synthesised in code on first load:
+The only files in the repository are six CC0 PBR texture sets from Poly Haven —
+albedo, normal and packed AO/roughness/metalness for grass, dirt, bark, rock,
+clay and thatch. They are what the surfaces you spend the whole game looking at
+are made of, and no amount of canvas drawing gets close to photographed material
+data. They live in `public/assets/textures/` as WebP, are re-fetchable with
+`scripts/fetch-assets.sh`, and are credited in [CREDITS.md](CREDITS.md).
 
-- **Textures** — drawn into 2D canvases (fur, bark, thatch, stone, cloth, grass,
-  blood, terrain) with a value-noise grain pass, then uploaded as `CanvasTexture`.
+Everything else is synthesised in code on first load:
+
+- **Textures** — drawn into 2D canvases (tiger fur, cloth, blood, grass blades,
+  leaf cards, particle sprites) with a value-noise grain pass, then uploaded as
+  `CanvasTexture`.
 - **Geometry** — low-poly `BufferGeometry` built in code. Trees, rocks, grass and
   the boundary cliffs are `InstancedMesh`.
 - **Terrain** — a height field from deterministic fBm noise. `terrainHeight(x, z)`
   is a pure function that every system (tiger, humans, props, particles) shares,
   so nothing ever disagrees about where the ground is.
+- **Sky and lighting** — a Preetham analytic sky, rendered once to an equirect and
+  run through `PMREMGenerator` so the same sky that is drawn behind the world is
+  also the image-based light on everything in it.
 - **Audio** — WebAudio oscillators and shaped noise buffers. Roars, gunshots,
   screams and ambience are all synthesised per call.
 - **Particles** — one pooled `Points` system with a custom shader for blood, gore,
   dust, sparks and muzzle flash.
 
-The upside: it runs offline, loads instantly, has no licences to track, and the
-whole look is tunable from `src/config.ts`.
+The result still runs offline from a static directory, loads in one round trip,
+and stays tunable from `src/config.ts`.
 
 ## Layout
 
@@ -92,7 +103,8 @@ src/
 ├── game.ts              simulation: waves, combat, scoring, pickups, buffs
 ├── engine/              input, procedural audio, seeded RNG + noise
 ├── entities/            tiger, human, pickup, particles
-├── world/               terrain, village, props, procedural textures
+├── render/              sky, image-based lighting, atmosphere, post-processing
+├── world/               terrain, village, flora, wind, materials, textures
 └── ui/                  HUD (the only module that touches the DOM)
 ```
 
@@ -111,16 +123,33 @@ The systems were built with obvious seams to pull on:
   `BUFFS` entry.
 - **New ability** — follow the roar: a cooldown on `Tiger`, a key check in
   `Game.updateActions`, and an effect loop over `humans`.
-- **Day/night** — `skyTexture()`, the light colours, and `COLORS.fog` are the
-  only three places the time of day is expressed.
+- **Day/night** — `SKY.sunElevation` and `SKY.sunAzimuth` in `config.ts` drive the
+  Preetham sky, the sun direction, the IBL environment and the aerial-perspective
+  fog together, so moving the sun moves the whole lighting model at once.
 - **Bosses, objectives, weather** — `WAVE` drives all pacing; hook a special
   spawn into `Game.advanceWave`.
 
 ## Tech
 
 TypeScript, Vite, and Three.js. Three.js was chosen over a full engine because it
-gives direct control of the render loop with no editor, no asset pipeline, and no
-project format — which is what makes the fully procedural approach above possible.
+gives direct control of the render loop with no editor and no project format,
+which is what lets the renderer be assembled by hand:
+
+- **Physically-based shading** on every surface, lit by a Preetham analytic sky
+  prefiltered through `PMREMGenerator` into an IBL environment — so ambient light
+  is the actual colour of the sky above each surface, not a flat hemisphere term.
+- **A single 4096px directional shadow map** with PCF soft filtering, its frustum
+  pulled in tight around the play area rather than the whole world, which buys the
+  resolution that cascades would otherwise be needed for.
+- **Aerial perspective** injected into every material with `onBeforeCompile`:
+  distant geometry picks up sun-tinted inscatter instead of fading to one fog
+  colour, which is what keeps the cliffs reading as distant rather than washed out.
+- **Foliage translucency** — a back-lit SSS lobe on grass and leaves so a blade
+  between you and the sun glows instead of going black.
+- **Post chain** — radial god rays anchored to the sun's projected screen position,
+  UnrealBloom, an ACES filmic tonemap, a colour grade, and SMAA.
+- **Vertex wind** — one shared time uniform animating grass, leaves and banners in
+  the vertex shader, so nothing costs a CPU update.
 
 ## Debug handle
 

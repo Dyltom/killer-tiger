@@ -3,6 +3,7 @@
  * Additive off, vertex-coloured, gravity-affected, no allocation per burst.
  */
 import * as THREE from 'three'
+import { textures } from '../world/textures'
 import { terrainHeight } from '../world/world'
 
 const MAX = 1400
@@ -17,32 +18,46 @@ export class Particles {
   private life = new Float32Array(MAX)
   private maxLife = new Float32Array(MAX)
   private gravity = new Float32Array(MAX)
+  private alpha = new Float32Array(MAX)
   private cursor = 0
 
   constructor(scene: THREE.Scene) {
     this.geo.setAttribute('position', new THREE.BufferAttribute(this.pos, 3))
     this.geo.setAttribute('color', new THREE.BufferAttribute(this.col, 3))
     this.geo.setAttribute('size', new THREE.BufferAttribute(this.size, 1))
+    this.geo.setAttribute('alpha', new THREE.BufferAttribute(this.alpha, 1))
 
     const mat = new THREE.ShaderMaterial({
-      uniforms: {},
+      // The shared soft sprite, rather than the smoothstep disc this used to
+      // draw. A hand-rolled falloff gives every particle the same flat edge
+      // profile; the sprite has a hot core and a long tail, which is what makes
+      // a blood spray look wet and an ember look like it is glowing.
+      uniforms: { uMap: { value: textures().spark } },
       vertexShader: /* glsl */ `
         attribute float size;
+        attribute float alpha;
         varying vec3 vColor;
+        varying float vAlpha;
         void main() {
           vColor = color;
+          vAlpha = alpha;
           vec4 mv = modelViewMatrix * vec4(position, 1.0);
-          // Clamped: an unbounded perspective size turns a single blood droplet
-          // a metre from the eye into a screen-filling disc.
-          gl_PointSize = clamp(size * (300.0 / -mv.z), 1.0, 64.0);
+          // size is a diameter in metres. 700 is half the viewport height
+          // divided by tan(fov/2) at the shipping 75 degree FOV, so a 0.1 m
+          // droplet four metres out covers about 17 px — the number it would
+          // cover if it were real geometry. Clamped because an unbounded
+          // perspective size turns one droplet near the eye into a full-screen
+          // disc.
+          gl_PointSize = clamp(size * (700.0 / -mv.z), 1.0, 90.0);
           gl_Position = projectionMatrix * mv;
         }
       `,
       fragmentShader: /* glsl */ `
+        uniform sampler2D uMap;
         varying vec3 vColor;
+        varying float vAlpha;
         void main() {
-          vec2 d = gl_PointCoord - 0.5;
-          float a = smoothstep(0.5, 0.18, length(d));
+          float a = texture2D(uMap, gl_PointCoord).a * vAlpha;
           if (a < 0.02) discard;
           gl_FragColor = vec4(vColor, a);
         }
@@ -74,6 +89,7 @@ export class Particles {
     this.life[i] = life
     this.maxLife[i] = life
     this.gravity[i] = grav
+    this.alpha[i] = 1
   }
 
   /** Arterial spray in a cone along `dir`. */
@@ -87,7 +103,7 @@ export class Particles {
       this.emit(
         p.x, p.y, p.z, vx, vy, vz,
         0.62 * dark, 0.045 * dark, 0.06 * dark,
-        4 + Math.random() * 7, 0.85 + Math.random() * 0.7, 20,
+        0.055 + Math.random() * 0.1, 0.85 + Math.random() * 0.7, 20,
       )
     }
   }
@@ -101,7 +117,7 @@ export class Particles {
         p.x, p.y, p.z,
         Math.cos(a) * sp, 3 + Math.random() * 6, Math.sin(a) * sp,
         0.35 + Math.random() * 0.25, 0.03, 0.05,
-        7 + Math.random() * 9, 1.1 + Math.random(), 22,
+        0.08 + Math.random() * 0.1, 1.1 + Math.random(), 22,
       )
     }
   }
@@ -114,7 +130,7 @@ export class Particles {
         p.x, p.y + 0.05, p.z,
         Math.cos(a) * sp, Math.random() * 1.6, Math.sin(a) * sp,
         tint, tint * 0.92, tint * 0.7,
-        6 + Math.random() * 10, 0.55 + Math.random() * 0.5, 2.2,
+        0.22 + Math.random() * 0.36, 0.55 + Math.random() * 0.5, 2.2,
       )
     }
   }
@@ -127,7 +143,7 @@ export class Particles {
         p.x, p.y, p.z,
         Math.cos(a) * sp, Math.random() * 5, Math.sin(a) * sp,
         1, 0.72, 0.24,
-        2 + Math.random() * 4, 0.3 + Math.random() * 0.3, 14,
+        0.025 + Math.random() * 0.04, 0.3 + Math.random() * 0.3, 14,
       )
     }
   }
@@ -140,7 +156,7 @@ export class Particles {
         dir.y * 6 + (Math.random() - 0.5) * 3,
         dir.z * (6 + Math.random() * 10) + (Math.random() - 0.5) * 3,
         1, 0.85, 0.42,
-        5 + Math.random() * 7, 0.1 + Math.random() * 0.1, 1,
+        0.1 + Math.random() * 0.14, 0.1 + Math.random() * 0.1, 1,
       )
     }
   }
@@ -154,7 +170,7 @@ export class Particles {
         p.x, p.y, p.z,
         Math.cos(a) * sp, 2 + Math.random() * 4, Math.sin(a) * sp,
         r, g, b,
-        4 + Math.random() * 6, 0.5 + Math.random() * 0.5, -1.5,
+        0.05 + Math.random() * 0.08, 0.5 + Math.random() * 0.5, -1.5,
       )
     }
   }
@@ -181,19 +197,24 @@ export class Particles {
         this.life[i] = Math.min(this.life[i]!, 0.25)
       }
 
-      // Shrink out over the tail of the lifetime.
+      // Shrink out over the tail of the lifetime, and fade with it. Shrinking
+      // alone makes particles vanish as hard little dots; fading is what lets
+      // dust and smoke dissolve.
       const t = this.life[i]! / this.maxLife[i]!
       this.size[i]! *= t < 0.35 ? 1 - dt * 4 : 1
+      this.alpha[i] = t < 0.45 ? t / 0.45 : 1
 
       if (this.life[i]! <= 0) {
         pos[i3 + 1] = -1000
         this.size[i] = 0
+        this.alpha[i] = 0
       }
     }
     if (dirty) {
       this.geo.attributes.position!.needsUpdate = true
       this.geo.attributes.color!.needsUpdate = true
       this.geo.attributes.size!.needsUpdate = true
+      this.geo.attributes.alpha!.needsUpdate = true
     }
   }
 }

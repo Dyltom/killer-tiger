@@ -79,8 +79,24 @@
       .meter-track {
         height: 11px; background: rgba(0, 0, 0, 0.55);
         border: 1px solid rgba(255, 255, 255, 0.16); position: relative; overflow: hidden;
+        /* Recessed, so the bar reads as a slot cut into the frame rather than a
+           flat rectangle drawn on top of it. */
+        box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.75), 0 1px 0 rgba(255, 255, 255, 0.07);
       }
       .meter-fill { position: absolute; inset: 0; transform-origin: left center; transition: transform 0.12s linear; }
+      /* Gloss: a bright top third and a dark bottom edge over whatever gradient
+         the fill carries, which is what stops three flat colour slabs from
+         looking like placeholder art. */
+      .meter-fill::after {
+        content: ''; position: absolute; inset: 0;
+        background: linear-gradient(
+          180deg,
+          rgba(255, 255, 255, 0.34) 0%,
+          rgba(255, 255, 255, 0.08) 42%,
+          rgba(0, 0, 0, 0.16) 62%,
+          rgba(0, 0, 0, 0.34) 100%
+        );
+      }
       #hp-fill { background: linear-gradient(90deg, #8e1b1b, #e04141); }
       #stam-fill { background: linear-gradient(90deg, #2b6b52, #57c98f); }
       #rage-fill { background: linear-gradient(90deg, #a34b09, #ffb03a); }

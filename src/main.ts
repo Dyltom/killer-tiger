@@ -1,11 +1,19 @@
 /** Bootstrap: renderer, loop, overlays, and the plumbing between them. */
 import * as THREE from 'three'
-import { CAMERA, COLORS, WORLD } from './config'
+import { CAMERA, POST, TIGER } from './config'
 import { audio } from './engine/audio'
 import { Input } from './engine/input'
 import { Game } from './game'
+import { installAtmosphericFog, makeFog } from './render/atmosphere'
+import { PostFX } from './render/postfx'
+import { Sky } from './render/sky'
 import { Hud } from './ui/hud'
+import { initMaterials, loadingManager } from './world/materials'
 import { World } from './world/world'
+
+// Must run before the first material is compiled — it rewrites the shader
+// chunks every fog-enabled material is assembled from.
+installAtmosphericFog()
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T
 
@@ -33,27 +41,34 @@ renderer.setPixelRatio(Math.min(devicePixelRatio, 2))
 renderer.shadowMap.enabled = true
 renderer.shadowMap.type = THREE.PCFSoftShadowMap
 renderer.toneMapping = THREE.ACESFilmicToneMapping
-renderer.toneMappingExposure = 1.5
+renderer.toneMappingExposure = POST.exposure
 renderer.outputColorSpace = THREE.SRGBColorSpace
 app.appendChild(renderer.domElement)
 
 const scene = new THREE.Scene()
-scene.fog = new THREE.Fog(COLORS.fog, WORLD.fogNear, WORLD.fogFar)
+scene.fog = makeFog()
 
 const camera = new THREE.PerspectiveCamera(CAMERA.fov, innerWidth / innerHeight, CAMERA.near, CAMERA.far)
 camera.rotation.order = 'YXZ'
 scene.add(camera)
+
+initMaterials(renderer)
+
+const sky = new Sky(scene)
+sky.buildEnvironment(renderer)
 
 const input = new Input(renderer.domElement)
 input.nolock = NOLOCK
 const hud = new Hud()
 const world = new World(scene)
 const game = new Game(scene, camera, world, hud)
+const postfx = new PostFX(renderer, scene, camera, sky.sunDir)
 
 addEventListener('resize', () => {
   camera.aspect = innerWidth / innerHeight
   camera.updateProjectionMatrix()
   renderer.setSize(innerWidth, innerHeight)
+  postfx.setSize(innerWidth, innerHeight)
 })
 
 // ------------------------------------------------------------------- flow
@@ -98,7 +113,7 @@ function beginHunt() {
  */
 Object.assign(window, {
   __kt: {
-    game, world, input, camera, renderer, scene, THREE,
+    game, world, input, camera, renderer, scene, sky, postfx, THREE,
     step: (frames = 1, dt = 1 / 60) => { for (let i = 0; i < frames; i++) frame(dt) },
     hold: (code: string) => dispatchEvent(new KeyboardEvent('keydown', { code })),
     release: (code: string) => dispatchEvent(new KeyboardEvent('keyup', { code })),
@@ -137,40 +152,43 @@ addEventListener('keydown', (e) => {
 
 // ------------------------------------------------------------------- loop
 const clock = new THREE.Clock()
-let flameTime = 0
-
-// Collected once — traversing the whole scene every frame is wasteful.
-const flames: THREE.Object3D[] = []
-scene.traverse((o) => { if (o.name === 'flame') flames.push(o) })
 
 /** One simulation + render step. Split out so tests can drive it directly. */
 function frame(dt: number) {
-  flameTime += dt
-
   const controlling = (input.locked || NOLOCK) && game.state === 'playing'
   game.update(dt, input, controlling)
   input.endFrame()
 
-  for (const f of flames) {
-    f.scale.set(
-      0.85 + Math.sin(flameTime * 9 + f.position.x) * 0.18,
-      0.85 + Math.sin(flameTime * 13 + f.position.z) * 0.3,
-      0.85 + Math.cos(flameTime * 11) * 0.18,
-    )
-    f.rotation.y = flameTime * 2
-  }
+  sky.update(dt, game.tiger.pos)
 
-  renderer.render(scene, camera)
+  // Frenzy ramps the grade up and back down over its last second rather than
+  // snapping off; hurt is driven by how close to death the tiger is.
+  const frenzy = Math.min(1, game.tiger.frenzy / 1.0)
+  const hurt = 1 - Math.min(1, game.tiger.health / (TIGER.maxHealth * 0.45))
+  postfx.render(dt, frenzy, game.state === 'playing' ? hurt : 0)
 }
 
 function animate() {
   // Clamp dt so an alt-tab doesn't teleport the tiger across the map.
   frame(Math.min(clock.getDelta(), 1 / 20))
 }
-renderer.setAnimationLoop(animate)
 
-// Warm the shader cache with one render before revealing the menu, so the
-// first real frame isn't a compile stall.
-renderer.render(scene, camera)
-loading.remove()
-showOnly(menu)
+/**
+ * Hold the menu back until the PBR sets are decoded, then warm the shader cache
+ * with one real frame. Compiling the terrain and foliage programs mid-hunt is a
+ * visible multi-hundred-millisecond stall.
+ */
+let started = false
+function begin() {
+  if (started) return
+  started = true
+  postfx.render(0, 0, 0)
+  loading.remove()
+  showOnly(menu)
+  renderer.setAnimationLoop(animate)
+}
+
+loadingManager.onLoad = begin
+loadingManager.onError = (url) => console.error('[assets] failed to load', url)
+// Never leave the player staring at a loading screen because one file 404'd.
+setTimeout(begin, 15000)

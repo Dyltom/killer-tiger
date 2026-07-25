@@ -25,6 +25,17 @@ export interface AttackEvent {
 
 type PawState = 'idle' | 'swipeL' | 'swipeR' | 'bite'
 
+/**
+ * Rest pose of a forepaw in camera space. Every animation state offsets from
+ * here, so it lived as the same four literals repeated across four methods and
+ * moving the paws meant finding all eight copies.
+ *
+ * `y` is set so the toe row and the claws clear the bottom edge of the frame:
+ * the vertical FOV is fixed, so at z the visible half-height is |z|*tan(fov/2),
+ * and anything below that is gone regardless of how wide the window is.
+ */
+const PAW = { x: 0.40, y: -0.36, z: -0.84, pitch: 0.42 }
+
 export class Tiger {
   /** Start out in the long grass at the treeline, facing the village. */
   readonly pos = new THREE.Vector3(0, 0, 56)
@@ -82,36 +93,114 @@ export class Tiger {
   // ---------------------------------------------------------- viewmodel
   private buildViewmodel() {
     const tex = textures()
-    const furMat = new THREE.MeshStandardMaterial({ map: tex.fur, roughness: 0.85 })
-    const clawMat = new THREE.MeshStandardMaterial({ color: 0xf2e9dc, roughness: 0.4, metalness: 0.05 })
+    // The fur canvas is shared with the AI tigers, so the viewmodel takes its
+    // own view of it to tile the stripes down at forepaw scale.
+    const furMap = tex.fur!.clone()
+    furMap.wrapS = furMap.wrapT = THREE.RepeatWrapping
+    // Once around the leg, and only a little over half the stripe run down it,
+    // so the eleven stripes in the canvas land as about six on the foreleg.
+    furMap.repeat.set(1, 0.55)
+    furMap.anisotropy = 8
+    furMap.needsUpdate = true
+
+    const furMat = new THREE.MeshStandardMaterial({
+      map: furMap,
+      roughness: 0.88,
+      metalness: 0,
+      // No normal map for the coat, but the albedo's own fur strokes make a
+      // serviceable bump — enough to catch the low sun along the leg.
+      bumpMap: furMap,
+      bumpScale: 0.35,
+    })
+    const pawMap = furMap.clone()
+    pawMap.repeat.set(1.7, 1.25)
+    pawMap.needsUpdate = true
+    const pawMat = new THREE.MeshStandardMaterial({
+      map: pawMap, roughness: 0.88, metalness: 0, bumpMap: pawMap, bumpScale: 0.3,
+    })
+    const clawMat = new THREE.MeshStandardMaterial({ color: 0xe8ddcd, roughness: 0.32, metalness: 0.04 })
+    const padMat = new THREE.MeshStandardMaterial({ color: 0x2e1d18, roughness: 0.72 })
 
     const makePaw = (side: -1 | 1): THREE.Group => {
       const g = new THREE.Group()
 
-      // Foreleg, angled in from the screen edge.
-      const leg = new THREE.Mesh(new THREE.CapsuleGeometry(0.115, 0.42, 4, 10), furMat)
-      leg.position.set(0, 0.2, 0.14)
-      leg.rotation.x = 0.5
+      // Foreleg, running back and down from the wrist so its far end leaves the
+      // frame through the bottom corner. It used to stand up off the paw the way
+      // a leg does on a standing animal, which put the wide proximal end nearer
+      // the eye than the paw — and since it was open-ended you spent the whole
+      // game looking down the inside of a hollow striped cone with a small nub
+      // of paw at the bottom. Capped now as well, so nothing can show a hole.
+      //
+      // Thinner than the paw is wide, and short. A foreleg is about six tenths
+      // the width of the foot it carries, and the near end of it sits half the
+      // distance from the eye that the paw does — so at equal radius it renders
+      // twice the size and the paw becomes a nub on the end of a striped pipe.
+      const leg = new THREE.Mesh(new THREE.CylinderGeometry(0.125, 0.1, 0.52, 14), furMat)
+      leg.position.set(0, -0.156, 0.234)
+      leg.rotation.x = 2.35
       g.add(leg)
 
-      // Paw pad.
-      const paw = new THREE.Mesh(new THREE.SphereGeometry(0.15, 12, 10), furMat)
-      paw.scale.set(1.15, 0.82, 1.25)
+      // Wrist, filling the joint where the leg meets the paw.
+      const wrist = new THREE.Mesh(new THREE.SphereGeometry(0.105, 12, 10), furMat)
+      wrist.position.set(0, 0.035, 0.05)
+      g.add(wrist)
+
+      // Paw: a squashed dome with four toes on the front edge. The toes are the
+      // whole read — a smooth ellipsoid is a mitten from any angle. Its own copy
+      // of the fur map at a tighter repeat: at the leg's scale a single stripe
+      // is wider than the whole foot, which flattens every toe into one flat
+      // band of colour.
+      // Both UV poles are rotated onto the left and right silhouette edges,
+      // where they are seen almost edge-on. Every stripe on the fur map
+      // converges at a pole, so leaving one pointing up paints a bullseye on
+      // the top of the paw and leaving one pointing back paints it on the face
+      // of the paw nearest the eye — the two spots you look at all game.
+      const pawGeo = new THREE.SphereGeometry(0.17, 16, 14)
+      pawGeo.rotateZ(Math.PI / 2)
+      const paw = new THREE.Mesh(pawGeo, pawMat)
+      paw.scale.set(1.15, 0.8, 1.25)
       g.add(paw)
 
-      // Four claws fanned across the front of the paw.
       for (let i = 0; i < 4; i++) {
-        const claw = new THREE.Mesh(new THREE.ConeGeometry(0.022, 0.135, 6), clawMat)
         const t = (i / 3 - 0.5) * 2 // -1..1
-        claw.position.set(t * 0.085 * side, -0.03, -0.14)
-        claw.rotation.x = -1.9
-        claw.rotation.z = t * 0.35 * side
+        // Outer toes sit slightly back, the way a splayed cat foot does.
+        const back = Math.abs(t) * 0.028
+
+        const toe = new THREE.Mesh(new THREE.SphereGeometry(0.064, 10, 8), pawMat)
+        toe.scale.set(0.95, 0.8, 1.3)
+        // Sat on the equator before, which is invisible: the camera looks *down*
+        // onto the paw, so anything at or below the widest point of the dome is
+        // hidden behind the dome's own horizon and the foot reads as a mitten.
+        // Lifted a fifth of the way up the front face so all four break the top
+        // silhouette as separate bumps.
+        toe.position.set(t * 0.098 * side, 0.028, -0.185 + back)
+        g.add(toe)
+
+        // Claw: two tapered segments angled against each other so it hooks.
+        const claw = new THREE.Group()
+        const base = new THREE.Mesh(new THREE.ConeGeometry(0.021, 0.075, 7), clawMat)
+        base.position.set(0, 0, -0.035)
+        base.rotation.x = -1.9
+        claw.add(base)
+        const hook = new THREE.Mesh(new THREE.ConeGeometry(0.013, 0.075, 7), clawMat)
+        hook.position.set(0, -0.018, -0.096)
+        hook.rotation.x = -2.32
+        claw.add(hook)
+        claw.position.set(t * 0.098 * side, 0.006, -0.246 + back)
+        claw.rotation.z = t * 0.32 * side
         g.add(claw)
       }
 
-      // Slightly under life-size: a full-scale foreleg swinging past the eye
-      // blots out the target you're trying to hit.
-      g.scale.setScalar(0.78)
+      // Heel pad, visible on the down-stroke of a swipe.
+      const pad = new THREE.Mesh(new THREE.SphereGeometry(0.082, 10, 8), padMat)
+      pad.scale.set(1.25, 0.42, 1.0)
+      pad.position.set(0, -0.112, -0.03)
+      g.add(pad)
+
+      // Well under life-size. A full-scale foreleg swinging past the eye blots
+      // out the target you are trying to hit, and at this framing the paws are
+      // meant to sit in the corners rather than cover them.
+      g.scale.setScalar(0.62)
       return g
     }
 
@@ -130,10 +219,10 @@ export class Tiger {
   }
 
   private resetPaws() {
-    this.pawL.position.set(-0.42, -0.44, -0.72)
-    this.pawL.rotation.set(0.22, 0.32, 0.18)
-    this.pawR.position.set(0.42, -0.44, -0.72)
-    this.pawR.rotation.set(0.22, -0.32, -0.18)
+    this.pawL.position.set(-PAW.x, PAW.y, PAW.z)
+    this.pawL.rotation.set(PAW.pitch, 0.32, 0.18)
+    this.pawR.position.set(PAW.x, PAW.y, PAW.z)
+    this.pawR.rotation.set(PAW.pitch, -0.32, -0.18)
   }
 
   // ------------------------------------------------------------- combat
@@ -393,13 +482,13 @@ export class Tiger {
       // Gentle running paw pump; scales with speed so sprinting reads as a gallop.
       const t = this.bobPhase
       const amp = Math.min(1, speed / TIGER.sprintSpeed)
-      const yL = -0.44 + Math.sin(t) * 0.1 * amp
-      const yR = -0.44 + Math.sin(t + Math.PI) * 0.1 * amp
-      const zBase = this.crouching ? -0.62 : -0.72
-      this.pawL.position.set(-0.42, yL, zBase + Math.cos(t) * 0.07 * amp)
-      this.pawR.position.set(0.42, yR, zBase + Math.cos(t + Math.PI) * 0.07 * amp)
-      this.pawL.rotation.set(0.22 + Math.sin(t) * 0.15 * amp, 0.32, 0.18)
-      this.pawR.rotation.set(0.22 + Math.sin(t + Math.PI) * 0.15 * amp, -0.32, -0.18)
+      const yL = PAW.y + Math.sin(t) * 0.1 * amp
+      const yR = PAW.y + Math.sin(t + Math.PI) * 0.1 * amp
+      const zBase = this.crouching ? PAW.z + 0.1 : PAW.z
+      this.pawL.position.set(-PAW.x, yL, zBase + Math.cos(t) * 0.07 * amp)
+      this.pawR.position.set(PAW.x, yR, zBase + Math.cos(t + Math.PI) * 0.07 * amp)
+      this.pawL.rotation.set(PAW.pitch + Math.sin(t) * 0.15 * amp, 0.32, 0.18)
+      this.pawR.rotation.set(PAW.pitch + Math.sin(t + Math.PI) * 0.15 * amp, -0.32, -0.18)
       return
     }
 
@@ -416,8 +505,8 @@ export class Tiger {
     if (this.pawState === 'bite') {
       // Both paws yank down and out of frame as the jaws close in.
       const e = Math.sin(t * Math.PI)
-      this.pawL.position.set(-0.42 - e * 0.2, -0.44 - e * 0.5, -0.72 + e * 0.35)
-      this.pawR.position.set(0.42 + e * 0.2, -0.44 - e * 0.5, -0.72 + e * 0.35)
+      this.pawL.position.set(-PAW.x - e * 0.2, PAW.y - e * 0.5, PAW.z + e * 0.35)
+      this.pawR.position.set(PAW.x + e * 0.2, PAW.y - e * 0.5, PAW.z + e * 0.35)
       this.recoilY = -e * 0.075
     } else {
       const left = this.pawState === 'swipeL'
@@ -426,11 +515,11 @@ export class Tiger {
       // Wind-up then a fast arc across the middle of the screen.
       const e = t < 0.3 ? -(t / 0.3) * 0.35 : (t - 0.3) / 0.7
       paw.position.set(
-        side * 0.42 - side * e * 0.95,
-        -0.44 + Math.sin(clamp(e, 0, 1) * Math.PI) * 0.34,
-        -0.72 - Math.sin(clamp(e, 0, 1) * Math.PI) * 0.32,
+        side * PAW.x - side * e * 0.95,
+        PAW.y + Math.sin(clamp(e, 0, 1) * Math.PI) * 0.34,
+        PAW.z - Math.sin(clamp(e, 0, 1) * Math.PI) * 0.32,
       )
-      paw.rotation.set(0.22 - e * 0.5, side * 0.32 + e * side * 1.5, side * 0.18 - e * side * 1.9)
+      paw.rotation.set(PAW.pitch - e * 0.5, side * 0.32 + e * side * 1.5, side * 0.18 - e * side * 1.9)
       this.recoilY = -Math.sin(clamp(e, 0, 1) * Math.PI) * 0.03
     }
 
