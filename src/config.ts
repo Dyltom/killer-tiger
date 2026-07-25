@@ -365,11 +365,18 @@ export const SKY = {
 export const DAY = {
   /**
    * Nominal seconds per rotation, *before* `dwell` stretches and squeezes it.
-   * The weights below average to 1.07, so the real cycle is a little over
-   * thirty-two minutes: about sixteen of daylight falling into a long evening,
-   * then sixteen of night coming back up to dawn.
+   * The weights below average to 1.07, so the real cycle is a little over an
+   * hour: about half of daylight falling into a long evening, then half of night
+   * coming back up to dawn.
+   *
+   * Doubled from 1800. At half an hour a wave lasted about as long as one part of
+   * the day, so a hunt that started at mid-morning was in full night by the third
+   * wave and the light was visibly moving the whole time — which is what "the
+   * cycle is too fast" means. It is not a realism target. It is that a lighting
+   * change the player can watch happening reads as a bug, and at this period each
+   * part of the day lasts long enough to be a setting rather than a transition.
    */
-  period: 1800,
+  period: 3600,
   /**
    * Mid-morning, with the sun still climbing. Opening at 0.472 put it four
    * hundredths of a rotation from setting, so the hunt began with the sun
@@ -476,12 +483,12 @@ export const DAY = {
    */
   phases: [
     // t      turbidity rayleigh  mie    dome   sun       sunI  skyBounce gndBounce bounceI env   fogSun    fogAway   density  stars exposure dwell
-    { t: 0.000, turbidity: 4.2, rayleigh: 3.4, mie: 0.010, dome: 0.55, sun: 0xffb070, sunI: 2.60, skyB: 0x9fb6d8, gndB: 0x6a5a38, bounceI: 0.85, env: 1.05, fogSun: 0xffb98a, fogAway: 0x9aa9bd, density: 0.0075, stars: 0.25, exposure: 1.00, dwell: 1.35 },
+    { t: 0.000, turbidity: 4.2, rayleigh: 3.4, mie: 0.010, dome: 0.55, sun: 0xffb070, sunI: 1.30, skyB: 0x9fb6d8, gndB: 0x6a5a38, bounceI: 0.60, env: 0.80, fogSun: 0xffb98a, fogAway: 0x9aa9bd, density: 0.0075, stars: 0.25, exposure: 0.92, dwell: 1.35 },
     { t: 0.120, turbidity: 2.6, rayleigh: 2.2, mie: 0.005, dome: 0.30, sun: 0xfff0d8, sunI: 4.20, skyB: 0x8fb4e6, gndB: 0x7a6a48, bounceI: 0.70, env: 1.20, fogSun: 0xcdd8e6, fogAway: 0x8ea6c6, density: 0.0030, stars: 0.00, exposure: 0.84, dwell: 1.00 },
     { t: 0.250, turbidity: 2.2, rayleigh: 1.6, mie: 0.004, dome: 0.26, sun: 0xfffaf0, sunI: 4.55, skyB: 0x9cc4ff, gndB: 0x8a7a58, bounceI: 0.72, env: 1.15, fogSun: 0xd6e2f0, fogAway: 0x97b0d0, density: 0.0024, stars: 0.00, exposure: 0.80, dwell: 0.85 },
     { t: 0.400, turbidity: 2.8, rayleigh: 2.4, mie: 0.005, dome: 0.32, sun: 0xffe6c0, sunI: 4.20, skyB: 0x8fb0dd, gndB: 0x7d6a44, bounceI: 0.75, env: 1.25, fogSun: 0xf2c99a, fogAway: 0x8ea2be, density: 0.0032, stars: 0.00, exposure: 0.86, dwell: 1.15 },
-    { t: 0.472, turbidity: 3.2, rayleigh: 3.0, mie: 0.006, dome: 0.42, sun: 0xffd0a0, sunI: 2.65, skyB: 0x6f90bd, gndB: 0x6a5a38, bounceI: 1.15, env: 2.4, fogSun: 0xffc286, fogAway: 0x8fa2ba, density: 0.0055, stars: 0.05, exposure: 1.00, dwell: 1.60 },
-    { t: 0.520, turbidity: 4.6, rayleigh: 4.0, mie: 0.011, dome: 0.46, sun: 0xff8b46, sunI: 0.29, skyB: 0x50648c, gndB: 0x50432c, bounceI: 1.20, env: 2.1, fogSun: 0xff9a5a, fogAway: 0x6d7e9c, density: 0.0075, stars: 0.30, exposure: 1.05, dwell: 1.55 },
+    { t: 0.472, turbidity: 3.2, rayleigh: 3.0, mie: 0.006, dome: 0.42, sun: 0xffd0a0, sunI: 2.65, skyB: 0x6f90bd, gndB: 0x6a5a38, bounceI: 0.85, env: 1.30, fogSun: 0xffc286, fogAway: 0x8fa2ba, density: 0.0055, stars: 0.05, exposure: 0.90, dwell: 1.60 },
+    { t: 0.520, turbidity: 4.6, rayleigh: 4.0, mie: 0.011, dome: 0.44, sun: 0xff8b46, sunI: 0.42, skyB: 0x50648c, gndB: 0x50432c, bounceI: 0.72, env: 0.85, fogSun: 0xff9a5a, fogAway: 0x6d7e9c, density: 0.0075, stars: 0.30, exposure: 0.94, dwell: 1.55 },
     // Night is lit by a moon, not by nothing. Real moonlight is about a
     // millionth of daylight, which on screen is an unplayable black frame — so
     // the night rows are a stylised moonlit blue: bright enough to read the
@@ -489,9 +496,9 @@ export const DAY = {
     // night. The exposure lift and the desaturated key light do most of it,
     // the village practicals in world/lamps.ts light the rest, and the grade's
     // night-eye lift in postfx.ts catches whatever is left in the shadows.
-    { t: 0.580, turbidity: 5.4, rayleigh: 4.6, mie: 0.008, dome: 1.25, sun: 0xa8c0f0, sunI: 1.20, skyB: 0x5c7cab, gndB: 0x3b3d3c, bounceI: 2.50, env: 2.7, fogSun: 0x7787b2, fogAway: 0x46536f, density: 0.0080, stars: 0.85, exposure: 1.22, dwell: 1.10 },
-    { t: 0.750, turbidity: 6.0, rayleigh: 3.0, mie: 0.004, dome: 1.55, sun: 0xc2d4ff, sunI: 2.74, skyB: 0x6284bd, gndB: 0x3f4656, bounceI: 2.80, env: 3.0, fogSun: 0x88a2d8, fogAway: 0x33415f, density: 0.0075, stars: 1.00, exposure: 1.32, dwell: 0.80 },
-    { t: 0.920, turbidity: 5.0, rayleigh: 4.2, mie: 0.006, dome: 1.30, sun: 0xb6c8ec, sunI: 1.25, skyB: 0x5e7dab, gndB: 0x3c3f42, bounceI: 2.60, env: 2.8, fogSun: 0x8594bc, fogAway: 0x4b5875, density: 0.0085, stars: 0.70, exposure: 1.22, dwell: 1.00 },
+    { t: 0.580, turbidity: 5.4, rayleigh: 4.6, mie: 0.008, dome: 0.70, sun: 0xa8c0f0, sunI: 0.34, skyB: 0x33486e, gndB: 0x272a2c, bounceI: 0.42, env: 0.40, fogSun: 0x7787b2, fogAway: 0x46536f, density: 0.0080, stars: 0.85, exposure: 1.05, dwell: 1.10 },
+    { t: 0.750, turbidity: 6.0, rayleigh: 3.0, mie: 0.004, dome: 0.80, sun: 0xc2d4ff, sunI: 0.40, skyB: 0x2b3f63, gndB: 0x272c36, bounceI: 0.38, env: 0.34, fogSun: 0x88a2d8, fogAway: 0x33415f, density: 0.0075, stars: 1.00, exposure: 1.10, dwell: 0.80 },
+    { t: 0.920, turbidity: 5.0, rayleigh: 4.2, mie: 0.006, dome: 0.72, sun: 0xb6c8ec, sunI: 0.36, skyB: 0x2d4067, gndB: 0x282b2e, bounceI: 0.40, env: 0.36, fogSun: 0x8594bc, fogAway: 0x4b5875, density: 0.0085, stars: 0.70, exposure: 1.06, dwell: 1.00 },
   ],
 }
 
