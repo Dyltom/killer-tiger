@@ -629,6 +629,37 @@ export class Audio {
     }
   }
 
+  /**
+   * Turbulent air through a vocal tract.
+   *
+   * This is the missing half of every voice in this file, and it is the same
+   * failure the impacts had: measured, the scream, the shout and the growl all
+   * sat twenty decibels down across presence and air. A sawtooth through three
+   * bandpasses is a vowel, but it is not a person. What the ear uses to tell a
+   * throat from an oscillator is the noise riding on the tone — air forced past
+   * the folds and broken up by everything it passes on the way out — and above
+   * about two kilohertz that noise *is* most of what a shout or a scream is.
+   *
+   * It is banded on the voice's own formants rather than being generic hiss,
+   * because breath has to sound like it came from the same throat as the tone.
+   * The top band runs above the third formant, where the ear is most sensitive
+   * and where a voice under strain rings hardest.
+   */
+  private breath(
+    dest: GainNode,
+    at: number,
+    dur: number,
+    gain: number,
+    freqs: readonly [number, number, number],
+    q = 3,
+  ) {
+    this.noise(dest, dur, gain, 'bandpass', freqs[1], freqs[1] * 0.8, at, q, dur * 0.12)
+    this.noise(dest, dur * 0.9, gain * 0.85, 'bandpass', freqs[2], freqs[2] * 0.85, at, q * 0.8, dur * 0.1)
+    // The ring above the last formant. Narrow-band noise here is what a voice
+    // shouting across a clearing actually cuts through with.
+    this.noise(dest, dur * 0.8, gain * 0.6, 'bandpass', freqs[2] * 1.45, freqs[2] * 1.2, at, q * 0.6, dur * 0.15)
+  }
+
   /** Pull the score down under a loud event, then let it back up. */
   private duck(amount = AUDIO.duckAmount) {
     const ctx = this.ctx
@@ -786,6 +817,15 @@ export class Audio {
     osc.stop(t + dur + 0.05)
 
     this.noise(dest, dur, 0.06, 'lowpass', 600, 220)
+
+    // Breath over the top, and the wet rattle at the back of the throat.
+    //
+    // A growl is a warning, which means it has to carry — and carrying is done
+    // above two kilohertz, where this had nothing at all. The rattle is
+    // granular rather than a filtered buzz because what is actually making the
+    // noise is loose tissue chattering, and that is irregular.
+    this.breath(dest, 0, dur * 0.9, 0.095, [300, 820, 1900], 2.8)
+    this.grains(dest, 8, dur * 0.8, 0.12, 900, 3800, 0.008, 0.03, 0.02, 3, 0.3)
   }
 
   /**
@@ -855,16 +895,26 @@ export class Audio {
     // the very top and far wetter underneath, and separating them there is what
     // makes the two unmistakable without making either quieter.
     this.noise(dest, 0.022, 0.2, 'highpass', 3600 * j, 2200, 0, 0.7, 0.0012)
-    // Flat impact on a torso.
-    this.noise(dest, 0.14, 0.6, 'lowpass', 900 * j, 220, 0.004, 1.2, 0.002)
-    this.tone(dest, 'triangle', 330 * j, 88, 0.13, 0.28, 0.004, 0.002)
+    // Flat impact on a torso. Short, and cornered well above where a rifle
+    // blasts: this is a body taking weight, not powder going off.
+    this.noise(dest, 0.085, 0.4, 'lowpass', 1100 * j, 400, 0.004, 1.2, 0.002)
+    this.tone(dest, 'triangle', 330 * j, 110, 0.1, 0.3, 0.004, 0.002)
     // Wet drag. Bandpassed noise with a slow tail is cloth and skin opening —
     // and it is the claw's identity, so it carries rather than garnishes.
-    this.noise(dest, 0.34, 0.46, 'bandpass', 1400 * j, 620, 0.02, 2.4, 0.012)
+    this.noise(dest, 0.24, 0.6, 'bandpass', 1400 * j, 620, 0.02, 2.4, 0.012)
     // Tissue and cloth separating fibre by fibre.
-    this.grains(dest, 8, 0.2, 0.16, 800, 3600, 0.006, 0.03, 0.025, 2.8, 0.5)
+    this.grains(dest, 11, 0.19, 0.22, 900, 4200, 0.006, 0.03, 0.02, 2.8, 0.5)
     // Weight.
-    this.tone(dest, 'sine', 130, 44, 0.24, 0.42, 0, 0.003)
+    //
+    // This used to be a 130 Hz sine falling to 44 over a quarter second, which
+    // is a kick drum, and it is what kept making this the single most
+    // confusable sound in the game against a close rifle — in play, not knowing
+    // whether you had just hit someone or just been shot. The two measured
+    // almost the same curve because both were carrying most of their weight
+    // below 250 Hz. A rifle's identity is that blast and the long roll after
+    // it; a claw has neither. Taking the boom out is what separates them, and
+    // it costs nothing, because the force of the strike reads from the tear.
+    this.tone(dest, 'sine', 185, 78, 0.12, 0.22, 0, 0.003)
   }
 
   /**
@@ -928,19 +978,58 @@ export class Audio {
 
     const env = ctx.createGain()
     env.gain.setValueAtTime(0.0001, t)
-    env.gain.exponentialRampToValueAtTime(0.34, t + 0.035)
+    env.gain.exponentialRampToValueAtTime(0.34, t + 0.012)
     env.gain.setValueAtTime(0.34, t + dur * 0.5)
     env.gain.exponentialRampToValueAtTime(0.0001, t + dur)
     env.connect(dest)
     // "aa" — the vowel you scream in. Scaled by pitch so a lighter voice reads
     // as a smaller person rather than as the same person sped up.
     const s = 0.85 + pitch * 0.18
-    this.formants(env, osc, [780 * s, 1180 * s, 2700 * s], [1, 0.55, 0.22], 10)
+    const F = [780 * s, 1180 * s, 2700 * s] as const
+
+    // Drive the voiced tone before it reaches the vowel. Folds under this much
+    // pressure do not vibrate cleanly — they clip, and the harmonics that
+    // throws off are what carry a scream past the third formant. Filtering a
+    // clean sawtooth could only ever attenuate up there; nothing was putting
+    // anything back.
+    const shaped = ctx.createWaveShaper()
+    shaped.curve = this.drive ?? driveCurve(0.6)
+    shaped.oversample = '2x'
+    osc.connect(shaped)
+
+    // Four formants, not three. Three stops at 2.7 kHz, and a scream lives
+    // above that — the fourth is the one that makes it hurt to listen to,
+    // which is the entire point of the sound. With three it measured thirteen
+    // decibels down in presence against its own low-mid: a shout of alarm from
+    // the next room, not a person in front of you.
+    for (const [f, lvl, q] of [
+      [F[0], 1, 8],
+      [F[1], 0.6, 9],
+      [F[2], 0.5, 8],
+      [3700 * s, 0.3, 6],
+    ] as const) {
+      const bp = ctx.createBiquadFilter()
+      bp.type = 'bandpass'
+      bp.frequency.value = f
+      bp.Q.value = q
+      const g = ctx.createGain()
+      g.gain.value = lvl
+      shaped.connect(bp)
+      bp.connect(g)
+      g.connect(env)
+    }
     osc.start(t)
     osc.stop(t + dur + 0.05)
 
-    // Rasp on the top of the voice.
-    this.noise(dest, dur * 0.8, 0.05, 'bandpass', 2400 * pitch, 1400, this.travel(place) + 0.03, 2)
+    const at = this.travel(place)
+    // The glottis letting go. A scream does not fade up, it starts already at
+    // full volume, and the click of the fold opening is most of why.
+    this.noise(dest, 0.02, 0.24, 'bandpass', 1900 * s, 1100, at, 1.4, 0.0008)
+    // Air. Loudest at the start, when the lungs are behind it.
+    this.breath(dest, at, dur * 0.55, 0.2, F, 2.4)
+    this.breath(dest, at + dur * 0.4, dur * 0.5, 0.11, F, 3.2)
+    // The voice tearing. Granular, so it breaks up rather than buzzing.
+    this.grains(dest, 11, dur * 0.75, 0.16, 2200 * s, 7000 * s, 0.01, 0.035, at + 0.03, 2.4, 0.25)
   }
 
   /** Not a scream — a word. Shorter, lower, and it stops dead. */
@@ -959,16 +1048,28 @@ export class Audio {
     osc.frequency.exponentialRampToValueAtTime(base * 0.85, t + dur)
     const env = ctx.createGain()
     env.gain.setValueAtTime(0.0001, t)
-    env.gain.exponentialRampToValueAtTime(0.3, t + 0.03)
+    env.gain.exponentialRampToValueAtTime(0.3, t + 0.012)
     env.gain.setValueAtTime(0.3, t + dur * 0.6)
     env.gain.exponentialRampToValueAtTime(0.0001, t + dur)
     env.connect(dest)
+
+    // Same saturation as the scream, for the same reason: a shout is a voice
+    // being pushed, and pushing it is what puts energy above the formants.
+    const shaped = ctx.createWaveShaper()
+    shaped.curve = this.drive ?? driveCurve(0.6)
+    shaped.oversample = '2x'
+    osc.connect(shaped)
+
     // Formants sliding from "aa" to "oh" — the shape of a shouted syllable.
+    // The third one carried a sixth of the first; against three high-Q filters
+    // that is inaudible, and it is why this measured thirty decibels down in
+    // presence — a shouted word that could not cut across a clearing.
     const ctxNow = t
     for (const [f0, f1, lvl, q] of [
       [720, 520, 1, 9],
-      [1150, 900, 0.5, 11],
-      [2600, 2400, 0.16, 13],
+      [1150, 900, 0.55, 10],
+      [2600, 2400, 0.45, 9],
+      [3500, 3200, 0.22, 7],
     ] as const) {
       const bp = ctx.createBiquadFilter()
       bp.type = 'bandpass'
@@ -977,12 +1078,21 @@ export class Audio {
       bp.Q.value = q
       const g = ctx.createGain()
       g.gain.value = lvl
-      osc.connect(bp)
+      shaped.connect(bp)
       bp.connect(g)
       g.connect(env)
     }
     osc.start(t)
     osc.stop(t + dur + 0.05)
+
+    const at = this.travel(place)
+    // The consonant. Nobody shouts a bare vowel across a clearing — the word
+    // starts with a stop or a fricative, and that burst is the whole reason a
+    // shout reads as a word rather than as a note. Without it this faded in
+    // over a sixth of a second, which is a synthesiser, not a person.
+    this.noise(dest, 0.03, 0.26, 'bandpass', 2400 * pitch, 1300, at, 1.2, 0.001)
+    this.noise(dest, 0.012, 0.16, 'highpass', 4200, 4200, at, 0.7, 0.0008)
+    this.breath(dest, at, dur * 0.7, 0.1, [720 * pitch, 1150 * pitch, 2600 * pitch], 2.6)
   }
 
   /**

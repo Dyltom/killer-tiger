@@ -953,8 +953,8 @@ export const LEVELS = {
 
   // Voices. Two humans yelling at each other across a village is most of what
   // sells the place as inhabited, so they are not allowed to disappear.
-  scream: 1.6,
-  shout: 5.5,
+  scream: 1.35,
+  shout: 4.4,
   growl: 7.0,
 
   // Stingers. These were eating the whole headroom; they are deliberately
