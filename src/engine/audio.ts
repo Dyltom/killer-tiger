@@ -1809,6 +1809,9 @@ export class Audio {
       // An alarmed village is a loud one.
       village.gain.setTargetAtTime(0.012 + Math.min(0.05, this.ambWave * 0.008), now, 3)
       this.ambientOneShot()
+      // Backstop for the teardown sweep, for the same reason the transport
+      // keeps one: the render loop is not guaranteed to be running.
+      this.sweep()
     }, 1700) as unknown as number
   }
 
@@ -1866,6 +1869,14 @@ export class Audio {
    */
   tickMusic() {
     this.music?.tick()
+    // Retire dead routing here as well as on allocation. Sweeping only when a
+    // new voice is asked for is self-limiting while the shooting lasts, but the
+    // moment it stops there is nobody left to do the sweeping — so the last few
+    // hundred chains of the loudest moment in the game stay wired into the
+    // graph and get processed every render quantum for as long as the tab is
+    // open. Measured, that was three hundred and eighty-nine of them still
+    // connected half a minute after the last shot.
+    this.sweep()
   }
 
   /** Which hunt we are on — unlocks layers and, past hunt 4, changes the mode. */
