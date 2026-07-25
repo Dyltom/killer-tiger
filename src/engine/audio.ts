@@ -184,6 +184,8 @@ export class Audio {
   private music: Music | null = null
   /** End times of live voices; the length of the live set is the budget. */
   private voiceEnds: number[] = []
+  /** Routing chains waiting to be disconnected once their sound has died. */
+  private pending: { at: number; nodes: AudioNode[] }[] = []
 
   muted = false
 
@@ -340,13 +342,73 @@ export class Audio {
     return true
   }
 
+  /**
+   * Take down routing chains whose sound is long over.
+   *
+   * A one-shot builds five or six routing nodes and a dozen layer nodes, and
+   * under fire that runs to two hundred nodes a second. Nothing here ever
+   * disconnected them. A finished source releases itself, but the gain, the
+   * air filter, the panner and the two reverb sends behind it stay wired to
+   * the bus — reachable from the destination, so never collected, and still
+   * visited by the audio thread on every 128-sample quantum. The graph grows
+   * for as long as you play, and once the render thread stops making its
+   * deadline the output drops out in bursts.
+   *
+   * Severing the chain head is enough: everything upstream loses its last path
+   * to the destination and goes with it.
+   */
+  private sweep() {
+    const now = this.t
+    let w = 0
+    for (let i = 0; i < this.pending.length; i++) {
+      const p = this.pending[i]!
+      if (p.at > now) this.pending[w++] = p
+      else for (const n of p.nodes) n.disconnect()
+    }
+    this.pending.length = w
+  }
+
+  /**
+   * Claim a voice and build its routing, or return null if there is no room.
+   *
+   * This exists because the two steps have to happen in this order. Building
+   * the routing first and then asking the budget — which is what every call
+   * site used to do — leaks the whole chain on every denial, and a denied
+   * chain is worse than a live one: no source ever feeds it, so the "source
+   * finished" collection path that saves the others can never fire. Those are
+   * permanent, and they accumulate fastest during exactly the heavy fights
+   * where the budget starts saying no.
+   *
+   * `force` is for sounds that must always play — a gunshot, a roar, the hurt
+   * cue. They still register with the pool so quieter things yield to them.
+   */
+  private voice(
+    pri: Pri,
+    dur: number,
+    gain: number,
+    place: Place = {},
+    wetMult = 1,
+    force = false,
+  ): GainNode | null {
+    this.sweep()
+    const room = this.budget(pri, dur)
+    if (!room && !force) return null
+    const chain: AudioNode[] = []
+    const g = this.out(gain, place, wetMult, chain)
+    if (!g) return null
+    // Generous: `dur` is a priority weight, not a measured length, and cutting
+    // a tail off is far worse than holding a handful of nodes a second longer.
+    this.pending.push({ at: this.t + dur * 1.5 + AUDIO.farSeconds + 1, nodes: chain })
+    return g
+  }
+
   // -------------------------------------------------------------- routing
   /**
    * Build the input node for one voice: level, distance attenuation, air
    * absorption, stereo placement, and matched sends into both reverbs.
    * Returns null when there is no context yet.
    */
-  private out(gain: number, place: Place = {}, wetMult = 1): GainNode | null {
+  private out(gain: number, place: Place = {}, wetMult = 1, chain?: AudioNode[]): GainNode | null {
     const ctx = this.ctx
     if (!ctx || !this.sfxBus || !this.nearSend || !this.farSend) return null
     const dist = Math.max(0, place.dist ?? 0)
@@ -356,6 +418,7 @@ export class Audio {
     const atten = 1 / (1 + dist * AUDIO.falloff * roll + dist * dist * AUDIO.falloffSq * roll)
     const g = ctx.createGain()
     g.gain.value = gain * atten
+    chain?.push(g)
 
     let node: AudioNode = g
     if (dist > 4) {
@@ -364,12 +427,14 @@ export class Audio {
       air.frequency.value = Math.max(AUDIO.airFloor, 20000 * Math.exp(-dist * AUDIO.airAbsorption))
       node.connect(air)
       node = air
+      chain?.push(air)
     }
     if (pan !== 0 && ctx.createStereoPanner) {
       const p = ctx.createStereoPanner()
       p.pan.value = pan
       node.connect(p)
       node = p
+      chain?.push(p)
     }
     node.connect(this.sfxBus)
 
@@ -392,12 +457,14 @@ export class Audio {
       s.gain.value = nearAmt
       node.connect(s)
       s.connect(this.nearSend)
+      chain?.push(s)
     }
     if (farAmt > 0.002) {
       const s = ctx.createGain()
       s.gain.value = farAmt
       node.connect(s)
       s.connect(this.farSend)
+      chain?.push(s)
     }
     return g
   }
@@ -600,9 +667,8 @@ export class Audio {
   roar(place: Place = {}) {
     const ctx = this.ctx
     if (!ctx || !this.drive) return
-    const dest = this.out(LEVELS.roar, place, 2.2)
+    const dest = this.voice(PRI.high, 2.2, LEVELS.roar, place, 2.2, true)
     if (!dest) return
-    this.budget(PRI.high, 2.2)
     this.duck(0.45)
     const t0 = this.t + this.travel(place)
     const pitch = rand(0.94, 1.07)
@@ -670,8 +736,8 @@ export class Audio {
   growl(place: Place = {}) {
     const ctx = this.ctx
     if (!ctx) return
-    const dest = this.out(LEVELS.growl, place, 1.1)
-    if (!dest || !this.budget(PRI.low, 0.6)) return
+    const dest = this.voice(PRI.low, 0.6, LEVELS.growl, place, 1.1)
+    if (!dest) return
     const pitch = rand(0.9, 1.12)
     const t = this.t
     const dur = rand(0.38, 0.55)
@@ -713,8 +779,8 @@ export class Audio {
    */
   swipeWhoosh(side: number, heavy = false) {
     const ctx = this.ctx
-    const dest = this.out(LEVELS.swipe, {}, 0.5)
-    if (!ctx || !dest || !this.budget(PRI.normal, 0.3)) return
+    const dest = this.voice(PRI.normal, 0.3, LEVELS.swipe, {}, 0.5)
+    if (!ctx || !dest) return
     const dur = heavy ? 0.26 : 0.19
     const t = this.t
 
@@ -756,9 +822,8 @@ export class Audio {
    * landing, the tear that follows it, and a sub thump so it has weight.
    */
   clawHit(place: Place = {}) {
-    const dest = this.out(LEVELS.clawHit, place, 1.0)
+    const dest = this.voice(PRI.high, 0.4, LEVELS.clawHit, place, 1.0, true)
     if (!dest) return
-    this.budget(PRI.high, 0.4)
     const j = rand(0.88, 1.14)
 
     // Transient — the very first millisecond, which is all the ear needs to
@@ -791,9 +856,8 @@ export class Audio {
    * neck does not break on a metronome — then the wet part, then the drop.
    */
   biteKill(place: Place = {}) {
-    const dest = this.out(LEVELS.biteKill, place, 1.4)
+    const dest = this.voice(PRI.high, 0.7, LEVELS.biteKill, place, 1.4, true)
     if (!dest) return
-    this.budget(PRI.high, 0.7)
     this.duck(0.22)
     const j = rand(0.9, 1.1)
 
@@ -821,8 +885,8 @@ export class Audio {
   scream(place: Place = {}, pitch = 1) {
     const ctx = this.ctx
     if (!ctx) return
-    const dest = this.out(LEVELS.scream, place, 1.3)
-    if (!dest || !this.budget(PRI.normal, 0.9)) return
+    const dest = this.voice(PRI.normal, 0.9, LEVELS.scream, place, 1.3)
+    if (!dest) return
     const t = this.t + this.travel(place)
     const base = 380 * pitch * rand(0.9, 1.12)
     const dur = rand(0.55, 0.8)
@@ -867,8 +931,8 @@ export class Audio {
   shout(place: Place = {}, pitch = 1) {
     const ctx = this.ctx
     if (!ctx) return
-    const dest = this.out(LEVELS.shout, place, 1.2)
-    if (!dest || !this.budget(PRI.normal, 0.5)) return
+    const dest = this.voice(PRI.normal, 0.5, LEVELS.shout, place, 1.2)
+    if (!dest) return
     const t = this.t + this.travel(place)
     const base = 190 * pitch * rand(0.92, 1.1)
     const dur = rand(0.3, 0.42)
@@ -917,9 +981,8 @@ export class Audio {
    */
   gunshot(place: Place = {}, distance = 0) {
     const p: Place = { pan: place.pan, dist: distance, roll: AUDIO.gunRoll }
-    const dest = this.out(LEVELS.gunshot, p, 1.6)
+    const dest = this.voice(PRI.high, 1.2, LEVELS.gunshot, p, 1.6, true)
     if (!dest) return
-    this.budget(PRI.high, 1.2)
     const near = 1 / (1 + distance * 0.06)
     if (distance < 26) this.duck(0.3 * near)
     const at = this.travel(p)
@@ -1037,8 +1100,8 @@ export class Audio {
   bulletWhiz(place: Place = {}) {
     const ctx = this.ctx
     if (!ctx) return
-    const dest = this.out(LEVELS.bulletWhiz, { pan: 0 }, 0.4)
-    if (!dest || !this.budget(PRI.normal, 0.35)) return
+    const dest = this.voice(PRI.normal, 0.35, LEVELS.bulletWhiz, { pan: 0 }, 0.4)
+    if (!dest) return
     const t = this.t
     const dur = 0.1
     const side = (place.pan ?? 0) >= 0 ? 1 : -1
@@ -1118,9 +1181,8 @@ export class Audio {
    */
   hurt() {
     const ctx = this.ctx
-    const dest = this.out(LEVELS.hurt, {}, 0.9)
+    const dest = this.voice(PRI.high, 1.2, LEVELS.hurt, {}, 0.9, true)
     if (!dest) return
-    this.budget(PRI.high, 1.2)
     this.concuss(0.8)
     this.duck(0.55)
 
@@ -1222,8 +1284,8 @@ export class Audio {
    * damage in either direction.
    */
   chew() {
-    const dest = this.out(LEVELS.chew, {}, 0.7)
-    if (!dest || !this.budget(PRI.low, 0.4)) return
+    const dest = this.voice(PRI.low, 0.4, LEVELS.chew, {}, 0.7)
+    if (!dest) return
     const j = rand(0.86, 1.18)
     // Jaw closing through soft tissue — no edge on it at all.
     this.noise(dest, rand(0.1, 0.16), 0.22 * j, 'bandpass', 480 * j, 260, 0, 1.5, 0.022)
@@ -1245,9 +1307,8 @@ export class Audio {
    * a toast.
    */
   gulp(big = false) {
-    const dest = this.out(LEVELS.pickup, {}, 0.6)
+    const dest = this.voice(PRI.normal, 0.5, LEVELS.pickup, {}, 0.6, true)
     if (!dest) return
-    this.budget(PRI.normal, 0.5)
     const j = rand(0.92, 1.1)
     // The throat working, top to bottom.
     this.noise(dest, big ? 0.26 : 0.18, big ? 0.24 : 0.17, 'bandpass', 900 * j, 260 * j, 0, 2.8, 0.015)
@@ -1267,9 +1328,8 @@ export class Audio {
    * with whatever is playing rather than across it.
    */
   powerup() {
-    const dest = this.out(LEVELS.powerup, {}, 1.4)
+    const dest = this.voice(PRI.normal, 0.7, LEVELS.powerup, {}, 1.4, true)
     if (!dest) return
-    this.budget(PRI.normal, 0.7)
     const root = 220
     // A rising fourth-stack, which is the interval every "you got stronger"
     // cue in the medium is built on.
@@ -1297,8 +1357,8 @@ export class Audio {
    */
   pounce() {
     const ctx = this.ctx
-    const dest = this.out(LEVELS.pounce, {}, 0.5)
-    if (!ctx || !dest || !this.budget(PRI.normal, 0.5)) return
+    const dest = this.voice(PRI.normal, 0.5, LEVELS.pounce, {}, 0.5)
+    if (!ctx || !dest) return
     const t = this.t
     const j = rand(0.92, 1.1)
 
@@ -1366,9 +1426,8 @@ export class Audio {
    * landing in the game sounding like the same landing.
    */
   land(force = 1) {
-    const dest = this.out(LEVELS.land, {}, 0.8)
+    const dest = this.voice(PRI.normal, 0.6, LEVELS.land, {}, 0.8, true)
     if (!dest) return
-    this.budget(PRI.normal, 0.6)
     const f = Math.max(0.35, Math.min(2.2, force))
     const j = rand(0.9, 1.12)
 
@@ -1404,8 +1463,8 @@ export class Audio {
    * hears are the same step.
    */
   footstep(place: Place = {}, heavy = false) {
-    const dest = this.out(LEVELS.footstep, place, 0.35)
-    if (!dest || !this.budget(PRI.low, 0.3)) return
+    const dest = this.voice(PRI.low, 0.3, LEVELS.footstep, place, 0.35)
+    if (!dest) return
     const j = rand(0.85, 1.2)
     const w = heavy ? 1 : 0.68
 
@@ -1436,9 +1495,8 @@ export class Audio {
 
   /** The hunt turning over. A cinematic drop, and the score answers it. */
   waveStart(wave = 1) {
-    const dest = this.out(LEVELS.waveStart, {}, 2.5)
+    const dest = this.voice(PRI.high, 3, LEVELS.waveStart, {}, 2.5, true)
     if (!dest) return
-    this.budget(PRI.high, 3)
     this.duck(0.35)
     // Sub drop.
     this.tone(dest, 'sine', 96, 30, 1.8, 0.55, 0, 0.02)
@@ -1452,9 +1510,8 @@ export class Audio {
 
   /** The end. Everything falls, and the reverb keeps it for a while. */
   gameOver() {
-    const dest = this.out(LEVELS.gameOver, {}, 3)
+    const dest = this.voice(PRI.high, 4, LEVELS.gameOver, {}, 3, true)
     if (!dest) return
-    this.budget(PRI.high, 4)
     this.music?.setMode('dead')
     this.tone(dest, 'sine', 150, 32, 3.0, 0.45, 0, 0.05)
     this.tone(dest, 'sawtooth', 224, 47, 2.6, 0.13, 0.05, 0.1)
@@ -1466,8 +1523,8 @@ export class Audio {
 
   /** Chain kills climb the score's own scale, so the combo is musical. */
   comboTick(chain: number) {
-    const dest = this.out(LEVELS.comboTick, {}, 0.9)
-    if (!dest || !this.budget(PRI.normal, 0.3)) return
+    const dest = this.voice(PRI.normal, 0.3, LEVELS.comboTick, {}, 0.9)
+    if (!dest) return
     // Minor pentatonic degrees, so a long chain arpeggiates rather than sirens.
     const steps = [0, 3, 5, 7, 10, 12, 15, 17, 19, 22, 24, 27]
     const semi = steps[Math.min(chain - 1, steps.length - 1)]!
@@ -1479,9 +1536,8 @@ export class Audio {
 
   /** Rage tipping over. A held breath, then everything opens up. */
   frenzyStart() {
-    const dest = this.out(LEVELS.frenzy, {}, 2)
+    const dest = this.voice(PRI.high, 2, LEVELS.frenzy, {}, 2, true)
     if (!dest) return
-    this.budget(PRI.high, 2)
     this.duck(0.6)
     this.noise(dest, 0.5, 0.14, 'bandpass', 200, 3000, 0, 2.5, 0.4)
     this.tone(dest, 'sine', 42, 62, 0.6, 0.4, 0.35, 0.05)
@@ -1584,10 +1640,13 @@ export class Audio {
   /** Birds by day, jackals and village dogs after dark. Rare, and never centred. */
   private ambientOneShot() {
     const roll = Math.random()
-    if (roll > 0.3) return
-    const dest = this.out(LEVELS.distantShot, { pan: rand(-0.9, 0.9), dist: rand(35, 95) }, 2.2)
-    if (!dest) return
     const dark = this.ambDarkness
+    // Decide *before* building anything: the branches below do not cover every
+    // roll, and the ones that fall through used to leave a routing chain wired
+    // to the bus with nothing ever feeding it.
+    if (!((dark < 0.4 && roll < 0.14) || (dark > 0.45 && roll < 0.1) || roll < 0.22)) return
+    const dest = this.voice(PRI.low, 0.5, LEVELS.distantShot, { pan: rand(-0.9, 0.9), dist: rand(35, 95) }, 2.2)
+    if (!dest) return
 
     if (dark < 0.4 && roll < 0.14) {
       // Daytime bird — a few quick descending whistles.
@@ -1614,6 +1673,18 @@ export class Audio {
   /** Bring the music in. Safe to call more than once. */
   startMusic() {
     this.music?.start()
+  }
+
+  /**
+   * Advance the score from the render loop.
+   *
+   * The transport keeps its own backstop timer for when the loop is not
+   * running, but a timer is the wrong clock to sequence music from — it is the
+   * first thing a browser throttles. requestAnimationFrame is not, so while
+   * the tab is visible this is what actually keeps the beat.
+   */
+  tickMusic() {
+    this.music?.tick()
   }
 
   /** Which hunt we are on — unlocks layers and, past hunt 4, changes the mode. */

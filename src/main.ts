@@ -183,6 +183,15 @@ input.onLockChange = (locked) => {
   if (!locked && game.state === 'playing' && !NOLOCK) game.pause()
 }
 
+// A hidden tab still runs its timers, just badly — throttled to a second or
+// more, which is long enough that anything clocked off them stutters. Rather
+// than try to sequence through that, stop the clock entirely: nobody wants to
+// hear the score from a tab they have alt-tabbed away from anyway.
+addEventListener('visibilitychange', () => {
+  if (document.hidden) audio.suspend()
+  else audio.resume()
+})
+
 addEventListener('keydown', (e) => {
   if (e.code === 'KeyR' && game.state === 'dead') beginHunt()
   if (e.code === 'KeyM') audio.setMuted(!audio.muted)
@@ -197,6 +206,7 @@ const clock = new THREE.Clock()
 
 /** One simulation + render step. Split out so tests can drive it directly. */
 function frame(dt: number) {
+  audio.tickMusic()
   if (game.state === 'playing') quality.sample(dt)
   const controlling = (input.locked || NOLOCK) && game.state === 'playing'
   game.darkness = sky.day.darkness

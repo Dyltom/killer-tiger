@@ -184,6 +184,15 @@ export class Music {
   }
 
   // ------------------------------------------------------------ scheduling
+  /**
+   * Advance the transport. Safe to call as often as you like — it is driven by
+   * clock time, not by call count, so the render loop and the backstop timer
+   * can both call it.
+   */
+  tick() {
+    this.pump()
+  }
+
   private pump() {
     const ctx = this.ctx
     const now = ctx.currentTime
@@ -197,6 +206,29 @@ export class Music {
     if (this.mode === 'dead') return
 
     const spb = 60 / this.bpm / 4 // seconds per sixteenth
+
+    // A late pump must not try to make up the time it lost.
+    //
+    // This transport was a bare `setInterval` at 28 ms with 220 ms of
+    // lookahead, and neither number survives contact with a real browser: a
+    // background tab throttles timers to a second or more, and in the
+    // foreground any long frame or collection pause eats the margin. Once the
+    // next step falls behind the clock, the loop below schedules *every*
+    // missed sixteenth at a time already in the past — the web audio clock
+    // rounds those all up to "now", so a second of music arrives stacked on a
+    // single instant and the bar it should have filled is a hole. That is the
+    // audio cutting out, and it recurs for as long as the timer stays late.
+    //
+    // Skip the gap instead, keeping the phase so the pattern lands where the
+    // ear expects it. Missing a bar is not audible; firing one all at once is.
+    if (this.nextStepTime < now) {
+      const missed = Math.ceil((now - this.nextStepTime) / spb)
+      this.nextStepTime += missed * spb
+      this.step += missed
+      this.bar += Math.floor(this.step / STEPS)
+      this.step %= STEPS
+    }
+
     while (this.nextStepTime < now + MUSIC.lookahead) {
       this.scheduleStep(this.step, this.nextStepTime)
       this.nextStepTime += spb
