@@ -150,8 +150,8 @@ function glowTexture(): THREE.Texture {
   return glowTex
 }
 
-const BEAM_H = 5
-const BEAM_H_GLSL = '5.0'
+const BEAM_H = 4.2
+const BEAM_H_GLSL = '4.2'
 
 const MOTE_COUNT = 14
 
@@ -512,7 +512,7 @@ export class Pickup {
     }
     const pulse = 0.5 + Math.sin(time * 3 + this.spin) * 0.5
     this.halo.material.opacity = (0.26 + pulse * 0.2) * this.glow
-    this.beam.material.uniforms.uAlpha!.value = (0.4 + pulse * 0.18) * this.glow
+    this.beam.material.uniforms.uAlpha!.value = (0.34 + pulse * 0.14) * this.glow
     ;(this.ring.material as THREE.MeshBasicMaterial).opacity = (0.34 + pulse * 0.22) * this.glow
     this.moteMat.uniforms.uTime!.value = time + this.spin
     this.moteMat.uniforms.uAlpha!.value = this.glow * 0.7

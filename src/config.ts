@@ -406,9 +406,9 @@ export const DAY = {
   phases: [
     // t      turbidity rayleigh  mie    dome   sun       sunI  skyBounce gndBounce bounceI env   fogSun    fogAway   density  stars exposure dwell
     { t: 0.000, turbidity: 4.2, rayleigh: 3.4, mie: 0.010, dome: 0.55, sun: 0xffb070, sunI: 1.4,  skyB: 0x9fb6d8, gndB: 0x6a5a38, bounceI: 0.85, env: 1.6, fogSun: 0xffb98a, fogAway: 0x9aa9bd, density: 0.0075, stars: 0.25, exposure: 1.00, dwell: 1.60 },
-    { t: 0.120, turbidity: 2.6, rayleigh: 2.2, mie: 0.005, dome: 0.34, sun: 0xfff0d8, sunI: 3.6,  skyB: 0x8fb4e6, gndB: 0x7a6a48, bounceI: 1.00, env: 2.2, fogSun: 0xdfe6f0, fogAway: 0xa8bcd6, density: 0.0040, stars: 0.00, exposure: 0.95, dwell: 1.00 },
-    { t: 0.250, turbidity: 2.2, rayleigh: 1.6, mie: 0.004, dome: 0.30, sun: 0xfffaf0, sunI: 4.2,  skyB: 0x9cc4ff, gndB: 0x8a7a58, bounceI: 1.05, env: 2.4, fogSun: 0xe8eef6, fogAway: 0xb4c6dc, density: 0.0032, stars: 0.00, exposure: 0.92, dwell: 0.85 },
-    { t: 0.400, turbidity: 2.8, rayleigh: 2.4, mie: 0.005, dome: 0.36, sun: 0xffe6c0, sunI: 3.8,  skyB: 0x8fb0dd, gndB: 0x7d6a44, bounceI: 1.05, env: 2.3, fogSun: 0xffd7a8, fogAway: 0xa3b4cc, density: 0.0042, stars: 0.00, exposure: 0.96, dwell: 1.60 },
+    { t: 0.120, turbidity: 2.6, rayleigh: 2.2, mie: 0.005, dome: 0.34, sun: 0xfff0d8, sunI: 3.9,  skyB: 0x8fb4e6, gndB: 0x7a6a48, bounceI: 0.70, env: 1.55, fogSun: 0xcdd8e6, fogAway: 0x8ea6c6, density: 0.0030, stars: 0.00, exposure: 0.93, dwell: 1.00 },
+    { t: 0.250, turbidity: 2.2, rayleigh: 1.6, mie: 0.004, dome: 0.30, sun: 0xfffaf0, sunI: 4.6,  skyB: 0x9cc4ff, gndB: 0x8a7a58, bounceI: 0.72, env: 1.60, fogSun: 0xd6e2f0, fogAway: 0x97b0d0, density: 0.0024, stars: 0.00, exposure: 0.90, dwell: 0.85 },
+    { t: 0.400, turbidity: 2.8, rayleigh: 2.4, mie: 0.005, dome: 0.36, sun: 0xffe6c0, sunI: 4.1,  skyB: 0x8fb0dd, gndB: 0x7d6a44, bounceI: 0.75, env: 1.65, fogSun: 0xf2c99a, fogAway: 0x8ea2be, density: 0.0032, stars: 0.00, exposure: 0.94, dwell: 1.60 },
     { t: 0.472, turbidity: 3.2, rayleigh: 3.0, mie: 0.006, dome: 0.42, sun: 0xffd0a0, sunI: 3.3,  skyB: 0x6f90bd, gndB: 0x6a5a38, bounceI: 1.15, env: 2.4, fogSun: 0xffc286, fogAway: 0x8fa2ba, density: 0.0055, stars: 0.05, exposure: 1.00, dwell: 3.20 },
     { t: 0.520, turbidity: 4.6, rayleigh: 4.0, mie: 0.011, dome: 0.46, sun: 0xff8b46, sunI: 1.5,  skyB: 0x50648c, gndB: 0x50432c, bounceI: 1.20, env: 2.1, fogSun: 0xff9a5a, fogAway: 0x6d7e9c, density: 0.0075, stars: 0.30, exposure: 1.05, dwell: 2.40 },
     // Night is lit by a moon, not by nothing. Real moonlight is about a
