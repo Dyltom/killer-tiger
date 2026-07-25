@@ -209,8 +209,18 @@ const GradeShader = {
       // broken render and, worse, makes the prey you are chasing unreadable
       // exactly when you most need to see it.
       if ( uHurt > 0.0 ) {
-        float drain = uHurt * ( 0.18 + smoothstep( 0.03, 0.6, r2 ) * 0.68 );
-        col = mix( col, vec3( luma( col ) ) * vec3( 1.0, 0.82, 0.8 ), drain );
+        // A heartbeat under the whole thing. It shares no state with the DOM
+        // layer that pulses over the top — they only have to be the same
+        // tempo, and drifting slightly apart reads as a pulse rather than as
+        // one animation, which is the point.
+        float beat = pow( max( sin( uTime * ( 5.4 + uHurt * 3.0 ) ), 0.0 ), 6.0 );
+        float drain = uHurt * ( 0.26 + smoothstep( 0.03, 0.6, r2 ) * 0.7 );
+        col = mix( col, vec3( luma( col ) ) * vec3( 1.02, 0.7, 0.66 ), drain );
+        // Blood in the shadows, so even the lit centre of frame goes wrong.
+        col = mix( col, col * vec3( 1.15, 0.62, 0.58 ), uHurt * 0.45 );
+        // And a wash of arterial red on each beat, strongest at the edges.
+        col += vec3( 0.16, 0.012, 0.02 ) * beat * uHurt * uHurt * ( 0.35 + r2 * 2.2 );
+        col *= 1.0 - uHurt * 0.22;
       }
 
       // Vignette. Uses a smooth radial falloff rather than a hard ellipse so

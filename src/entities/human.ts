@@ -29,6 +29,10 @@ const SKIN = [0x8d5a3b, 0xa4703f, 0x6b4229, 0x9c6a44, 0x5c3a24]
 const SHIRT = [0x6d7b52, 0x8a5a3c, 0x4c5b6b, 0x7a6b4f, 0x9c8461, 0x5c4a3a]
 const HUNTER_SHIRT = [0x3f4a35, 0x4a3f2f, 0x35404a]
 
+/** Fresh in the wound, and the darker stain it leaves in cloth. */
+const WET_BLOOD = new THREE.Color(0x8c0d10)
+const SOAKED = new THREE.Color(0x3a0709)
+
 export class Human {
   readonly group = new THREE.Group()
   readonly pos = new THREE.Vector3()
@@ -56,6 +60,16 @@ export class Human {
   private hurtFlash = 0
   private rng: Rng
 
+  /** Lean away from the last blow, in body-local x/z. Decays back to nothing. */
+  private leanX = 0
+  private leanZ = 0
+  /** Which way the body falls when it dies, in body-local space. */
+  private fallX = 1
+  private fallZ = 0
+  private bleedTimer = 0
+  private bleedNext = 0
+  private fed = false
+
   /** Rig parts we animate. */
   private legL!: THREE.Mesh
   private legR!: THREE.Mesh
@@ -64,12 +78,18 @@ export class Human {
   private torso!: THREE.Mesh
   private head!: THREE.Mesh
   private rifle: THREE.Group | null = null
+  private wounds!: THREE.Mesh
+  private woundMat!: THREE.MeshStandardMaterial
   private body = new THREE.Group()
   private mats: THREE.MeshStandardMaterial[] = []
 
   pendingShot: ShotEvent | null = null
   pendingShout = false
   screamed = false
+  /** Set for one frame each time the corpse pumps out another gout of blood. */
+  bleedPulse = false
+  /** Where the last wound was opened, in world space. */
+  readonly woundPos = new THREE.Vector3()
 
   constructor(seed: number) {
     this.rng = new Rng(seed)
@@ -220,6 +240,25 @@ export class Human {
     this.legL = mkLimb(legGeo(), pants, -0.12, 0.86)
     this.legR = mkLimb(legGeo(), pants, 0.12, 0.86)
 
+    // ---- wounds. One merged mesh of flattened blobs sitting a hair proud of
+    // the torso and shoulders, hidden until something opens them up. Merged and
+    // sharing one material because a villager who has been clawed is still one
+    // extra draw call, not six — with twenty of them alive that distinction is
+    // the whole frame budget.
+    this.woundMat = new THREE.MeshStandardMaterial({ color: 0x4a0509, roughness: 0.35 })
+    this.wounds = new THREE.Mesh(
+      merged([
+        ball(0.075, 1.28, -0.1, -0.13, 1.5, 1.1, 0.5),  // chest, across the ribs
+        ball(0.06, 1.38, 0.16, -0.1, 1.1, 1.4, 0.5),    // right shoulder
+        ball(0.055, 1.14, -0.19, 0.02, 0.5, 1.6, 1.1),  // left flank
+        ball(0.07, 1.2, 0.05, 0.15, 1.4, 1.2, 0.5),     // back
+        ball(0.05, 1.55, -0.06, -0.06, 1.2, 0.9, 0.9),  // throat
+      ]),
+      this.woundMat,
+    )
+    this.wounds.visible = false
+    this.body.add(this.wounds)
+
     this.body.scale.setScalar(scale)
     this.body.traverse((o) => {
       if (o instanceof THREE.Mesh) {
@@ -252,15 +291,31 @@ export class Human {
     this.maxHealth = cfg.health * (1 + waveScale)
     this.health = this.maxHealth
 
-    // Recolour so hunters read instantly as the dangerous ones.
+    this.leanX = this.leanZ = 0
+    this.bleedTimer = 0
+    this.fed = false
+
+    // Recolour so hunters read instantly as the dangerous ones. The pool
+    // recycles corpses, so every trace of the last life has to be scrubbed:
+    // a slot that came back with someone else's blood still on it was the
+    // giveaway that these are the same twenty bodies over and over.
     const shirt = this.mats[1]!
     shirt.color.setHex(kind === 'hunter' ? this.rng.pick(HUNTER_SHIRT) : this.rng.pick(SHIRT))
     shirt.emissive.setHex(0x000000)
+    this.mats[0]!.color.setHex(this.rng.pick(SKIN))
+    this.wounds.visible = false
+    this.woundMat.color.setHex(0x4a0509)
 
     this.setRifleVisible(kind === 'hunter')
     this.group.visible = true
+    this.group.rotation.set(0, this.yaw, 0)
     this.body.rotation.set(0, 0, 0)
     this.body.position.set(0, 0, 0)
+    this.armL.rotation.set(0, 0, 0)
+    this.armR.rotation.set(0, 0, 0)
+    this.legL.rotation.set(0, 0, 0)
+    this.legR.rotation.set(0, 0, 0)
+    this.head.rotation.set(0, 0, 0)
     this.syncTransform()
   }
 
@@ -309,13 +364,32 @@ export class Human {
     this.hurtFlash = 1
     this.alerted = true
     this.awareness = 1.4
-    this.staggerTimer = Math.max(this.staggerTimer, 0.22)
-    // Knock them back a touch so hits have weight.
+    this.staggerTimer = Math.max(this.staggerTimer, 0.3)
+
+    // Direction the blow came from, in world space and then in body-local — the
+    // rig has to lean and fall away from it, not always forward.
     const dx = this.pos.x - from.x
     const dz = this.pos.z - from.z
     const l = Math.hypot(dx, dz) || 1
-    this.vel.x += (dx / l) * 3.4
-    this.vel.z += (dz / l) * 3.4
+    const wx = dx / l
+    const wz = dz / l
+    const c = Math.cos(-this.yaw)
+    const s = Math.sin(-this.yaw)
+    this.fallX = wx * c - wz * s
+    this.fallZ = wx * s + wz * c
+    // Whipped away from the impact hard enough to see, then damped out.
+    this.leanX = clamp(this.leanX + this.fallZ * 0.85, -1, 1)
+    this.leanZ = clamp(this.leanZ - this.fallX * 0.85, -1, 1)
+
+    // Knocked back, harder the bigger the hit.
+    const shove = 3.4 + Math.min(amount, 140) * 0.03
+    this.vel.x += wx * shove
+    this.vel.z += wz * shove
+
+    // Torn open, and it stays torn: the wound layer surfaces on first blood and
+    // spreads as they bleed out, so a half-dead villager looks half-dead.
+    this.showWounds()
+
     if (this.health <= 0) {
       this.die()
       return true
@@ -324,11 +398,48 @@ export class Human {
     return false
   }
 
+  /**
+   * Reveal and grow the wound layer, and soak the clothing. Everything is
+   * driven off the health fraction so it is monotonic — the damage only ever
+   * gets worse, which is what makes it read as accumulated rather than flashing.
+   */
+  private showWounds() {
+    const gone = clamp(1 - this.health / this.maxHealth, 0, 1)
+    this.wounds.visible = true
+    // Starts as a couple of gashes, ends as most of the torso.
+    this.wounds.scale.setScalar(0.45 + gone * 0.75)
+    this.woundMat.color.setHex(0x4a0509).lerp(WET_BLOOD, gone * 0.6)
+    // Blood wicks through the shirt from the wound outward.
+    this.mats[1]!.color.lerp(SOAKED, gone * 0.35)
+    this.mats[0]!.color.lerp(SOAKED, gone * 0.18)
+    this.woundPos.set(this.pos.x, this.pos.y + 1.3, this.pos.z)
+  }
+
   private die() {
     this.alive = false
     this.state = 'dead'
     this.deathTimer = 0
     this.vel.set(0, 0, 0)
+    this.health = 0
+    this.showWounds()
+    // Keep pumping for a couple of seconds. The game turns each pulse into a
+    // spray, which is what an opened throat looks like and one burst does not.
+    this.bleedTimer = HUMAN.bleedDuration
+    this.bleedNext = 0
+    this.setRifleVisible(false)
+  }
+
+  // ---------------------------------------------------------------- feeding
+  /** Can the tiger still get something out of this body? */
+  get feedable(): boolean {
+    return !this.alive && !this.fed && this.group.visible && this.deathTimer > 0.35
+  }
+
+  /** Consume the corpse. It collapses further and stops being worth anything. */
+  feed() {
+    this.fed = true
+    // Torn apart: sinks flatter and stops registering on the radar.
+    this.deathTimer = Math.max(this.deathTimer, HUMAN.corpseLife * 0.72)
   }
 
   terrify(duration: number, stagger: number) {
@@ -358,8 +469,11 @@ export class Human {
   ) {
     this.pendingShot = null
     this.pendingShout = false
+    this.bleedPulse = false
     this.hurtFlash = Math.max(0, this.hurtFlash - dt * 3)
     this.mats[1]!.emissive.setRGB(this.hurtFlash * 0.7, 0, 0)
+    this.leanX = damp(this.leanX, 0, 7, dt)
+    this.leanZ = damp(this.leanZ, 0, 7, dt)
 
     if (!this.alive) {
       this.updateDeath(dt)
@@ -640,23 +754,67 @@ export class Human {
       this.armR.rotation.z = -0.4
     }
 
-    // Lean into the run.
+    // Lean into the run, plus whatever the last blow did. The lean is applied
+    // to the whole body rather than the torso so the legs buckle with it — a
+    // struck man folds, he doesn't bow politely from the waist.
     this.torso.rotation.x = damp(this.torso.rotation.x, clamp(speed / 14, 0, 0.3), 6, dt)
     this.head.rotation.x = -this.torso.rotation.x
+    this.body.rotation.x = this.leanX * 0.5
+    this.body.rotation.z = this.leanZ * 0.5
+    // Clutching the wound while they run.
+    const hurtAmt = clamp(1 - this.health / this.maxHealth, 0, 1)
+    if (hurtAmt > 0.25 && this.state !== 'hunt') {
+      this.armR.rotation.x += hurtAmt * 1.5
+      this.armR.rotation.z = -hurtAmt * 0.7
+    }
   }
 
   private updateDeath(dt: number) {
     this.deathTimer += dt
-    // Topple over the first half-second, lie still, then sink into the dirt.
-    const fall = clamp(this.deathTimer / 0.5, 0, 1)
-    this.body.rotation.x = fall * (Math.PI / 2) * 0.98
-    this.body.position.y = -fall * 0.15
-    // Limbs go slack.
-    const slack = 1 - fall
-    this.legL.rotation.x *= slack
-    this.legR.rotation.x *= slack
-    this.armL.rotation.x = damp(this.armL.rotation.x, 0.6, 5, dt)
-    this.armR.rotation.x = damp(this.armR.rotation.x, 0.6, 5, dt)
+
+    // Arterial pulses for the first couple of seconds. The game reads the flag
+    // and sprays from woundPos; this only decides when.
+    if (this.bleedTimer > 0) {
+      this.bleedTimer -= dt
+      this.bleedNext -= dt
+      if (this.bleedNext <= 0) {
+        this.bleedNext = HUMAN.bleedInterval
+        this.bleedPulse = true
+        this.woundPos.set(this.pos.x, this.pos.y + 0.9 - (1 - this.bleedTimer / HUMAN.bleedDuration) * 0.6, this.pos.z)
+      }
+    }
+
+    // Topple away from whatever hit them, over the first half-second, with a
+    // bounce at the bottom rather than settling dead flat — a body dropping on
+    // its face and a body flung onto its back are different deaths, and always
+    // playing the first one was most of why kills felt weightless.
+    const fall = clamp(this.deathTimer / 0.55, 0, 1)
+    const eased = fall * fall * (3 - 2 * fall)
+    const settle = fall >= 1 ? 0 : Math.sin(fall * Math.PI * 2) * 0.09 * (1 - fall)
+    const tip = (Math.PI / 2) * 0.96 * (eased + settle)
+    this.body.rotation.x = -this.fallZ * tip
+    this.body.rotation.z = this.fallX * tip
+    this.body.position.y = -eased * 0.12
+
+    // Limbs go slack and splay, rather than staying mid-stride.
+    const slack = 1 - eased
+    this.legL.rotation.x = damp(this.legL.rotation.x, 0.22, 6, dt) * (0.3 + slack * 0.7)
+    this.legR.rotation.x = damp(this.legR.rotation.x, -0.15, 6, dt) * (0.3 + slack * 0.7)
+    this.legL.rotation.z = damp(this.legL.rotation.z, 0.2, 5, dt)
+    this.legR.rotation.z = damp(this.legR.rotation.z, -0.28, 5, dt)
+    this.armL.rotation.x = damp(this.armL.rotation.x, 0.5, 5, dt)
+    this.armR.rotation.x = damp(this.armR.rotation.x, 0.85, 5, dt)
+    this.armL.rotation.z = damp(this.armL.rotation.z, 0.9, 5, dt)
+    this.armR.rotation.z = damp(this.armR.rotation.z, -1.1, 5, dt)
+    // Head lolls.
+    this.head.rotation.z = damp(this.head.rotation.z, this.fallX * 0.55, 4, dt)
+    this.torso.rotation.x = damp(this.torso.rotation.x, 0, 5, dt)
+
+    // Lie *on* the ground, not standing upright through a slope. Two height
+    // samples give the gradient; the corpse pitches and rolls onto it.
+    const gx = terrainHeight(this.pos.x + 0.6, this.pos.z) - terrainHeight(this.pos.x - 0.6, this.pos.z)
+    const gz = terrainHeight(this.pos.x, this.pos.z + 0.6) - terrainHeight(this.pos.x, this.pos.z - 0.6)
+    this.group.rotation.set(clamp(gz / 1.2, -0.5, 0.5) * eased, this.yaw, -clamp(gx / 1.2, -0.5, 0.5) * eased, 'YXZ')
 
     if (this.deathTimer > HUMAN.corpseLife) {
       const sink = (this.deathTimer - HUMAN.corpseLife) / 2
@@ -665,7 +823,6 @@ export class Human {
     } else {
       this.group.position.copy(this.pos)
     }
-    this.group.rotation.y = this.yaw
   }
 
   /** True once the corpse has fully sunk and the slot can be reused. */

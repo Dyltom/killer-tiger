@@ -36,6 +36,34 @@ type PawState = 'idle' | 'swipeL' | 'swipeR' | 'bite'
  */
 const PAW = { x: 0.40, y: -0.36, z: -0.84, pitch: 0.42 }
 
+/**
+ * Where the foreleg is joined to the animal, in camera space: down, back and
+ * outside the frame, roughly where a tiger's shoulder sits relative to its eye.
+ *
+ * The swipe used to be pure translation of the paw, which is why it read as a
+ * striped sausage floating loose in the middle of the screen — nothing in the
+ * animation kept the far end of the leg anchored to anything. Hanging both paws
+ * off a pivot here and *rotating* it means the leg always radiates from the
+ * corner of the frame, so it stays part of the body no matter where the paw is.
+ *
+ * Set wide, low and just behind the eye. A pivot close to the eye needs a large
+ * rotation to put the paw on the reticle, and swinging that far drags the thick
+ * end of the limb right past the lens — a metre of striped barrel across half
+ * the screen. From out here the same reach costs about a third of the angle.
+ */
+const SHOULDER = { x: 0.52, y: -0.78, z: 0.35 }
+/** Paw offset from its shoulder. Chosen so the rest pose is unchanged. */
+const LOCAL = { x: PAW.x - SHOULDER.x, y: PAW.y - SHOULDER.y, z: PAW.z - SHOULDER.z }
+
+/** Fresh arterial blood, for whatever the claws have been in. */
+const BLOOD = new THREE.Color(0x6d0a0c)
+const lunge = new THREE.Vector3()
+/** Axis a fresh CylinderGeometry runs along once its top is put at the origin. */
+const DOWN = new THREE.Vector3(0, -1, 0)
+/** Proximal cap of the foreleg mesh, in the paw group's own space. */
+const ELBOW = new THREE.Vector3(0, -0.339, 0.419).multiplyScalar(0.62)
+const elbowAt = new THREE.Vector3()
+
 export class Tiger {
   /** Start out in the long grass at the treeline, facing the village. */
   readonly pos = new THREE.Vector3(0, 0, 56)
@@ -69,15 +97,25 @@ export class Tiger {
   private camShake = 0
   private shakeTime = 0
   private recoilY = 0
+  /** Counts down while a connecting blow holds the swipe still. */
+  private hitStop = 0
+  /** Kick along the look axis on contact — the arm stopping against a body. */
+  private impact = 0
+  private clawBlood = 0
 
   /** Viewmodel. */
   private vm = new THREE.Group()
   private pawL!: THREE.Group
   private pawR!: THREE.Group
+  private shoulderL!: THREE.Group
+  private shoulderR!: THREE.Group
+  private armL!: THREE.Mesh
+  private armR!: THREE.Mesh
   private pawState: PawState = 'idle'
   private pawT = 0
   private nextPawIsLeft = true
   private eyeY = TIGER.eyeHeight
+  private clawMat!: THREE.MeshStandardMaterial
 
   /** Populated during update(); the game reads and clears these. */
   pendingAttack: AttackEvent | null = null
@@ -118,7 +156,10 @@ export class Tiger {
     const pawMat = new THREE.MeshStandardMaterial({
       map: pawMap, roughness: 0.88, metalness: 0, bumpMap: pawMap, bumpScale: 0.3,
     })
-    const clawMat = new THREE.MeshStandardMaterial({ color: 0xe8ddcd, roughness: 0.32, metalness: 0.04 })
+    // Kept on the instance so a hit can wet it with blood; the claws are the
+    // only part of the viewmodel that carries any record of what you just did.
+    this.clawMat = new THREE.MeshStandardMaterial({ color: 0xe8ddcd, roughness: 0.32, metalness: 0.04 })
+    const clawMat = this.clawMat
     const padMat = new THREE.MeshStandardMaterial({ color: 0x2e1d18, roughness: 0.72 })
 
     const makePaw = (side: -1 | 1): THREE.Group => {
@@ -206,7 +247,36 @@ export class Tiger {
 
     this.pawL = makePaw(-1)
     this.pawR = makePaw(1)
-    this.vm.add(this.pawL, this.pawR)
+    this.shoulderL = new THREE.Group()
+    this.shoulderR = new THREE.Group()
+    this.shoulderL.position.set(-SHOULDER.x, SHOULDER.y, SHOULDER.z)
+    this.shoulderR.position.set(SHOULDER.x, SHOULDER.y, SHOULDER.z)
+    this.shoulderL.add(this.pawL)
+    this.shoulderR.add(this.pawR)
+
+    // Upper arm, bridging the shoulder pivot to the top of the foreleg. Without
+    // it the limb is just the foreleg, whose open end is hidden by the bottom of
+    // the frame at rest and floats in clear air the moment a swipe lifts it —
+    // which is exactly the striped sausage the strike used to read as. Unit
+    // length, stretched and aimed every frame in updateArms(), because the far
+    // end of the foreleg swings with the wrist and no fixed segment can follow.
+    const armGeo = new THREE.CylinderGeometry(0.062, 0.092, 1, 12)
+    armGeo.translate(0, -0.5, 0)
+    // Its own view of the coat: the foreleg's repeat is set for a 0.5 m segment,
+    // and reused over a metre of upper arm it smears into two cream bands.
+    const armMap = furMap.clone()
+    armMap.repeat.set(1, 1.05)
+    armMap.offset.set(0, 0.3)
+    armMap.needsUpdate = true
+    const armMat = new THREE.MeshStandardMaterial({
+      map: armMap, roughness: 0.88, metalness: 0, bumpMap: armMap, bumpScale: 0.35,
+    })
+    this.armL = new THREE.Mesh(armGeo, armMat)
+    this.armR = new THREE.Mesh(armGeo, armMat)
+    this.shoulderL.add(this.armL)
+    this.shoulderR.add(this.armR)
+
+    this.vm.add(this.shoulderL, this.shoulderR)
     // Viewmodel renders slightly in front of the world; keep it out of walls.
     this.vm.traverse((o) => {
       if (o instanceof THREE.Mesh) {
@@ -219,10 +289,13 @@ export class Tiger {
   }
 
   private resetPaws() {
-    this.pawL.position.set(-PAW.x, PAW.y, PAW.z)
+    this.shoulderL.rotation.set(0, 0, 0)
+    this.shoulderR.rotation.set(0, 0, 0)
+    this.pawL.position.set(-LOCAL.x, LOCAL.y, LOCAL.z)
     this.pawL.rotation.set(PAW.pitch, 0.32, 0.18)
-    this.pawR.position.set(PAW.x, PAW.y, PAW.z)
+    this.pawR.position.set(LOCAL.x, LOCAL.y, LOCAL.z)
     this.pawR.rotation.set(PAW.pitch, -0.32, -0.18)
+    this.updateArms()
   }
 
   // ------------------------------------------------------------- combat
@@ -255,6 +328,21 @@ export class Tiger {
       arc: kind === 'claw' ? TIGER.clawArc : TIGER.biteArc,
       damage: base * this.damageMult * (this.frenzy > 0 ? TIGER.frenzyDamageMult : 1),
     }
+  }
+
+  /**
+   * Told by the game what the swing actually did, on the frame it landed.
+   *
+   * Without this the viewmodel plays the same arc whether you opened a throat
+   * or swiped at fog, which is exactly what "the hits don't connect" means: the
+   * animation has no idea it touched anything. A connecting blow now stalls
+   * mid-swing, drives the camera along the look axis, and leaves the claws wet.
+   */
+  onAttackResult(hit: boolean, killed: boolean) {
+    if (!hit) return
+    this.hitStop = killed ? TIGER.killStop : TIGER.hitStop
+    this.impact = killed ? TIGER.hitJolt * 1.7 : TIGER.hitJolt
+    this.clawBlood = 1
   }
 
   lookDir(target = new THREE.Vector3()): THREE.Vector3 {
@@ -349,6 +437,15 @@ export class Tiger {
     this.shakeTime += dt
     this.recoilY = damp(this.recoilY, 0, 9, dt)
     this.landImpact = damp(this.landImpact, 0, 9, dt)
+    this.hitStop = Math.max(0, this.hitStop - dt)
+    this.impact = damp(this.impact, 0, 11, dt)
+
+    if (this.clawBlood > 0) {
+      this.clawBlood = Math.max(0, this.clawBlood - dt / TIGER.clawBloodTime)
+      // Bone white when clean, wet arterial red when fresh, drying to brown.
+      this.clawMat.color.setHex(0xe8ddcd).lerp(BLOOD, this.clawBlood * 0.92)
+      this.clawMat.roughness = 0.32 - this.clawBlood * 0.22
+    }
 
     if (this.sinceDamage > TIGER.regenDelay) {
       this.health = Math.min(TIGER.maxHealth, this.health + TIGER.healthRegen * dt)
@@ -479,53 +576,117 @@ export class Tiger {
     const speed = Math.hypot(this.vel.x, this.vel.z)
 
     if (this.pawState === 'idle') {
-      // Gentle running paw pump; scales with speed so sprinting reads as a gallop.
+      // Bounding gait. The forelegs of a galloping cat reach together and land
+      // together, so the two paws share a phase instead of alternating the way
+      // a walking biped's arms do; the small offset between them is just enough
+      // to stop them looking welded to each other.
       const t = this.bobPhase
       const amp = Math.min(1, speed / TIGER.sprintSpeed)
-      const yL = PAW.y + Math.sin(t) * 0.1 * amp
-      const yR = PAW.y + Math.sin(t + Math.PI) * 0.1 * amp
-      const zBase = this.crouching ? PAW.z + 0.1 : PAW.z
-      this.pawL.position.set(-PAW.x, yL, zBase + Math.cos(t) * 0.07 * amp)
-      this.pawR.position.set(PAW.x, yR, zBase + Math.cos(t + Math.PI) * 0.07 * amp)
-      this.pawL.rotation.set(PAW.pitch + Math.sin(t) * 0.15 * amp, 0.32, 0.18)
-      this.pawR.rotation.set(PAW.pitch + Math.sin(t + Math.PI) * 0.15 * amp, -0.32, -0.18)
+      const reachL = Math.sin(t)
+      const reachR = Math.sin(t + 0.5)
+      const zBase = this.crouching ? LOCAL.z + 0.1 : LOCAL.z
+
+      this.shoulderL.rotation.set(-reachL * 0.34 * amp, 0, 0)
+      this.shoulderR.rotation.set(-reachR * 0.34 * amp, 0, 0)
+      this.pawL.position.set(-LOCAL.x, LOCAL.y + Math.max(0, reachL) * 0.06 * amp, zBase)
+      this.pawR.position.set(LOCAL.x, LOCAL.y + Math.max(0, reachR) * 0.06 * amp, zBase)
+      this.pawL.rotation.set(PAW.pitch + reachL * 0.3 * amp, 0.32, 0.18)
+      this.pawR.rotation.set(PAW.pitch + reachR * 0.3 * amp, -0.32, -0.18)
+      this.updateArms()
       return
     }
 
-    const dur = this.pawState === 'bite' ? 0.4 : 0.3
+    const dur = this.pawState === 'bite' ? 0.4 : 0.34
     const prev = this.pawT
-    this.pawT += dt
+    // Hit-stop: the swing holds on the contact frame while the camera keeps
+    // moving. Nothing else in the game pauses, so it costs a few frames of the
+    // paw and buys the whole impression of hitting something solid.
+    if (this.hitStop <= 0) this.pawT += dt
     const t = clamp(this.pawT / dur, 0, 1)
-    // Damage lands a third of the way through the swing.
-    const hitAt = 0.34
+    // Contact is at the far end of the reach, not a third of the way in — the
+    // damage used to land while the paw was still winding up behind the eye.
+    const hitAt = 0.46
     if (prev / dur < hitAt && t >= hitAt) {
       this.emitAttack(this.pawState === 'bite' ? 'bite' : 'claw')
     }
 
     if (this.pawState === 'bite') {
-      // Both paws yank down and out of frame as the jaws close in.
-      const e = Math.sin(t * Math.PI)
-      this.pawL.position.set(-PAW.x - e * 0.2, PAW.y - e * 0.5, PAW.z + e * 0.35)
-      this.pawR.position.set(PAW.x + e * 0.2, PAW.y - e * 0.5, PAW.z + e * 0.35)
-      this.recoilY = -e * 0.075
+      // Both forelegs swing up and in to clamp the body, then drag it down and
+      // out of frame as the jaws close on the throat.
+      const grab = clamp(t / 0.45, 0, 1)
+      const drag = clamp((t - 0.45) / 0.55, 0, 1)
+      const reach = Math.sin(grab * Math.PI * 0.5) * (1 - drag * 0.4)
+      const pull = drag * drag
+
+      // +X raises a forward-pointing leg; yaw toward the centre line closes the
+      // two of them around the body.
+      this.shoulderL.rotation.set(reach * 0.3 - pull * 0.52, -reach * 0.15, 0)
+      this.shoulderR.rotation.set(reach * 0.3 - pull * 0.52, reach * 0.15, 0)
+      this.pawL.position.set(-LOCAL.x, LOCAL.y, LOCAL.z - reach * 0.16)
+      this.pawR.position.set(LOCAL.x, LOCAL.y, LOCAL.z - reach * 0.16)
+      this.pawL.rotation.set(PAW.pitch - reach * 0.55, 0.32 - reach * 0.3, 0.18)
+      this.pawR.rotation.set(PAW.pitch - reach * 0.55, -0.32 + reach * 0.3, -0.18)
+      this.recoilY = -Math.sin(t * Math.PI) * 0.075
     } else {
       const left = this.pawState === 'swipeL'
+      const shoulder = left ? this.shoulderL : this.shoulderR
       const paw = left ? this.pawL : this.pawR
+      const otherShoulder = left ? this.shoulderR : this.shoulderL
+      const other = left ? this.pawR : this.pawL
       const side = left ? -1 : 1
-      // Wind-up then a fast arc across the middle of the screen.
-      const e = t < 0.3 ? -(t / 0.3) * 0.35 : (t - 0.3) / 0.7
-      paw.position.set(
-        side * PAW.x - side * e * 0.95,
-        PAW.y + Math.sin(clamp(e, 0, 1) * Math.PI) * 0.34,
-        PAW.z - Math.sin(clamp(e, 0, 1) * Math.PI) * 0.32,
+
+      // Three beats, all of them rotations of the shoulder. Cock the leg back
+      // and outward, swing it up and across the centre of the frame — where the
+      // reticle, and so the target, is — then let it carry through and drop.
+      const wind = clamp(t / 0.26, 0, 1)
+      const drive = clamp((t - 0.26) / 0.34, 0, 1)
+      const follow = clamp((t - 0.6) / 0.4, 0, 1)
+      const windE = Math.sin(wind * Math.PI * 0.5)
+      // Ease-out, so the fastest part of the stroke is the moment of contact.
+      const driveE = 1 - (1 - drive) * (1 - drive)
+
+      // Angles are chosen so that at the contact frame (t = 0.46, driveE ≈ 0.83)
+      // the paw sits on the centre line at about eye level — on the reticle, and
+      // so on whatever the hit trace is about to pick.
+      shoulder.rotation.set(
+        // Pitch: drop and cock back, then lift the leg up to reticle height on
+        // the drive and let it fall away through the follow-through.
+        -windE * 0.2 + driveE * 0.53 - follow * 0.38,
+        // Yaw: out to its own side on the wind-up, then across the centre line.
+        side * (driveE * 0.66 - follow * 0.4 - windE * 0.2),
+        side * (windE * 0.2 - driveE * 0.5 + follow * 0.26),
       )
-      paw.rotation.set(PAW.pitch - e * 0.5, side * 0.32 + e * side * 1.5, side * 0.18 - e * side * 1.9)
-      this.recoilY = -Math.sin(clamp(e, 0, 1) * Math.PI) * 0.03
+      // A little extension out of the shoulder at full stretch — a cat's swipe
+      // is not a rigid lever, the leg lengthens into the blow.
+      paw.position.set(side * LOCAL.x, LOCAL.y, LOCAL.z - driveE * 0.3 + follow * 0.16)
+      // Turn the foot into the stroke as it goes, so the four claws lead it
+      // rather than the camera watching the back of the paw go past. Rolling it
+      // any further than this brings the sphere's own pole into view.
+      paw.rotation.set(PAW.pitch - driveE * 0.7, side * (0.32 + driveE * 0.45), side * (0.18 - driveE * 0.9))
+      // The other foreleg braces: a cat swiping shifts its weight onto it.
+      otherShoulder.rotation.set(-driveE * 0.22, 0, 0)
+      other.position.set(-side * LOCAL.x, LOCAL.y, LOCAL.z)
+      other.rotation.set(PAW.pitch, -side * 0.32, -side * 0.18)
+
+      this.recoilY = -driveE * 0.045 + follow * 0.02
     }
 
     if (t >= 1) {
       this.pawState = 'idle'
       this.resetPaws()
+    }
+    this.updateArms()
+  }
+
+  /** Stretch each upper arm from its shoulder to wherever the wrist ended up. */
+  private updateArms() {
+    for (const [paw, arm] of [[this.pawL, this.armL], [this.pawR, this.armR]] as const) {
+      elbowAt.copy(ELBOW).applyEuler(paw.rotation).add(paw.position)
+      const len = elbowAt.length()
+      arm.quaternion.setFromUnitVectors(DOWN, elbowAt.divideScalar(len))
+      // Overshoot slightly so the two caps overlap instead of meeting exactly,
+      // which would show a seam the moment the joint bends.
+      arm.scale.y = len + 0.05
     }
   }
 
@@ -534,9 +695,19 @@ export class Tiger {
     this.eyeY = damp(this.eyeY, targetEye, 12, dt)
 
     const speed = Math.hypot(this.vel.x, this.vel.z)
-    const bobAmt = (speed / TIGER.walkSpeed) * CAMERA.bobAmp * (this.grounded ? 1 : 0.2)
-    const bobY = Math.sin(this.bobPhase * 2) * bobAmt
-    const bobX = Math.cos(this.bobPhase) * CAMERA.swayAmp * (speed / TIGER.walkSpeed)
+    const gait = (speed / TIGER.walkSpeed) * (this.grounded ? 1 : 0.2)
+
+    // The bound. `sin` rectified and shaped: a long float at the top of the
+    // stride, then a fast drop onto the forelegs. Squaring the fall is what
+    // separates a bounding cat from a jogging human — the head hangs in the
+    // air and then slams down, rather than tracing a smooth wave.
+    const swing = Math.sin(this.bobPhase)
+    const airborne = Math.max(0, swing)
+    const bobY = (Math.pow(airborne, 0.6) - 0.35) * CAMERA.boundAmp * Math.min(gait, 1.8)
+    // The nose drops through the landing half of the stride.
+    const bobPitch = Math.min(0, swing) * CAMERA.boundPitch * Math.min(gait, 1.6)
+    const bobX = Math.cos(this.bobPhase) * CAMERA.swayAmp * gait
+    const bobRoll = Math.sin(this.bobPhase * 0.5) * CAMERA.boundRoll * Math.min(gait, 1.5)
 
     // Shake uses layered sines rather than random so it never jitters harshly.
     const s = this.camShake
@@ -545,12 +716,21 @@ export class Tiger {
     const shakeY = s * Math.sin(st * 61 + 1.3) * 0.16
     const shakeR = s * Math.sin(st * 39 + 2.1) * 0.05
 
+    // A connecting blow shoves the whole head along the look axis, so the
+    // impact is felt in the world rather than only in the arm.
+    this.lookDir(lunge).multiplyScalar(this.impact)
+
     this.camera.position.set(
-      this.pos.x + bobX * 0.35 + shakeX,
-      this.pos.y + this.eyeY + bobY + this.recoilY - this.landImpact + shakeY,
-      this.pos.z + shakeY * 0.2,
+      this.pos.x + bobX * 0.35 + shakeX + lunge.x,
+      this.pos.y + this.eyeY + bobY + this.recoilY - this.landImpact + shakeY + lunge.y,
+      this.pos.z + shakeY * 0.2 + lunge.z,
     )
-    this.camera.rotation.set(this.pitch + shakeY * 0.4, this.yaw, bobX * 0.08 + shakeR, 'YXZ')
+    this.camera.rotation.set(
+      this.pitch + bobPitch + shakeY * 0.4 - this.impact * 2.2,
+      this.yaw,
+      bobX * 0.08 + bobRoll + shakeR,
+      'YXZ',
+    )
 
     // FOV punches out when you're moving fast or frenzied.
     let fov = CAMERA.fov
@@ -577,6 +757,11 @@ export class Tiger {
     this.damageTakenMult = 1
     this.clawCd = this.biteCd = this.roarCd = 0
     this.camShake = 0
+    this.hitStop = 0
+    this.impact = 0
+    this.clawBlood = 0
+    this.clawMat.color.setHex(0xe8ddcd)
+    this.clawMat.roughness = 0.32
     this.pawState = 'idle'
     this.resetPaws()
   }

@@ -34,6 +34,10 @@ export class Hud {
   private damageFlash = $('damage-flash')
   private frenzyTint = $('frenzy-tint')
   private vignette = $('vignette')
+  private critical = $('critical')
+  private pulse = $('pulse')
+  private devour = $('devour')
+  private devourFill = $('devour-fill')
   private radar = $<HTMLCanvasElement>('radar')
   private radarCtx = this.radar.getContext('2d')!
 
@@ -84,6 +88,27 @@ export class Hud {
     const dark = 220 + (1 - hp) * 200
     const spread = 60 + (1 - hp) * 90
     this.vignette.style.boxShadow = `inset 0 0 ${dark}px ${spread}px rgba(${Math.round((1 - hp) * 40)}, 0, 0, ${0.72 + (1 - hp) * 0.2})`
+
+    // Below half health the frame starts bleeding, and below a quarter the
+    // heartbeat comes through it. Both ramp rather than switching on, so the
+    // state of the tiger is legible from the picture at any moment without
+    // having to glance at the bar.
+    const hurt = Math.max(0, 1 - hp / 0.55)
+    const dying = Math.max(0, 1 - hp / 0.28)
+    this.critical.style.opacity = (hurt * hurt * 0.9).toFixed(3)
+    this.pulse.style.opacity = (dying * 0.55).toFixed(3)
+    // The beat quickens as it gets worse.
+    this.pulse.style.animationDuration = `${(1.15 - dying * 0.5).toFixed(2)}s`
+  }
+
+  /** Progress on the corpse being eaten; a negative value hides the prompt. */
+  setDevour(progress: number) {
+    if (progress < 0) {
+      this.devour.style.opacity = '0'
+      return
+    }
+    this.devour.style.opacity = '1'
+    this.devourFill.style.transform = `scaleX(${Math.min(1, progress)})`
   }
 
   setBuffs(chips: BuffChip[]) {
@@ -203,9 +228,21 @@ export class Hud {
     }
 
     for (const h of humans) {
-      if (!h.alive || !h.group.visible) continue
+      if (!h.group.visible) continue
       const q = project(h.pos.x, h.pos.z)
       if (q.d > range) continue
+      // Bodies you can still eat. Health comes from the kills you already made,
+      // so they need to be as findable as the prey is.
+      if (!h.alive) {
+        if (!h.feedable) continue
+        c.strokeStyle = '#8e1b1b'
+        c.lineWidth = 2.5
+        c.beginPath()
+        c.moveTo(q.x - 4, q.y - 4); c.lineTo(q.x + 4, q.y + 4)
+        c.moveTo(q.x + 4, q.y - 4); c.lineTo(q.x - 4, q.y + 4)
+        c.stroke()
+        continue
+      }
       if (h.kind === 'hunter') {
         c.fillStyle = h.alerted ? '#ff4d3d' : '#e0a24a'
         c.beginPath()

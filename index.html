@@ -50,6 +50,42 @@
         background: radial-gradient(ellipse at center, rgba(255, 60, 20, 0.06) 30%, rgba(255, 30, 10, 0.4) 100%);
         opacity: 0; transition: opacity 0.4s;
       }
+      /* Bleeding out. Two layers: a deep arterial vignette that closes in, and
+         a second copy pulsing on a heartbeat, so low health is something you
+         feel at the edge of vision before you think to read the bar. */
+      #critical {
+        position: absolute; inset: 0; opacity: 0;
+        background: radial-gradient(ellipse at center, rgba(120, 0, 0, 0) 22%, rgba(96, 0, 4, 0.95) 100%);
+      }
+      #pulse {
+        position: absolute; inset: 0; opacity: 0;
+        background: radial-gradient(ellipse at center, rgba(200, 20, 20, 0) 30%, rgba(210, 24, 18, 0.85) 100%);
+        animation: heartbeat 1.15s ease-out infinite;
+      }
+      @keyframes heartbeat {
+        0%, 100% { transform: scale(1); filter: brightness(0.55); }
+        8% { transform: scale(1.035); filter: brightness(1.45); }
+        22% { filter: brightness(0.7); }
+        32% { transform: scale(1.02); filter: brightness(1.15); }
+      }
+
+      /* devour prompt */
+      #devour {
+        position: absolute; left: 50%; top: 58%; transform: translateX(-50%);
+        text-align: center; opacity: 0; transition: opacity 0.14s;
+      }
+      #devour .lbl {
+        font-size: 15px; letter-spacing: 0.28em; text-transform: uppercase;
+        font-weight: 700; color: var(--blood); text-shadow: 0 2px 6px rgba(0,0,0,0.9);
+      }
+      #devour .track {
+        margin: 7px auto 0; width: 168px; height: 5px;
+        background: rgba(0,0,0,0.65); border: 1px solid rgba(255,255,255,0.2);
+      }
+      #devour .fill {
+        height: 100%; width: 100%; transform-origin: left center; transform: scaleX(0);
+        background: linear-gradient(90deg, #6b0d0d, #d63a2a);
+      }
 
       /* crosshair */
       #reticle {
@@ -245,6 +281,8 @@
 
     <div id="hud" class="hidden">
       <div id="vignette"></div>
+      <div id="critical"></div>
+      <div id="pulse"></div>
       <div id="frenzy-tint"></div>
       <div id="damage-flash"></div>
 
@@ -279,6 +317,11 @@
           <div class="meter-label"><span>Rage</span><span id="rage-hint"></span></div>
           <div class="meter-track"><div class="meter-fill" id="rage-fill"></div></div>
         </div>
+      </div>
+
+      <div id="devour">
+        <div class="lbl">Hold still &mdash; devour</div>
+        <div class="track"><div class="fill" id="devour-fill"></div></div>
       </div>
 
       <canvas id="radar" width="296" height="296"></canvas>

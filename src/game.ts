@@ -19,6 +19,9 @@ export type GameState = 'menu' | 'playing' | 'paused' | 'dead'
 const MAX_HUMANS = 52
 const MAX_PICKUPS = 14
 
+/** Arterial pulses go up and out, not along the blow that caused them. */
+const SPURT_UP = new THREE.Vector3(0, 1, 0)
+
 interface ActiveBuff {
   id: keyof typeof BUFFS
   remaining: number
@@ -43,6 +46,9 @@ export class Game {
   private chain = 0
   private chainTimer = 0
   private buffs: ActiveBuff[] = []
+  /** Progress on the corpse currently being eaten, 0..1. */
+  private feedProgress = 0
+  private feedTarget: Human | null = null
   private pickupTimer = PICKUP.spawnInterval * 0.4
   private spawnTimer = 0
   private time = 0
@@ -103,6 +109,9 @@ export class Game {
     this.chain = 0
     this.chainTimer = 0
     this.buffs = []
+    this.feedProgress = 0
+    this.feedTarget = null
+    this.hud.setDevour(-1)
     this.pickupTimer = PICKUP.spawnInterval * 0.4
     this.spawnTimer = 0
     this.rng = new Rng(4242)
@@ -287,6 +296,58 @@ export class Game {
     }
   }
 
+  // --------------------------------------------------------------- feeding
+  /**
+   * Standing over a fresh kill and holding still eats it.
+   *
+   * Pickups alone made healing a scavenger hunt — you had to survive long
+   * enough for one to spawn somewhere else. A tiger's food is the thing it just
+   * killed, so the bodies are the economy: they are always exactly where the
+   * fighting was, and stopping to eat one in the open is the risk that pays
+   * for the health.
+   */
+  private updateFeeding(dt: number) {
+    const moving = Math.hypot(this.tiger.vel.x, this.tiger.vel.z) > 1.6
+    let nearest: Human | null = null
+    let bestD = HUMAN.feedRadius
+
+    for (const h of this.humans) {
+      if (!h.feedable) continue
+      const d = Math.hypot(h.pos.x - this.tiger.pos.x, h.pos.z - this.tiger.pos.z)
+      if (d < bestD) { bestD = d; nearest = h }
+    }
+
+    if (!nearest || moving) {
+      if (this.feedProgress > 0) this.feedProgress = Math.max(0, this.feedProgress - dt * 1.6)
+      this.feedTarget = nearest && !moving ? nearest : null
+      this.hud.setDevour(nearest ? this.feedProgress / HUMAN.feedTime : -1)
+      return
+    }
+
+    if (this.feedTarget !== nearest) {
+      this.feedTarget = nearest
+      this.feedProgress = 0
+    }
+    this.feedProgress += dt
+    this.hud.setDevour(this.feedProgress / HUMAN.feedTime)
+
+    if (this.feedProgress >= HUMAN.feedTime) {
+      nearest.feed()
+      this.feedProgress = 0
+      this.feedTarget = null
+      this.tiger.heal(HUMAN.feedHeal)
+      this.tiger.addRage(HUMAN.feedRage)
+      this.score += HUMAN.feedScore
+      this.particles.gore(nearest.chestPos, 14)
+      this.world.addBloodDecal(nearest.pos.x, nearest.pos.z, 1.8)
+      this.tiger.shake(0.2)
+      audio.biteKill(this.panOf(nearest.pos))
+      this.hud.toast(`Fed — +${HUMAN.feedHeal} health`, 'good')
+      // Eating a hunter is worth a buff on top; their bodies are the good ones.
+      if (nearest.kind === 'hunter') this.applyBuff('ironHide')
+    }
+  }
+
   private applyBuff(id: keyof typeof BUFFS) {
     const def = BUFFS[id]
     const existing = this.buffs.find((b) => b.id === id)
@@ -362,6 +423,10 @@ export class Game {
       // Claws cleave: keep going and hit everyone in the arc.
       if (atk.kind === 'bite') break
     }
+
+    // The viewmodel only knows it connected because we tell it — this is what
+    // turns a swipe through empty air into a swipe that stops against a body.
+    this.tiger.onAttackResult(hitAny, killedAny)
 
     if (hitAny) {
       this.hud.hitMarker(killedAny)
@@ -510,6 +575,7 @@ export class Game {
     if (input.pressed('Space') && !this.tiger.grounded) audio.pounce()
 
     this.updateHumans(dt)
+    this.updateFeeding(dt)
     this.updatePickups(dt)
     this.updateTimers(dt)
     this.updateHud()
@@ -526,6 +592,13 @@ export class Game {
     for (const h of this.humans) {
       if (!h.group.visible) continue
       h.update(dt, this.tiger.pos, vis, noise, this.world, this.waveScale)
+
+      // A body keeps emptying itself out for a couple of seconds after it
+      // drops, and the pool under it spreads while it does.
+      if (h.bleedPulse) {
+        this.particles.blood(h.woundPos, SPURT_UP, 12, 0.7)
+        this.world.addBloodDecal(h.pos.x, h.pos.z, 0.7 + this.rng.next() * 0.5)
+      }
 
       if (!h.alive) continue
       if (h.alerted) {

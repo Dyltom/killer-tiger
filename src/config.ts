@@ -30,8 +30,14 @@ export const WORLD = {
 }
 
 export const TIGER = {
-  eyeHeight: 1.55,
-  crouchEyeHeight: 0.85,
+  /**
+   * Eye height of a big cat on all fours, not of a man. A Bengal tiger stands
+   * about 1.1 m at the shoulder and carries its head level with or just below
+   * that when stalking, so the grass comes up past your chin and the huts loom.
+   * That low, close-to-the-ground read is most of what sells being an animal.
+   */
+  eyeHeight: 1.10,
+  crouchEyeHeight: 0.55,
   radius: 0.75,
 
   walkSpeed: 6.2,
@@ -83,6 +89,18 @@ export const TIGER = {
   frenzyDamageMult: 2.2,
   frenzySpeedMult: 1.32,
 
+  /**
+   * Impact. A swipe that passes through a body and changes nothing reads as
+   * the paw floating in front of the camera rather than hitting anything, so a
+   * connecting blow briefly stalls its own animation and jolts the view — the
+   * same hit-stop every melee game uses to sell contact.
+   */
+  hitStop: 0.075,
+  killStop: 0.12,
+  hitJolt: 0.055,
+  /** Seconds of blood on the claws after a hit, and after a kill. */
+  clawBloodTime: 7,
+
   /** Detection: how loud the tiger is, scaled by movement state. */
   noiseSprint: 26,
   noiseWalk: 14,
@@ -125,7 +143,20 @@ export const HUMAN = {
   alertTime: 0.55,
   alertShoutRadius: 34,
   /** Corpse lingers this long, then sinks. */
-  corpseLife: 14,
+  corpseLife: 30,
+  /**
+   * A kill keeps bleeding for a moment after it drops. Two or three visible
+   * pulses is the difference between "the body fell over" and "you opened an
+   * artery" — one instant burst reads as a puff of red confetti.
+   */
+  bleedDuration: 2.6,
+  bleedInterval: 0.34,
+  /** Feeding on a body you dropped. This is the main way back to full health. */
+  feedRadius: 2.4,
+  feedTime: 1.1,
+  feedHeal: 34,
+  feedRage: 22,
+  feedScore: 60,
 }
 
 export const WAVE = {
@@ -185,6 +216,15 @@ export const CAMERA = {
   bobFreq: 9.2,
   bobAmp: 0.075,
   swayAmp: 0.05,
+  /**
+   * The bound. A quadruped at speed is airborne once per stride and lands on
+   * its forelegs, so the vertical is a rectified arc with a hard bottom rather
+   * than the symmetric sine a biped's head traces. `boundPitch` is the nose
+   * dropping as the forepaws take the landing.
+   */
+  boundAmp: 0.20,
+  boundPitch: 0.055,
+  boundRoll: 0.022,
 }
 
 export const COLORS = {
