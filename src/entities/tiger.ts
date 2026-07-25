@@ -654,6 +654,12 @@ export class Tiger {
   /** The landing spring: how far the eye is pushed down, and how fast. */
   private dip = 0
   private dipVel = 0
+  /**
+   * Multiplier on the braking force, 1 except in the moments after a landing.
+   * See TIGER.landGrip: it is what makes a pounce plant instead of skate, and it
+   * is a multiplier rather than a velocity subtraction so the camera never steps.
+   */
+  private gripBoost = 1
   private camShake = 0
   private shakeTime = 0
   private recoilY = 0
@@ -689,6 +695,8 @@ export class Tiger {
   pendingAttack: AttackEvent | null = null
   footstepEvent = false
   landedEvent = false
+  /** Downward speed the frame `landedEvent` fired, in m/s. Scales the landing. */
+  landImpact = 0
   /**
    * The frame a swing *starts*, and which way it travels: -1 for the left paw,
    * +1 for the right, 0 for the bite. The whoosh has to lead the impact by the
@@ -932,16 +940,39 @@ export class Tiger {
     // are set so both come out at about 2 cm on the animal: the humerus is 0.31 m
     // and the forearm 0.72, so the same number in both would put finger-width
     // stripes on one and hand-width bands on the other.
+    // 0.076 at the elbow, not 0.070: the forearm below it starts at 0.076 and the
+    // two used to meet with 6 mm of step between them, which reads as a cuff.
     const arm = (side: -1 | 1) => new THREE.Mesh(
-      limbGeo(side, (v) => 0.018 + 0.052 * smoothstep((v - 0.10) / 0.80),
+      limbGeo(side, (v) => 0.020 + 0.056 * smoothstep((v - 0.10) / 0.80),
         [0.34, 0.58, 0.80, 0.95], 0.055), pawMat)
     // The forearm is honest: a taper from the elbow to the wrist, with a belly of
     // flexor muscle in the top third and the bones close under the skin at the
     // carpus. Cats carry a lot of the foreleg's mass high, and a straight cone from
     // joint to joint is the silhouette of a table leg.
+    //
+    // The previous profile went 80 mm at the belly to 56 mm at the wrist, and 30%
+    // over 72 cm is not a taper you can see: on the render both forelegs were
+    // cylinders, and a cylinder ending in a paw is a broom. This one loses three
+    // fifths — 85 mm to 33 mm — and most of it goes in two places rather than
+    // evenly, because that is where it goes on the animal. The shaft sheds its
+    // girth through the middle third, and then the carpus necks in hard over the
+    // last 20 cm. The neck is the important half: the paw's own carpal mass is
+    // 78 mm across, so a wrist that arrives at 56 mm barely flares into it, and
+    // what makes a cat's foot read as a foot is that it is visibly wider than the
+    // leg it is on.
     const fore = (side: -1 | 1) => new THREE.Mesh(
-      limbGeo(side, (v) => 0.070 - 0.014 * v + 0.014 * Math.sin(Math.PI * Math.min(1, v * 1.7)),
-        [0.06, 0.22, 0.37, 0.53, 0.70, 0.87], 0.026), pawMat)
+      limbGeo(side, (v) => {
+        const shaft = 0.076 - 0.030 * smoothstep((v - 0.12) / 0.70)
+        const belly = 0.010 * Math.sin(Math.PI * Math.min(1, v * 2.4))
+        const wrist = 0.013 * smoothstep((v - 0.80) / 0.17)
+        return shaft + belly - wrist
+      },
+      // Four bands, irregularly spaced, and none below two thirds. Six evenly
+      // spaced ones down the whole length is a rugby sock, which is exactly what
+      // it looked like; a tiger's foreleg markings crowd toward the elbow and the
+      // lower leg is plain but for the single band across the carpus, which the
+      // paw draws itself.
+      [0.09, 0.26, 0.45, 0.64], 0.021), pawMat)
     this.armL = arm(-1)
     this.armR = arm(1)
     this.foreL = fore(-1)
@@ -1228,6 +1259,9 @@ export class Tiger {
       this.sinceSprint = 0
     }
 
+    // The landing's grip on the ground, relaxing back to ordinary braking.
+    this.gripBoost = 1 + (this.gripBoost - 1) * Math.exp(-dt / TIGER.landGripFall)
+
     let target = TIGER.walkSpeed
     if (this.sprinting) target = TIGER.sprintSpeed
     else if (this.crouching) target = TIGER.crouchSpeed
@@ -1254,13 +1288,19 @@ export class Tiger {
     // exponential that briefly replaced it was no better at the top: chasing
     // 6.2 m/s from rest at rate 7 is 43 m/s² on the first frame. Nothing that
     // reads speed, least of all the gait clock, stays smooth across either.
-    const moving = axis.x !== 0 || axis.z !== 0
     const ex = wantX - this.vel.x
     const ez = wantZ - this.vel.z
     const err = Math.hypot(ex, ez)
     if (err > 1e-6) {
-      const cap = (moving ? TIGER.accelForce : TIGER.brakeForce) * (this.grounded ? 1 : TIGER.airControl)
-      const knee = moving ? TIGER.accelKnee : TIGER.brakeKnee
+      // Braking is not "no key held" — it is the error pointing back against the
+      // way the tiger is already travelling. Choosing the cap off the key meant a
+      // pounce landing, which arrives at twice a sprint with the stick still
+      // pushed forward, shed its surplus at the *acceleration* force: the softest
+      // number here, applied to the fastest the tiger ever goes.
+      const braking = ex * this.vel.x + ez * this.vel.z < 0
+      const cap = (braking ? TIGER.brakeForce * this.gripBoost : TIGER.accelForce)
+        * (this.grounded ? 1 : TIGER.airControl)
+      const knee = braking ? TIGER.brakeKnee : TIGER.accelKnee
       // Never step past the target: at 20 fps a full-force frame is 0.7 m/s.
       const dv = Math.min(err, cap * Math.min(1, err / knee) * dt)
       this.vel.x += (ex / err) * dv
@@ -1322,6 +1362,13 @@ export class Tiger {
         // The impact, as an initial velocity for the spring in updateTimers.
         this.dipVel += Math.min(TIGER.landDipMax, Math.abs(this.vel.y) * TIGER.landDipTake)
         this.landedEvent = true
+        // Downward speed at contact, so the landing can be *heard* as hard or
+        // soft rather than being one fixed sample every time.
+        this.landImpact = Math.abs(this.vel.y)
+        // Forelegs planting. Scaled by how hard the landing was, so that a lip
+        // in the terrain the tiger was barely airborne over does not grab the
+        // ground like a pounce touching down.
+        this.gripBoost = 1 + (TIGER.landGrip - 1) * Math.min(1, Math.abs(this.vel.y) / 8)
         this.pouncing = false
       }
       this.pos.y = gy
@@ -1762,6 +1809,7 @@ export class Tiger {
     this.pouncing = false
     this.airTime = 0
     this.airBlend = 0
+    this.gripBoost = 1
     this.lastBeat = -1
     this.bobY = this.bobPitch = this.bobX = this.bobRoll = 0
     this.recoilY = 0

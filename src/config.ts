@@ -57,17 +57,42 @@ export const TIGER = {
    * on the first frame after the key goes down.
    *
    * 14 m/s^2 is about 1.4 g, which is what a big cat actually gets out of a
-   * standing start, and it takes 0.73 s to reach a walk. Braking is harder than
-   * driving — claws dug in — but it is still 1.25 m and just over half a second
-   * from a walk, against the old 0.27 m. That is the weight of the animal, and
-   * it is deliberate. Inside the knee the law is exponential at force/knee, 7/s
-   * up and 13/s down, so the arrival has no corner in it either.
+   * standing start, and it takes 0.73 s to reach a walk. Inside the knee the law
+   * is exponential at force/knee, 7/s up and 27/s down, so the arrival has no
+   * corner in it either.
+   *
+   * Braking used to be 16, barely above the drive, and the write-up called the
+   * resulting 1.25 m coast "the weight of the animal". It was not: measured, a
+   * walk took 0.47 s and 1.18 m to stop and a sprint 1.83 m, and the whole time
+   * the tiger was still travelling in a straight line with nothing driving it.
+   * A cat stopping is not a puck losing friction — it plants its forelegs and
+   * the deceleration is far higher than anything it can produce accelerating.
+   * 38 m/s^2 is under 4 g, well inside what a claw dug into dirt will hold, and
+   * it puts the walk stop at 0.53 m / 0.28 s and the sprint at 2.4 m / 0.48 s.
    */
   accelForce: 14,
   accelKnee: 2.0,
-  brakeForce: 16,
-  brakeKnee: 1.2,
+  brakeForce: 38,
+  brakeKnee: 1.4,
   airControl: 0.28,
+  /**
+   * Extra braking authority the instant the feet are down, and the time constant
+   * it falls back to 1 over.
+   *
+   * A pounce arrives at 12.8 m/s horizontally. Nothing in the landing branch
+   * used to touch horizontal velocity at all, so the tiger touched down at twice
+   * a sprint and skated — measured, 5 m over 0.80 s, with the legs planted and
+   * the gait clock running. That is the ice the sliding complaint was about.
+   *
+   * The fix is a multiplier on the brake rather than a subtraction from the
+   * velocity, because subtracting would put a 7 m/s step in the camera's motion
+   * on the contact frame, which is the exact failure the force model exists to
+   * avoid. Landing at 95 m/s^2 decaying to 38 sheds the surplus in about a fifth
+   * of a second and a metre, and the discontinuity is in acceleration only —
+   * where there is already one, gravity stopping.
+   */
+  landGrip: 2.5,
+  landGripFall: 0.18,
   /**
    * How far the tiger will follow ground that drops away underneath it before it
    * counts as having left it.
@@ -947,6 +972,10 @@ export const LEVELS = {
   pounce: 9.0,
   footstep: 4.5,
   pickup: 1.6,
+  // Feeding. Repeats every few hundred milliseconds for seconds at a time, so
+  // it sits well under the one-shots even though it is the sound the player is
+  // deliberately standing still to hear.
+  chew: 2.4,
   comboTick: 1.4,
   distantShot: 1.6,
 }
