@@ -200,7 +200,39 @@ function sweep(rings: readonly Ring[], radial = 12): THREE.BufferGeometry {
   g.setAttribute('uv', new THREE.BufferAttribute(uv, 2))
   g.setIndex(idx)
   g.computeVertexNormals()
+  weldSeam(g, radial, rings.length)
   return g
+}
+
+/**
+ * Average the normals of the two coincident vertices that close each ring.
+ *
+ * A ring carries radial+1 vertices so the last one can hold the wrapped UV, and
+ * the two copies sit exactly on top of each other — but computeVertexNormals
+ * only sees the faces on each copy's own side, so each comes out rotated half a
+ * facet from the truth, in opposite directions. Measured on a shirt at y 1.030,
+ * where the other fifteen vertices of the ring matched the ellipse's analytic
+ * normal to within a tenth of a degree, the two seam copies came out at +7.9 and
+ * -7.8 degrees against a true 0. A 15.7-degree kink is as strong a crease as a
+ * facet edge, and since c = 0 is sin and cos of zero it lands dead centre front:
+ * that is the hard vertical ridge down the middle of every shirt in the village.
+ *
+ * Only the lofts here need it. Three's own cylinders and spheres split their
+ * seam the same way but write analytic normals, so both copies already agree.
+ */
+function weldSeam(g: THREE.BufferGeometry, radial: number, rows: number) {
+  const nrm = g.getAttribute('normal') as THREE.BufferAttribute
+  const n = radial + 1
+  for (let r = 0; r < rows; r++) {
+    const a = r * n
+    const b = a + radial
+    const x = (nrm.getX(a) + nrm.getX(b)) / 2
+    const y = (nrm.getY(a) + nrm.getY(b)) / 2
+    const z = (nrm.getZ(a) + nrm.getZ(b)) / 2
+    const l = Math.hypot(x, y, z) || 1
+    nrm.setXYZ(a, x / l, y / l, z / l)
+    nrm.setXYZ(b, x / l, y / l, z / l)
+  }
 }
 
 /**
@@ -246,6 +278,77 @@ function sweepSplit(
   // shirt, which is exactly where SHIRT_SPLIT is. Overlapped, the same divergence
   // just slides one shirt-coloured surface a hair inside another one.
   return [cut(0, at + 1), cut(at, rings.length - 1)]
+}
+
+/** One hoop of a limb loft: height, and radius about the limb's axis. */
+type Hoop = readonly [number, number]
+
+/**
+ * A tube of varying radius threaded on the line a->b, closed at the top if the
+ * last hoop's radius is zero.
+ *
+ * A sleeve was a ball for the shoulder plus one or two cones for the arm, and
+ * every join between those was a place where two surfaces computed their normals
+ * from their own side only and disagreed. The shoulder ball's own pole was
+ * another one: a sphere splits its apex into one vertex per column, so the crown
+ * of every sleeve head carried a dark point. One surface has none of that, and
+ * it also lets the cap profile be authored freely rather than being whatever an
+ * ellipsoid happens to do — a sleeve head is not a hemisphere, it is nearly
+ * straight off the shoulder line and then turns hard at the top.
+ *
+ * Hoops ascend in y, like sweep's rings, and for the same reason.
+ */
+function loft(a: THREE.Vector3, b: THREE.Vector3, hoops: readonly Hoop[], radial = 12): THREE.BufferGeometry {
+  const n = radial + 1
+  const capped = hoops[hoops.length - 1]![1] <= 0
+  const rows = capped ? hoops.length - 1 : hoops.length
+  const y0 = hoops[0]![0]
+  const y1 = hoops[hoops.length - 1]![0]
+  const count = rows * n + (capped ? 1 : 0)
+  const pos = new Float32Array(count * 3)
+  const uv = new Float32Array(count * 2)
+  const idx: number[] = []
+  const put = (i: number, x: number, y: number, z: number, u: number, v: number) => {
+    pos[i * 3] = x
+    pos[i * 3 + 1] = y
+    pos[i * 3 + 2] = z
+    uv[i * 2] = u
+    uv[i * 2 + 1] = v
+  }
+  /** Where the axis is at this height. */
+  const axis = (y: number) => (y - a.y) / (b.y - a.y)
+  for (let r = 0; r < rows; r++) {
+    const [y, rad] = hoops[r]!
+    const t = axis(y)
+    const cx = a.x + (b.x - a.x) * t
+    const cz = a.z + (b.z - a.z) * t
+    for (let c = 0; c < n; c++) {
+      const u = c / radial
+      // 0..1, so reweave() can retile it off the finished bounding box; the
+      // sleeve is a fifth of the torso's circumference and would carry the
+      // weave at five times the scale if it copied sweep's fixed twelve tiles.
+      put(r * n + c, cx + Math.sin(u * TAU) * rad, y, cz - Math.cos(u * TAU) * rad, u, (y - y0) / (y1 - y0))
+    }
+  }
+  for (let r = 0; r < rows - 1; r++) {
+    for (let c = 0; c < radial; c++) {
+      const p = r * n + c
+      const q = (r + 1) * n + c
+      idx.push(p, q, p + 1, p + 1, q, q + 1)
+    }
+  }
+  if (capped) {
+    const t = axis(y1)
+    put(count - 1, a.x + (b.x - a.x) * t, y1, a.z + (b.z - a.z) * t, 0.5, 1)
+    for (let c = 0; c < radial; c++) idx.push((rows - 1) * n + c, count - 1, (rows - 1) * n + c + 1)
+  }
+  const g = new THREE.BufferGeometry()
+  g.setAttribute('position', new THREE.BufferAttribute(pos, 3))
+  g.setAttribute('uv', new THREE.BufferAttribute(uv, 2))
+  g.setIndex(idx)
+  g.computeVertexNormals()
+  weldSeam(g, radial, rows)
+  return g
 }
 
 /** Tiles of the cloth weave per metre. Set by sweep(); everything else matches it. */
@@ -1247,9 +1350,19 @@ export class Human {
     // neck — most of the reason the head looked bolted on. It is a *slope*: high
     // beside the neck, falling away to the point of the shoulder, and the
     // falling away is what leaves a neck standing above it.
+    //
+    // Under a shirt it is not a muscle, it is the shoulder line of the garment,
+    // and it has two extra jobs. It runs 1 cm further out and finishes on a
+    // radius small enough to be swallowed by the sleeve head — the old 0.056 end
+    // at x 0.136 poked 8 mm out through the sleeve as a triangular fin, which is
+    // the notch that was left at the top of each shoulder. And it is eight-sided
+    // rather than six, because at 6 the one surface joining the collar to the
+    // point of the shoulder is visibly a ridge with a flat either side of it.
     for (const s of ['L', 'R'] as const) {
       const sg = s === 'L' ? -1 : 1
-      upper(tube(V(sg * 0.020, 1.400, 0.016), V(sg * 0.136, 1.360, 0.004), 0.038, 0.056, 6))
+      upper(shirted
+        ? tube(V(sg * 0.022, 1.398, 0.014), V(sg * 0.146, 1.354, 0.002), 0.038, 0.042, 8)
+        : tube(V(sg * 0.020, 1.400, 0.016), V(sg * 0.136, 1.360, 0.004), 0.038, 0.056, 6))
     }
 
     // Neck always skin — a collar covers the base of it, not the whole thing.
@@ -1284,15 +1397,16 @@ export class Human {
     // ball that much bigger than the arm coming out of it is a puffed sleeve
     // however long the sleeve is. The height stays fixed at 0.080 so the crown
     // lands on 1.416 whatever the girth, level with the trapezius.
+    //
+    // Under a shirt there is no deltoid any more. Suppressing the ball was not
+    // enough on its own: a sphere of radius R butted onto a tube of radius R has
+    // no step, but it is still a hemisphere, and the render says a hemisphere on
+    // a shoulder is a puffed sleeve whatever it is joined to. The sleeve head is
+    // part of the sleeve now — see the loft below.
     for (const s of ['L', 'R'] as const) {
-      const x = (s === 'L' ? -1 : 1) * 0.158
-      // Bare for a vest: bare shoulders are the whole point of wearing one, and a
-      // deltoid is narrower front to back (0.066) than it is across. Under a
-      // shirt it is round instead, because the sleeve that starts on its equator
-      // is a circular tube and 6 mm of ellipsoid inside a circle is a lip running
-      // right round the point of the shoulder.
-      if (shirted) cloth(B_ARM(s), ell(x, 1.336, -0.004, r(0.072), 0.080, r(0.072)), Reg.shirt)
-      else skin(B_ARM(s), ell(x, 1.336, -0.004, r(0.072), 0.080, r(0.066)))
+      if (shirted) continue
+      // A deltoid is narrower front to back (0.066) than it is across.
+      skin(B_ARM(s), ell((s === 'L' ? -1 : 1) * 0.158, 1.336, -0.004, r(0.072), 0.080, r(0.066)))
     }
 
     /** A rolled edge. An open cylinder rim is a knife edge with backface culling
@@ -1412,13 +1526,27 @@ export class Human {
       const el = V(sg * 0.182, 1.053, 0)
       const wr = V(sg * 0.196, 0.797, 0)
       const bones = B_ARM(s)
+      /** The bare limb's own radius at a height. Every sleeve is cut from these. */
+      const upperR = (y: number) => r(0.058) + (r(0.048) - r(0.058)) * ((sh.y - y) / (sh.y - el.y))
+      const foreR = (y: number) => r(0.052) + (r(0.032) - r(0.052)) * ((el.y - y) / (el.y - wr.y))
       // The forearm was 9.4 cm across at the elbow and 5.8 cm at the wrist, and
       // its flexor belly measured 4.2 cm against a 4.2 cm tube — exactly flush,
       // so there was no belly at all and the whole limb was a straight taper.
       // That, more than the length, is what made the arms read as sticks: an arm
       // is not a cone, it is two spindles. The tube goes to 10.4 cm at the elbow
       // and 6.4 at the wrist and the belly now stands 2.5 mm proud of it.
-      skin(bones, tube(sh, el, r(0.058), r(0.048)))
+      //
+      // Under a shirt it starts at 1.310 instead of at the joint, the same trick
+      // the thigh plays at the hem. It was the arm, not the shoulder, that set
+      // the sleeve head's minimum size: a cap has to swallow 0.058 of arm at
+      // 1.383, which is 4.7 cm above the shoulder line, and only a shape close
+      // to a hemisphere is still that wide that far up. Everything above 1.310
+      // is inside a closed sleeve and the only thing its width can do is dictate
+      // the shape of the sleeve over it.
+      const armTop = shirted
+        ? new THREE.Vector3().lerpVectors(sh, el, (sh.y - 1.310) / (sh.y - el.y))
+        : sh
+      skin(bones, tube(armTop, el, upperR(armTop.y), r(0.048)))
       skin(bones, ell(sg * 0.17, 1.215, -0.016, r(0.055), 0.078, r(0.048)))   // biceps
       skin(bones, ell(sg * 0.182, 1.053, 0.004, r(0.050), 0.046, r(0.050)))   // elbow
       skin(bones, tube(el, wr, r(0.052), r(0.032)))
@@ -1437,53 +1565,61 @@ export class Human {
       }
       skin(bones, tube(V(sg * 0.184, 0.766, -0.018), V(sg * 0.166, 0.712, -0.042), 0.016, 0.009, 5))  // thumb
       if (cuff > 0) {
-        // A plain tube, parallel to the arm, ending at the elbow or at the
-        // wrist. It was a cone that started 0.056 at the shoulder and finished
-        // 0.066 at a hem three quarters of the way up the upper arm, which is a
-        // cap sleeve — wider at its opening than the arm it lets out, which is
-        // the one detail no man's work shirt has ever had.
+        // Sleeve head, sleeve and cuff as one lofted surface on the arm's axis.
         //
-        // Sized off the arm rather than guessed: the sleeve is the radius of the
-        // limb where it stops plus 8 mm of ease, so it hangs parallel whatever
-        // the girth. Anything crossing the elbow is two segments, because the
-        // forearm is a different taper from the upper arm and one straight tube
-        // spanning both sinks into the flexor belly halfway down.
-        const end = new THREE.Vector3().lerpVectors(sh, wr, Math.min(1, cuff / sh.distanceTo(wr)))
+        // It was a ball for the head and one or two cones for the arm. Every
+        // number in that was already sized off the limb — the ball sat on the
+        // deltoid's equator at the deltoid's own radius so there was no step
+        // between them — and it still read as a leg-of-mutton sleeve, because a
+        // sphere of radius R on a shoulder is a puffed sleeve whether or not the
+        // tube under it matches. A sleeve head is not a hemisphere. It leaves the
+        // shoulder line at about 10 degrees off vertical, holds that most of the
+        // way, and then turns through 70 in the last centimetre and a half.
+        //
         // Ease scales with the girth, because everything it has to clear does.
+        const end = new THREE.Vector3().lerpVectors(sh, wr, Math.min(1, cuff / sh.distanceTo(wr)))
         const ease = r(0.010)
-        const upperR = (y: number) => r(0.058) + (r(0.048) - r(0.058)) * ((sh.y - y) / (sh.y - el.y))
-        const foreR = (y: number) => r(0.052) + (r(0.032) - r(0.052)) * ((el.y - y) / (el.y - wr.y))
         // The upper arm is not its tube. The biceps belly reaches 6.4 cm from the
         // arm's axis at 1.215 where the tube under it is 5.5, and the sleeve was
         // cut to the tube, so a straight cone from the shoulder passed inside the
         // belly halfway down and a skin-coloured patch of biceps came through the
         // front of both sleeves on every shirt in the village. A twelve-sided
         // sleeve's flats sit a further 3.4% inside its radius, which is most of
-        // the remaining margin, so the taper is floored rather than trimmed: it
-        // narrows 0.072 to 0.066 over the upper arm and no further. That is 1.7 cm
-        // of air at the opening, which is what a loose short sleeve is.
+        // the remaining margin, so the taper is floored rather than trimmed.
         const widest = r(0.066)
-        // Where the sleeve starts, and how wide, is the whole puffed-shoulder
-        // problem. It used to begin at the shoulder joint (1.383) at 0.056, under
-        // a deltoid of 0.072 whose equator is 4.7 cm *lower* at 1.336 — so the
-        // shoulder was a ball 1.6 cm wider than the tube hanging out of it on each
-        // side, which is a gigot sleeve however straight the tube is.
-        //
-        // The deltoid cannot shrink: it has to swallow the 0.058 arm at 1.383,
-        // where an ellipsoid of half-height 0.080 is only 81% of the way out, so
-        // 0.058 / 0.809 = 0.0717 is its floor. So the sleeve rises to meet it
-        // instead — it starts on the arm axis at the deltoid's own equator and at
-        // the deltoid's own radius. A hemisphere of radius R on a tube of radius R
-        // has no step at all, which is what a set-in sleeve looks like.
-        const cap = new THREE.Vector3().lerpVectors(sh, wr, (sh.y - 1.336) / (sh.y - wr.y))
         const top = r(0.072)
-        if (end.y >= el.y) {
-          cloth(bones, tube(cap, end, top, Math.max(upperR(end.y) + ease, widest), 12), Reg.shirt)
-        } else {
-          const elbow = Math.max(r(0.052) + ease, widest)
-          cloth(bones, tube(cap, el, top, elbow, 12), Reg.shirt)
-          cloth(bones, tube(el, end, elbow, foreR(end.y) + ease, 12), Reg.shirt)
-        }
+        const limb = (y: number) => (y >= el.y ? upperR(y) : foreR(y))
+        const barrel = (y: number) => Math.max(limb(y) + ease, widest)
+        const hem = end.y
+        // The cuff. The floor above held the sleeve at 0.066 all the way to its
+        // opening, which on the short sleeve is 1.83 cm of radius more than the
+        // arm coming out of it, cut off square with no thickness — an abrupt
+        // step in diameter with a culled rim behind it. The floor is only there
+        // to clear the biceps at 1.215, and no hem is ever within 8 cm of that,
+        // so the last 4.5 cm are free to draw back in to the arm. It closes to
+        // 1 cm of ease and then turns under by 7 mm, which is a cut or rolled
+        // edge with something behind it rather than a knife edge.
+        const hoops: Hoop[] = [
+          [hem - 0.010, limb(hem) + r(0.003)],
+          [hem, limb(hem) + r(0.010)],
+          [hem + 0.045, barrel(hem + 0.045)],
+        ]
+        // The forearm is a different taper from the upper arm, so a sleeve that
+        // crosses the elbow needs a hoop on it or it sinks into the flexor belly.
+        if (hem + 0.045 < el.y) hoops.push([el.y, barrel(el.y)])
+        // The head. Full width to 1.330 — the shoulder line, and the widest the
+        // garment gets at 0.239 against the yoke's 0.185 — then four hoops that
+        // turn 10, 26, 57 and 77 degrees off vertical to a point at 1.409, which
+        // is the acromion (0.818 of stature) and 7 mm under where the old ball
+        // crowned. The same span as a hemisphere; nothing like the same profile.
+        hoops.push(
+          [1.330, top],
+          [1.362, top * 0.925],
+          [1.386, top * 0.775],
+          [1.400, top * 0.500],
+          [1.409, 0],
+        )
+        cloth(bones, loft(sh, wr, hoops), Reg.shirt)
       }
     }
 
