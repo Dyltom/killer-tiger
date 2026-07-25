@@ -632,6 +632,62 @@ export const LIGHTS = {
   lightUpAt: 0.18,
 }
 
+/**
+ * The sun's shadow map.
+ *
+ * Everything here exists because the game is played between half a metre and
+ * about thirty metres from the camera, and a shadow map sized for the 420 m
+ * draw distance has nothing left over for that range. The old setup put a
+ * 150 m box on 2048 texels — 73 mm per texel, which is a third of a boot —
+ * and then pushed the lookup away from the surface twice over:
+ *
+ *   - `normalBias` 0.05 slid the sample 5 cm along the receiver's normal,
+ *     which at a 19-degree sun is 15 cm of lateral slide on flat ground; and
+ *   - `bias` is a fraction of the *whole* near..far span, and that span was
+ *     1..360 m, so -0.0006 was 21.5 cm of depth offset — another 62 cm of
+ *     slide at the same sun angle.
+ *
+ * A fence post is 12 cm thick. Its shadow was being displaced by six times its
+ * own width, which is why posts, huts and villagers all read as pasted onto the
+ * ground: they were casting, just never anywhere near their own feet.
+ *
+ * The fix is to make the box small enough that a texel is centimetres, then
+ * shrink both biases to match. `depthPad` and the derived near/far are what
+ * keep `bias` meaningful — see fitShadow() in render/sky.ts.
+ */
+export const SHADOW = {
+  /**
+   * Metres of headroom above and below the box along the sun axis. Has to clear
+   * the tallest thing that can stand inside it — a ~9 m acacia on ~4 m of
+   * terrain relief — or a treetop pops out of the shadow map and its shadow
+   * vanishes. Every metre here costs depth precision, so it is not generous.
+   */
+  depthPad: 16,
+  /**
+   * Depth bias, in fractions of the near..far span. fitShadow() keeps that span
+   * at roughly 2.9x the box half-width, so at the default 34 m box this is
+   * about 1 cm of offset along the sun rather than the old 21.5 cm. Small
+   * enough to leave contact shadows touching; verified acne-free on lit slopes
+   * and hut walls at both a 19-degree and a 62-degree sun.
+   */
+  bias: -0.00008,
+  /**
+   * Offset along the receiver's normal before the lookup, in metres. This is
+   * the one that actually kills acne, and the rule of thumb is one to two
+   * texels: at 33 mm per texel, 2 cm. At a 19-degree sun it costs 6 cm of
+   * lateral slide, which is a quarter of a boot rather than three of them.
+   */
+  normalBias: 0.02,
+  /**
+   * PCF kernel radius, in texels. Note this is texels, not metres, so the
+   * penumbra shrank with the box: 2.2 texels was a 16 cm blur at 73 mm per
+   * texel and is a 7 cm blur at 33 mm. That is about right for a soft contact
+   * edge, and dropping it further just trades softness for the 5-tap Vogel
+   * disk's dither showing through.
+   */
+  radius: 2.2,
+}
+
 export type DayPhase = (typeof DAY.phases)[number]
 
 /**

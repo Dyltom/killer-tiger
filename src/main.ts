@@ -53,7 +53,11 @@ renderer.setSize(innerWidth, innerHeight)
 // Provisional; the quality manager takes this over below and keeps adjusting it.
 renderer.setPixelRatio(Math.min(devicePixelRatio, 1.5))
 renderer.shadowMap.enabled = true
-renderer.shadowMap.type = THREE.PCFSoftShadowMap
+// PCFSoftShadowMap is deprecated as of three r18x: the renderer swaps it for
+// PCFShadowMap on the first frame and warns about it on the console. Ask for
+// what we actually get. PCF is a five-tap Vogel disk of `shadow.radius` texels,
+// rotated per pixel by interleaved gradient noise.
+renderer.shadowMap.type = THREE.PCFShadowMap
 renderer.toneMapping = THREE.ACESFilmicToneMapping
 renderer.toneMappingExposure = POST.exposure
 renderer.outputColorSpace = THREE.SRGBColorSpace

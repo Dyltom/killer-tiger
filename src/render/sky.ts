@@ -13,7 +13,7 @@
  */
 import * as THREE from 'three'
 import { Sky as SkyDome } from 'three/examples/jsm/objects/Sky.js'
-import { DAY, SKY, WORLD } from '../config'
+import { DAY, SHADOW, SKY, WORLD } from '../config'
 import { atmosphere } from './atmosphere'
 import { DayNight } from './daynight'
 
@@ -158,28 +158,49 @@ export class Sky {
   readonly sun = new THREE.DirectionalLight(SKY.sunLight, SKY.sunIntensity)
   private bounce = new THREE.HemisphereLight(SKY.skyBounce, SKY.groundBounce, SKY.bounceIntensity)
 
+  /** Half-width of the shadow box. Both fitShadow() and the texel snap need it. */
+  private shadowExtent = 34
+  /** How far up-sun the light sits from the box centre, derived by fitShadow(). */
+  private shadowDist = 100
+
   private installLights() {
     const s = this.sun
-    // Shadow-caster distance is a compromise: far enough that the treeline
-    // still casts, near enough that 2k of shadow map has usable texel density.
-    const dist = 150
-    s.position.copy(this.sunDir).multiplyScalar(dist)
     s.castShadow = true
     s.shadow.mapSize.set(2048, 2048)
-    const c = s.shadow.camera
-    c.left = -90; c.right = 90; c.top = 90; c.bottom = -90
-    c.near = 1; c.far = dist * 2.4
-    s.shadow.bias = -0.0006
-    s.shadow.normalBias = 0.05
-    // A low sun rakes across the terrain, so shadows are long and their edges
-    // are the main thing selling the time of day. Soften them a little.
-    s.shadow.radius = 2.2
+    s.shadow.bias = SHADOW.bias
+    s.shadow.normalBias = SHADOW.normalBias
+    s.shadow.radius = SHADOW.radius
+    // Provisional; the quality tier calls setShadowQuality() before the first
+    // frame and re-fits at its own extent.
+    this.fitShadow(this.shadowExtent)
+    s.position.copy(this.sunDir).multiplyScalar(this.shadowDist)
     this.scene.add(s, s.target)
 
     // Sky/ground bounce on top of the IBL. The environment map handles most of
     // the ambient, but a hemisphere light is what keeps undersides from going
     // pure black on the low-end path where IBL intensity is dialled down.
     this.scene.add(this.bounce)
+  }
+
+  /**
+   * Size the ortho box and bracket its depth range around it.
+   *
+   * The depth range is the whole point. `shadow.bias` is a fraction of
+   * near..far, so a range chosen for the draw distance makes the bias worth
+   * decimetres; a range that only just contains the box makes it worth
+   * millimetres. Half the depth a caster can sit from the centre plane is the
+   * box's half-diagonal (the sun can rake along either axis) plus the tallest
+   * thing standing in it, and the light goes just outside that.
+   */
+  private fitShadow(extent: number) {
+    this.shadowExtent = extent
+    const halfDepth = extent * Math.SQRT2 + SHADOW.depthPad
+    this.shadowDist = halfDepth + 8
+    const c = this.sun.shadow.camera
+    c.left = -extent; c.right = extent; c.top = extent; c.bottom = -extent
+    c.near = 8
+    c.far = this.shadowDist + halfDepth
+    c.updateProjectionMatrix()
   }
 
   /**
@@ -194,9 +215,7 @@ export class Sky {
       s.shadow.map?.dispose()
       s.shadow.map = null
     }
-    const c = s.shadow.camera
-    c.left = -extent; c.right = extent; c.top = extent; c.bottom = -extent
-    c.updateProjectionMatrix()
+    this.fitShadow(extent)
   }
 
   // -------------------------------------------------------------------- IBL
@@ -322,10 +341,30 @@ export class Sky {
     this.moon.geometry.attributes.position!.needsUpdate = true
 
     // Keep the shadow frustum centred on the player instead of the origin —
-    // otherwise everything past ~95 m from the village loses its shadows.
-    this.sun.target.position.set(viewer.x, 0, viewer.z)
+    // otherwise everything past one box-width from the village loses its
+    // shadows. Snapped to whole shadow texels first: at 33 mm per texel the box
+    // is small enough that an unsnapped centre re-rasterises every caster into
+    // different texels every frame, and hard contact shadows crawl and shimmer
+    // along their own edges as you walk. Snapping means walking slides the map
+    // by whole texels, so an edge that is not moving in world space does not
+    // move in the map either.
+    const c = shadowCentre.set(viewer.x, 0, viewer.z)
+    const f = this.sunDir
+    // The same basis Object3D.lookAt() builds for the shadow camera: +Y up,
+    // z pointing from the target back toward the light. Straight overhead the
+    // cross product degenerates, so fall back to an arbitrary horizontal.
+    if (Math.abs(f.y) > 0.999) lightRight.set(1, 0, 0)
+    else lightRight.set(0, 1, 0).cross(f).normalize()
+    lightUp.crossVectors(f, lightRight)
+    const texel = (2 * this.shadowExtent) / this.sun.shadow.mapSize.x
+    const u = Math.round(c.dot(lightRight) / texel) * texel
+    const v = Math.round(c.dot(lightUp) / texel) * texel
+    const w = c.dot(f)
+    c.copy(lightRight).multiplyScalar(u).addScaledVector(lightUp, v).addScaledVector(f, w)
+
+    this.sun.target.position.copy(c)
     this.sun.target.updateMatrixWorld()
-    this.sun.position.copy(this.sunDir).multiplyScalar(150).add(this.sun.target.position)
+    this.sun.position.copy(f).multiplyScalar(this.shadowDist).add(c)
 
     // A PMREM bake is several milliseconds, so it happens on sun *movement*.
     // Over a full cycle that is about thirty bakes rather than forty thousand.
@@ -340,6 +379,9 @@ export class Sky {
 
 const domeSun = new THREE.Vector3()
 const moonAt = new THREE.Vector3()
+const shadowCentre = new THREE.Vector3()
+const lightRight = new THREE.Vector3()
+const lightUp = new THREE.Vector3()
 
 /**
  * Stars and moon sit on a sphere far outside the camera's 420 m far plane, so

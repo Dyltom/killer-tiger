@@ -22,7 +22,16 @@ export interface QualityPreset {
   /** Cap on devicePixelRatio. The single biggest lever on a retina display. */
   pixelRatio: number
   shadowMapSize: number
-  /** Half-extent of the sun's shadow frustum, in metres. */
+  /**
+   * Half-extent of the sun's shadow frustum, in metres.
+   *
+   * Read this together with `shadowMapSize`: what matters is the metres per
+   * texel, and the tiers below sit between 33 and 47 mm. Every one of them is a
+   * deliberate loss of distant shadows in exchange for shadows the player can
+   * see at their own feet — the hunt happens inside about 30 m, and a box big
+   * enough to shadow the treeline can only afford 73 mm per texel, which is
+   * wider than a fence post.
+   */
   shadowExtent: number
   godrays: boolean
   bloom: boolean
@@ -33,10 +42,16 @@ export interface QualityPreset {
 
 /** Ordered worst to best; `tier` indexes this. */
 export const PRESETS: QualityPreset[] = [
-  { name: 'Low',    pixelRatio: 1.0,  shadowMapSize: 1024, shadowExtent: 60, godrays: false, bloom: false, smaa: false, foliageDistance: 0.5 },
-  { name: 'Medium', pixelRatio: 1.25, shadowMapSize: 2048, shadowExtent: 75, godrays: false, bloom: true,  smaa: true,  foliageDistance: 0.72 },
-  { name: 'High',   pixelRatio: 1.5,  shadowMapSize: 2048, shadowExtent: 90, godrays: true,  bloom: true,  smaa: true,  foliageDistance: 1.0 },
-  { name: 'Ultra',  pixelRatio: 2.0,  shadowMapSize: 4096, shadowExtent: 95, godrays: true,  bloom: true,  smaa: true,  foliageDistance: 1.25 },
+  // mm/texel:                                                    47
+  { name: 'Low',    pixelRatio: 1.0,  shadowMapSize: 1024, shadowExtent: 24, godrays: false, bloom: false, smaa: false, foliageDistance: 0.5 },
+  // 29 mm/texel — the tightest of the four, because a 1024 map at this extent
+  // would be the low tier and 2048 has the density to spend on coverage.
+  { name: 'Medium', pixelRatio: 1.25, shadowMapSize: 2048, shadowExtent: 30, godrays: false, bloom: true,  smaa: true,  foliageDistance: 0.72 },
+  // 33 mm/texel. This is where most machines settle, so it is the one tuned
+  // against: 34 m covers the whole 30 m engagement range plus the huts behind it.
+  { name: 'High',   pixelRatio: 1.5,  shadowMapSize: 2048, shadowExtent: 34, godrays: true,  bloom: true,  smaa: true,  foliageDistance: 1.0 },
+  // 21 mm/texel *and* 44 m of reach — 4096 is the only tier that can buy both.
+  { name: 'Ultra',  pixelRatio: 2.0,  shadowMapSize: 4096, shadowExtent: 44, godrays: true,  bloom: true,  smaa: true,  foliageDistance: 1.25 },
 ]
 
 /** 60 fps target with a little headroom before we call a frame late. */
