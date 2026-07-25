@@ -175,7 +175,11 @@ function frame(dt: number) {
   game.update(dt, input, controlling)
   input.endFrame()
 
-  sky.update(dt, game.tiger.pos)
+  // Pause freezes the clock too; coming back to a different time of day after
+  // an alt-tab reads as a bug, not as a cycle.
+  if (game.state === 'playing') sky.update(dt, game.tiger.pos)
+  else sky.update(0, game.tiger.pos)
+  renderer.toneMappingExposure = POST.exposure * sky.day.state.exposure
 
   // Frenzy ramps the grade up and back down over its last second rather than
   // snapping off; hurt is driven by how close to death the tiger is.

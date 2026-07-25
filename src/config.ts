@@ -227,8 +227,13 @@ export const SKY = {
   domeIntensity: 0.42,
   /** Sky dome radius. Rides with the camera, so it only has to clear the props. */
   radius: 4000,
-  /** Cloud dome drift, radians/second. */
-  cloudDrift: 0.0035,
+  /**
+   * Cloud drift. The dome shader multiplies this by time and adds it to a UV
+   * that has already been scaled up by 1000 for the fbm lookup, so 0.0035 moved
+   * the cloud field 3.5 noise cells a second — the whole sky boiling. At 1.2e-5
+   * a cloud takes about a minute and a half to cross its own width.
+   */
+  cloudDrift: 0.000012,
   /** Directional (sun) light. */
   sunLight: 0xffd0a0,
   sunIntensity: 3.3,
@@ -241,8 +246,72 @@ export const SKY = {
 }
 
 /**
- * Height-attenuated, view-direction-tinted fog. Baked into the shader as
- * constants — see render/atmosphere.ts.
+ * The day. One full rotation takes `period` seconds; `start` is where a hunt
+ * begins, expressed as a fraction of that rotation (0 = sunrise, 0.25 = noon,
+ * 0.5 = sunset, 0.75 = midnight).
+ *
+ * `phases` is the palette. Everything the time of day touches — sky model,
+ * sun colour and strength, bounce, IBL, haze and exposure — is keyframed here
+ * and interpolated, so adding a new mood means adding a row rather than
+ * threading another value through four files.
+ */
+export const DAY = {
+  period: 720,
+  /** Late golden hour: the hunt opens on the light the game was designed for. */
+  start: 0.472,
+  /** Peak sun elevation in degrees; elevation follows sin(2*pi*t) times this. */
+  maxElevation: 62,
+  /**
+   * Preetham's sun-intensity term hits exactly zero at a 92.3-degree zenith
+   * angle, so anything below about -2.3 degrees renders a pure black dome, not
+   * a dark one. Holding the dome's sun at -1 degree leaves roughly 1.5% of
+   * daylight radiance — a deep navy with a faintly lit horizon, which is what a
+   * moonlit sky actually looks like. The true sun keeps going down; only the
+   * dome's copy is clamped.
+   */
+  domeMinElevation: -1,
+  /** Elevation at which the key light hands over from sun to moon. */
+  moonHandoff: -1.5,
+  /** Re-bake the IBL when the sun has moved this many degrees. */
+  envStepDegrees: 4,
+
+  /**
+   * Preetham has nothing to say about a sky lit only by moonlight, so below the
+   * horizon its zenith collapses to black and the night reads as a rendering
+   * fault rather than as night. These two colours are added on top of the dome,
+   * faded in by the same `stars` ramp, to give the sky a floor.
+   */
+  nightZenith: 0x0a1230,
+  nightHorizon: 0x22355e,
+  /** Moon disc size in pixels at 1x pixel ratio, and its halo multiplier. */
+  moonSize: 34,
+  moonGlow: 4.5,
+
+  phases: [
+    // t      turbidity rayleigh  mie    dome   sun       sunI  skyBounce gndBounce bounceI env   fogSun    fogAway   density  stars exposure
+    { t: 0.000, turbidity: 4.2, rayleigh: 3.4, mie: 0.010, dome: 0.55, sun: 0xffb070, sunI: 1.4,  skyB: 0x9fb6d8, gndB: 0x6a5a38, bounceI: 0.85, env: 1.6, fogSun: 0xffb98a, fogAway: 0x9aa9bd, density: 0.0075, stars: 0.25, exposure: 1.00 },
+    { t: 0.120, turbidity: 2.6, rayleigh: 2.2, mie: 0.005, dome: 0.34, sun: 0xfff0d8, sunI: 3.6,  skyB: 0x8fb4e6, gndB: 0x7a6a48, bounceI: 1.00, env: 2.2, fogSun: 0xdfe6f0, fogAway: 0xa8bcd6, density: 0.0040, stars: 0.00, exposure: 0.95 },
+    { t: 0.250, turbidity: 2.2, rayleigh: 1.6, mie: 0.004, dome: 0.30, sun: 0xfffaf0, sunI: 4.2,  skyB: 0x9cc4ff, gndB: 0x8a7a58, bounceI: 1.05, env: 2.4, fogSun: 0xe8eef6, fogAway: 0xb4c6dc, density: 0.0032, stars: 0.00, exposure: 0.92 },
+    { t: 0.400, turbidity: 2.8, rayleigh: 2.4, mie: 0.005, dome: 0.36, sun: 0xffe6c0, sunI: 3.8,  skyB: 0x8fb0dd, gndB: 0x7d6a44, bounceI: 1.05, env: 2.3, fogSun: 0xffd7a8, fogAway: 0xa3b4cc, density: 0.0042, stars: 0.00, exposure: 0.96 },
+    { t: 0.472, turbidity: 3.2, rayleigh: 3.0, mie: 0.006, dome: 0.42, sun: 0xffd0a0, sunI: 3.3,  skyB: 0x6f90bd, gndB: 0x6a5a38, bounceI: 1.15, env: 2.4, fogSun: 0xffc286, fogAway: 0x8fa2ba, density: 0.0055, stars: 0.05, exposure: 1.00 },
+    { t: 0.520, turbidity: 4.6, rayleigh: 4.0, mie: 0.011, dome: 0.46, sun: 0xff8b46, sunI: 1.5,  skyB: 0x50648c, gndB: 0x50432c, bounceI: 1.20, env: 2.1, fogSun: 0xff9a5a, fogAway: 0x6d7e9c, density: 0.0075, stars: 0.30, exposure: 1.05 },
+    // Night is lit by a moon, not by nothing. Real moonlight is about a
+    // millionth of daylight, which on screen is an unplayable black frame — so
+    // the night rows are a stylised moonlit blue: bright enough to read the
+    // terrain and the prey, cold and low-contrast enough to still feel like
+    // night. The exposure lift and the desaturated key light do most of it.
+    { t: 0.580, turbidity: 5.4, rayleigh: 4.6, mie: 0.008, dome: 1.10, sun: 0xa8c0f0, sunI: 1.90, skyB: 0x54739f, gndB: 0x35342e, bounceI: 2.20, env: 2.4, fogSun: 0x6f7fa8, fogAway: 0x3f4b68, density: 0.0080, stars: 0.85, exposure: 1.15 },
+    { t: 0.750, turbidity: 6.0, rayleigh: 3.0, mie: 0.004, dome: 1.40, sun: 0xc2d4ff, sunI: 2.60, skyB: 0x5878b0, gndB: 0x333844, bounceI: 2.40, env: 2.6, fogSun: 0x7f9ad4, fogAway: 0x2c3a58, density: 0.0075, stars: 1.00, exposure: 1.25 },
+    { t: 0.920, turbidity: 5.0, rayleigh: 4.2, mie: 0.006, dome: 1.15, sun: 0xb6c8ec, sunI: 2.00, skyB: 0x56749f, gndB: 0x36342e, bounceI: 2.20, env: 2.4, fogSun: 0x7d8cb4, fogAway: 0x45526e, density: 0.0085, stars: 0.70, exposure: 1.15 },
+  ],
+}
+
+export type DayPhase = (typeof DAY.phases)[number]
+
+/**
+ * Height-attenuated, view-direction-tinted fog. The colours and density here
+ * are only the starting point — DAY drives them at runtime through the shared
+ * uniforms in render/atmosphere.ts.
  */
 export const FOG = {
   // Tuned so a hut at 40 m still shows its thatch texture (~15% fogged) and

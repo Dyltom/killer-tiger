@@ -12,9 +12,13 @@
  * stock MeshStandardMaterial at once — patching materials individually would
  * mean remembering to do it for every mesh anyone ever adds.
  *
- * All parameters are baked into the GLSL as literals rather than uniforms. The
- * time of day never changes at runtime, and three deep-clones uniform values
- * per material, so a shared uniform object would not have propagated anyway.
+ * The sun direction and the two haze colours change all day, so they have to be
+ * uniforms. Three deep-clones uniform *values* per material, which normally
+ * means a shared object doesn't stay shared — but cloneUniforms only clones
+ * three's own types and real Arrays, so a Float32Array value is copied by
+ * reference and every material ends up pointing at the same three floats.
+ * Writing into it once a frame therefore updates the whole scene, with no
+ * per-material bookkeeping and no recompiles.
  */
 import * as THREE from 'three'
 import { FOG, SKY } from '../config'
@@ -26,14 +30,34 @@ export function sunDirection(target = new THREE.Vector3()): THREE.Vector3 {
   return target.setFromSphericalCoords(1, phi, theta)
 }
 
+/**
+ * Live atmosphere state, shared by reference with every fog-enabled material.
+ * Written by DayNight; read by the fog chunk below.
+ */
+export const atmosphere = {
+  sunDir: new Float32Array([0, 0.18, -0.98]),
+  /** Linear-space haze colour looking into the sun... */
+  sunColor: new Float32Array(3),
+  /** ...and looking away from it. */
+  awayColor: new Float32Array(3),
+  /** x: density, y: height falloff, z: far-plane haze floor. */
+  params: new Float32Array([FOG.density, FOG.heightFalloff, FOG.farFloor]),
+}
+
+const FOG_UNIFORMS = {
+  fogSunDir: { value: atmosphere.sunDir },
+  fogSunColor: { value: atmosphere.sunColor },
+  fogAwayColor: { value: atmosphere.awayColor },
+  fogParams: { value: atmosphere.params },
+}
+
+function toLinear(hex: number, out: Float32Array) {
+  const c = new THREE.Color(hex).convertSRGBToLinear()
+  out[0] = c.r; out[1] = c.g; out[2] = c.b
+}
+
 /** Fixed-point GLSL literal. Plain `toString` can emit `1e-7`, which is not valid GLSL. */
 const f = (n: number) => n.toFixed(6)
-
-/** `vec3(r, g, b)` in linear space, which is what the fog chunk operates in. */
-function linearVec3(hex: number): string {
-  const c = new THREE.Color(hex).convertSRGBToLinear()
-  return `vec3(${f(c.r)}, ${f(c.g)}, ${f(c.b)})`
-}
 
 let installed = false
 
@@ -45,7 +69,17 @@ export function installAtmosphericFog() {
   if (installed) return
   installed = true
 
-  const sun = sunDirection()
+  toLinear(FOG.sunColor, atmosphere.sunColor)
+  toLinear(FOG.awayColor, atmosphere.awayColor)
+  sunDirection().toArray(atmosphere.sunDir)
+
+  // Every built-in material's uniform set is cloned from ShaderLib the first
+  // time it compiles, so the four extra uniforms have to be in there before any
+  // material is built. Only fog-enabled shaders declare them.
+  for (const key of Object.keys(THREE.ShaderLib)) {
+    const u = THREE.ShaderLib[key as keyof typeof THREE.ShaderLib]!.uniforms as Record<string, unknown>
+    if ('fogColor' in u) Object.assign(u, FOG_UNIFORMS)
+  }
 
   THREE.ShaderChunk.fog_pars_vertex = /* glsl */ `
     #ifdef USE_FOG
@@ -71,6 +105,10 @@ export function installAtmosphericFog() {
     #ifdef USE_FOG
       uniform vec3 fogColor;
       uniform float fogDensity;
+      uniform vec3 fogSunDir;
+      uniform vec3 fogSunColor;
+      uniform vec3 fogAwayColor;
+      uniform vec3 fogParams;
       varying float vFogDepth;
       varying vec3 vFogWorld;
     #endif
@@ -86,9 +124,9 @@ export function installAtmosphericFog() {
       // Analytic integral of exp(-height * b) density along the view ray
       // (Quilez). The near-horizontal case is split out because the closed
       // form divides by the ray's vertical component.
-      const float B = ${f(FOG.heightFalloff)};
-      const float D = ${f(FOG.density)};
-      float baseline = D * exp( - max( cameraPosition.y - ${f(0)}, -40.0 ) * B );
+      float B = fogParams.y;
+      float D = fogParams.x;
+      float baseline = D * exp( - max( cameraPosition.y, -40.0 ) * B );
       float ry = fogDir.y;
       float optical = abs( ry ) < 1e-3
         ? baseline * fogDist
@@ -97,13 +135,13 @@ export function installAtmosphericFog() {
 
       // Nothing should ever be a fully crisp silhouette at the far plane, or
       // the boundary cliffs pop against the sky.
-      fogFactor = max( fogFactor, smoothstep( ${f(FOG.maxDistance * 0.45)}, ${f(FOG.maxDistance)}, fogDist ) * ${f(FOG.farFloor)} );
+      fogFactor = max( fogFactor, smoothstep( ${f(FOG.maxDistance * 0.45)}, ${f(FOG.maxDistance)}, fogDist ) * fogParams.z );
 
       // Warm looking into the sun, cool away from it. The tight lobe is the
       // scattering hotspot; the wide one keeps the whole sunward half warm.
-      float sunAmt = max( dot( fogDir, vec3(${f(sun.x)}, ${f(sun.y)}, ${f(sun.z)}) ), 0.0 );
-      vec3 fogCol = mix( ${linearVec3(FOG.awayColor)}, ${linearVec3(FOG.sunColor)}, pow( sunAmt, 5.0 ) );
-      fogCol = mix( fogCol, ${linearVec3(FOG.sunColor)} * 0.72, pow( sunAmt, 1.6 ) * 0.38 );
+      float sunAmt = max( dot( fogDir, fogSunDir ), 0.0 );
+      vec3 fogCol = mix( fogAwayColor, fogSunColor, pow( sunAmt, 5.0 ) );
+      fogCol = mix( fogCol, fogSunColor * 0.72, pow( sunAmt, 1.6 ) * 0.38 );
 
       gl_FragColor.rgb = mix( gl_FragColor.rgb, fogCol, clamp( fogFactor, 0.0, 1.0 ) );
     }
