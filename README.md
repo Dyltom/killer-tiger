@@ -87,7 +87,17 @@ Everything else is synthesised in code on first load:
   run through `PMREMGenerator` so the same sky that is drawn behind the world is
   also the image-based light on everything in it.
 - **Audio** — WebAudio oscillators and shaped noise buffers. Roars, gunshots,
-  screams and ambience are all synthesised per call.
+  screams and ambience are all synthesised per call, placed by an inverse-square
+  distance model with air absorption, speed-of-sound arrival delay, and sends
+  into two convolution reverbs built from synthetic impulse responses — a close
+  treeline and a valley that answers about three seconds later. The whole mix
+  runs through a glue compressor and a soft clipper whose linear region is wide
+  enough that only the apex sounds ever reach it.
+- **Score** — one evolving piece rather than a playlist. A lookahead scheduler
+  runs a single bar clock for the session and fades nine layers in against the
+  hunt number and how much trouble the player is in: hunt 1 is a drone and a
+  heartbeat, hunt 8 under three rifles is drums, ostinato, brass and a
+  dissonant string cluster, sixty beats a minute faster and a mode darker.
 - **Particles** — one pooled `Points` system with a custom shader for blood, gore,
   dust, sparks and muzzle flash.
 
@@ -101,7 +111,7 @@ src/
 ├── config.ts            every tunable number in the game
 ├── main.ts              renderer, loop, overlay routing
 ├── game.ts              simulation: waves, combat, scoring, pickups, buffs
-├── engine/              input, procedural audio, seeded RNG + noise
+├── engine/              input, procedural audio, adaptive score, seeded RNG + noise
 ├── entities/            tiger, human, pickup, particles
 ├── render/              sky, image-based lighting, atmosphere, post-processing
 ├── world/               terrain, village, flora, wind, materials, textures

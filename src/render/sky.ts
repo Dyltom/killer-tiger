@@ -52,6 +52,7 @@ export class Sky {
     mat.uniforms.cloudMoon = { value: new THREE.Color(SKY.cloudMoon) }
     mat.uniforms.cloudBright = { value: SKY.cloudBright }
     mat.uniforms.nightAmount = { value: 0 }
+    mat.uniforms.sunGlow = { value: 1 }
     mat.fragmentShader = mat.fragmentShader
       .replace('void main() {', /* glsl */ `
         uniform float skyIntensity;
@@ -60,11 +61,23 @@ export class Sky {
         uniform vec3 cloudMoon;
         uniform float cloudBright;
         uniform float nightAmount;
+        uniform float sunGlow;
         // How much cloud this pixel ended up with, carried out of the stock
         // cloud block below so the night gradient can be occluded by it.
         float gCloud;
         void main() {
           gCloud = 0.0;`)
+      // See DayNight.sunGlow(). The Mie lobe is the only strongly
+      // direction-dependent term in the model, so it is the one that reads as a
+      // sun rather than as a sky — and because the model's sun is clamped just
+      // under the horizon, its own fade freezes there and the lobe never went
+      // out. Gating betaMTheta rather than mPhase keeps the two places Lin uses
+      // it consistent, and leaves the broad Rayleigh remnant to light the night
+      // horizon on its own.
+      .replace(
+        'vec3 betaMTheta = vBetaM * mPhase;',
+        'vec3 betaMTheta = vBetaM * mPhase * sunGlow;',
+      )
       // The stock shader projects the view ray onto a flat cloud plane by
       // dividing by direction.y, which goes to zero at the horizon — so the
       // noise coordinate goes to infinity there and `fract( sin( dot( huge,
@@ -213,8 +226,28 @@ export class Sky {
 
   private bakeEnvironment() {
     if (!this.pmrem || !this.envCapture) return
+    // The solar disc has to come out of the *bake*, and it is the single biggest
+    // thing that was wrong with daylight in this game.
+    //
+    // Preetham draws the disc at sunE * 19000 — four orders of magnitude over the
+    // sky around it — and PMREM prefilters that into the roughness-1 mip which
+    // every diffuse surface reads as ambient. Measured at noon that was 8.5 units
+    // of ground irradiance from the environment against 0.5 from the
+    // DirectionalLight: sixteen times the key light, arriving from every direction
+    // at once. Which is why the ground clipped to white all morning, why it got
+    // worse toward midday and was fine at golden hour (the disc is extinguished at
+    // a low sun) — and why the terrain lost its texture, since at a 5% key share
+    // there was almost no directional light left for a normal map to shade
+    // against. No exposure value can hold both ends of a 22x swing.
+    //
+    // The visible dome keeps its sun. Only the light bake loses it, and the energy
+    // is back in DAY.phases' sunI where it can cast a shadow.
+    const u = this.dome.material.uniforms
+    const disc = u.showSunDisc!.value
+    u.showSunDisc!.value = 0
     const previous = this.envTarget
     this.envTarget = this.pmrem.fromScene(this.envCapture, 0, 1, SKY.radius * 2)
+    u.showSunDisc!.value = disc
     this.scene.environment = this.envTarget.texture
     // Disposing after the swap, so the scene is never pointing at a freed texture.
     previous?.dispose()
@@ -240,16 +273,30 @@ export class Sky {
       Math.atan2(this.day.sunDir.x, this.day.sunDir.z),
     )
     u.sunPosition!.value.copy(domeSun)
+    // Where the dome's sun is and whether it may be *seen* are two questions.
+    // Both of these answer the second one from the true elevation, so the clamp
+    // above can keep the model out of its black hole without also keeping a lit
+    // sun on the horizon until dawn.
+    u.showSunDisc!.value = this.day.sunDisc()
+    u.sunGlow!.value = this.day.sunGlow()
 
     this.sun.color.copy(s.sun)
-    this.sun.intensity = s.sunI
+    // sunI is authored as ground irradiance, not as light intensity — the
+    // elevation term is divided back out here. See DayNight.keyIntensity().
+    this.sun.intensity = this.day.keyIntensity()
     this.bounce.color.copy(s.skyB)
     this.bounce.groundColor.copy(s.gndB)
     this.bounce.intensity = s.bounceI
     this.scene.environmentIntensity = s.env
-    this.starMat.uniforms.uAlpha!.value = s.stars
-    u.nightAmount!.value = s.stars
-    ;(this.moon.material as THREE.ShaderMaterial).uniforms.uAlpha!.value = s.stars
+    // See DayNight.nightSky: the darkness ramp on its own still had a sixth of
+    // the night up at mid-morning, so the sky wore a navy veil and faint stars
+    // with the sun well clear of the horizon.
+    const night = this.day.nightSky
+    this.starMat.uniforms.uAlpha!.value = night
+    u.nightAmount!.value = night
+    // The moon is the anti-solar point, so it is under the ground all day. Its
+    // own horizon fade is what stops it being drawn there.
+    ;(this.moon.material as THREE.ShaderMaterial).uniforms.uAlpha!.value = night * this.day.moonVisibility()
 
     // Shared by reference with every fog-enabled material in the scene.
     this.day.keyDir.toArray(atmosphere.sunDir)
@@ -299,6 +346,14 @@ const moonAt = new THREE.Vector3()
  * their vertices would be clipped away entirely. Both vertex shaders push
  * gl_Position.z to w afterwards, which pins them to the far plane and sidesteps
  * the clip — the same trick three's own Sky uses.
+ *
+ * That pin is also what lets both of them depth-test, which they must. Additive
+ * blending makes them transparent materials, and the transparent queue is drawn
+ * after every opaque object in the world no matter what renderOrder says — so
+ * with the test off, a moon behind a hut, a tree or the ground was drawn *over*
+ * it. That is the "through the map" moon. Pinned, they land at depth 1.0, which
+ * still passes on any pixel the world never wrote to, so the sky keeps them and
+ * the world occludes them.
  */
 const STAR_RADIUS = SKY.radius * 0.85
 const PIN_TO_FAR = 'gl_Position.z = gl_Position.w;'
@@ -360,7 +415,8 @@ function buildStars(): { points: THREE.Points; material: THREE.ShaderMaterial } 
     `,
     blending: THREE.AdditiveBlending,
     depthWrite: false,
-    depthTest: false,
+    // Explicit, and load-bearing: see PIN_TO_FAR.
+    depthTest: true,
     transparent: true,
     toneMapped: false,
   })
@@ -410,7 +466,8 @@ function buildMoon(): THREE.Points {
     `,
     blending: THREE.AdditiveBlending,
     depthWrite: false,
-    depthTest: false,
+    // Explicit, and load-bearing: see PIN_TO_FAR.
+    depthTest: true,
     transparent: true,
     toneMapped: false,
   })

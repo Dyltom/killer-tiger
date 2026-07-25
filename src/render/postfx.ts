@@ -355,7 +355,11 @@ export class PostFX {
     g.uTime!.value = this.time
     g.uFrenzy!.value = frenzy
     g.uHurt!.value = hurt
-    g.uNight!.value = night * POST.nightEye
+    // Kneed, not scaled: `darkness` still reads 0.18 with the sun 17 degrees up,
+    // and the night eye was lifting and desaturating the morning because of it.
+    // Above nightEyeFull the multiplier is exactly 1, so the night is unchanged.
+    const dark = night * THREE.MathUtils.smoothstep(night, POST.nightEyeOnset, POST.nightEyeFull)
+    g.uNight!.value = dark * POST.nightEye
     // Frenzy also blows the bloom out, which is what makes it read as a rush
     // rather than a colour filter.
     this.bloom.strength = POST.bloomStrength * (1 + frenzy * 1.6)

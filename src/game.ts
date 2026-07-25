@@ -4,7 +4,7 @@
  */
 import * as THREE from 'three'
 import { BUFFS, COMBO, HUMAN, PICKUP, STORAGE_KEY, STORY, TIGER, WAVE, WORLD } from './config'
-import { audio } from './engine/audio'
+import { audio, type Place } from './engine/audio'
 import type { Input } from './engine/input'
 import { clamp, Rng } from './engine/rng'
 import { Human } from './entities/human'
@@ -60,6 +60,8 @@ export class Game {
   private pickupTimer = PICKUP.spawnInterval * 0.4
   private spawnTimer = 0
   private time = 0
+  /** Which forepaw the next step belongs to; only the mix cares. */
+  private footIsLeft = false
   best = 0
 
   onStateChange: ((s: GameState) => void) | null = null
@@ -133,7 +135,9 @@ export class Game {
     this.tiger.reset()
     this.fillWave(true)
     this.setState('playing')
-    audio.waveStart()
+    audio.setMusicMode('hunt')
+    audio.setWave(this.wave)
+    audio.waveStart(this.wave)
     this.tellStory('good')
   }
 
@@ -231,7 +235,8 @@ export class Game {
     this.interWave = WAVE.interWaveDelay
     this.tiger.heal(22)
     this.tiger.addRage(20)
-    audio.waveStart()
+    audio.setWave(this.wave)
+    audio.waveStart(this.wave)
     this.tellStory('bad')
     this.spawnPickupNear(this.tiger.pos, 'meat')
   }
@@ -355,7 +360,7 @@ export class Game {
       this.particles.gore(nearest.chestPos, 14)
       this.world.addBloodDecal(nearest.pos.x, nearest.pos.z, 1.8)
       this.tiger.shake(0.2)
-      audio.biteKill(this.panOf(nearest.pos))
+      audio.biteKill(this.placeOf(nearest.pos))
       this.hud.toast(`Fed — +${HUMAN.feedHeal} health`, 'good')
       // Eating a hunter is worth a buff on top; their bodies are the good ones.
       if (nearest.kind === 'hunter') this.applyBuff('ironHide')
@@ -431,8 +436,8 @@ export class Game {
         this.onKill(h, stealth ? 'Silent kill' : atk.kind === 'bite' ? 'Throat torn' : 'Mauled')
         if (atk.kind === 'bite') this.tiger.heal(TIGER.biteHeal)
       } else {
-        audio.clawHit(this.panOf(h.pos))
-        audio.scream(this.panOf(h.pos), h.kind === 'hunter' ? 0.85 : 1.05)
+        audio.clawHit(this.placeOf(h.pos))
+        audio.scream(this.placeOf(h.pos), h.kind === 'hunter' ? 0.85 : 1.05)
       }
       // Claws cleave: keep going and hit everyone in the arc.
       if (atk.kind === 'bite') break
@@ -445,9 +450,10 @@ export class Game {
     if (hitAny) {
       this.hud.hitMarker(killedAny)
       this.tiger.shake(killedAny ? 0.32 : 0.14)
-      if (atk.kind === 'bite') audio.biteKill(0)
+      if (atk.kind === 'bite') audio.biteKill()
     } else {
-      audio.growl(0)
+      // A swing through empty air still costs the tiger a breath.
+      audio.growl()
     }
   }
 
@@ -498,8 +504,8 @@ export class Game {
 
     this.particles.gore(h.chestPos, h.kind === 'hunter' ? 20 : 14)
     this.world.addBloodDecal(h.pos.x, h.pos.z, h.kind === 'hunter' ? 1.2 : 1)
-    audio.biteKill(this.panOf(h.pos))
-    audio.scream(this.panOf(h.pos), h.kind === 'hunter' ? 0.8 : 1.1)
+    audio.biteKill(this.placeOf(h.pos))
+    audio.scream(this.placeOf(h.pos), h.kind === 'hunter' ? 0.8 : 1.1)
 
     // Panic ripples outward — nearby witnesses break.
     for (const other of this.humans) {
@@ -544,14 +550,21 @@ export class Game {
     if (affected > 0) this.hud.toast(`Roar — ${affected} scattered`, 'good')
   }
 
-  private panOf(p: THREE.Vector3): number {
+  /**
+   * Where a sound is, from the tiger's ears: stereo angle and range.
+   *
+   * The audio engine does the rest — attenuation, the treble the air eats on
+   * the way over, how much of the valley comes back with it, and for a rifle
+   * how late it arrives. All this has to know is the geometry.
+   */
+  private placeOf(p: THREE.Vector3): Place {
     // Project the offset onto the tiger's right vector for stereo placement.
     const dx = p.x - this.tiger.pos.x
     const dz = p.z - this.tiger.pos.z
     const rx = Math.cos(this.tiger.yaw)
     const rz = -Math.sin(this.tiger.yaw)
     const d = Math.hypot(dx, dz) || 1
-    return clamp(((dx * rx + dz * rz) / d) * 0.8, -1, 1)
+    return { pan: clamp(((dx * rx + dz * rz) / d) * 0.85, -1, 1), dist: d }
   }
 
   // ---------------------------------------------------------------- update
@@ -570,7 +583,7 @@ export class Game {
     if (locked) {
       if (input.pressed('KeyR')) this.roar()
       if (input.pressed('KeyQ') && this.tiger.startFrenzy()) {
-        audio.roar()
+        audio.frenzyStart()
         this.hud.announce('BLOOD FRENZY', 'Everything dies faster')
         this.hud.toast('BLOOD FRENZY', 'bad')
       }
@@ -581,12 +594,21 @@ export class Game {
     this.resolveAttack()
     this.resolvePounceTackles()
 
-    if (this.tiger.footstepEvent) audio.footstep(0, this.tiger.sprinting)
+    // The swing has to be heard before the hit lands, so this fires off the
+    // frame the animation starts rather than off the contact frame.
+    if (this.tiger.swingEvent !== 0) {
+      audio.swipeWhoosh(this.tiger.swingEvent, this.tiger.swingIsBite)
+    }
+    // Paws alternate, so the step alternates across the stereo field with them.
+    if (this.tiger.footstepEvent) {
+      this.footIsLeft = !this.footIsLeft
+      audio.footstep({ pan: this.footIsLeft ? -0.28 : 0.28 }, this.tiger.sprinting)
+    }
     if (this.tiger.landedEvent) {
       audio.land()
       this.particles.dust(this.tiger.pos, 8, 0.45)
     }
-    if (input.pressed('Space') && !this.tiger.grounded) audio.pounce()
+    if (this.tiger.pounceEvent) audio.pounce()
 
     this.updateHumans(dt)
     this.updateFeeding(dt)
@@ -622,7 +644,7 @@ export class Game {
 
       // Someone spotted the tiger and yelled — everyone nearby now knows.
       if (h.pendingShout) {
-        audio.scream(this.panOf(h.pos), h.kind === 'hunter' ? 0.8 : 1.15)
+        audio.shout(this.placeOf(h.pos), h.kind === 'hunter' ? 0.85 : 1.15)
         for (const other of this.humans) {
           if (other === h || !other.alive) continue
           if (Math.hypot(other.pos.x - h.pos.x, other.pos.z - h.pos.z) < HUMAN.alertShoutRadius) {
@@ -634,7 +656,7 @@ export class Game {
       if (h.pendingShot) {
         const shot = h.pendingShot
         const dist = Math.hypot(h.pos.x - this.tiger.pos.x, h.pos.z - this.tiger.pos.z)
-        audio.gunshot(this.panOf(h.pos), dist)
+        audio.gunshot(this.placeOf(h.pos), dist)
         this.particles.muzzle(
           new THREE.Vector3(shot.origin.x + shot.dir.x * 0.7, shot.origin.y, shot.origin.z + shot.dir.z * 0.7),
           shot.dir,
@@ -650,13 +672,36 @@ export class Game {
           // Getting shot breaks your chain — pressure to keep moving.
           this.chainTimer = Math.min(this.chainTimer, 0.9)
         } else {
-          audio.bulletWhiz(this.panOf(h.pos))
+          audio.bulletWhiz(this.placeOf(h.pos))
         }
       }
     }
 
     this.hud.setThreat(alerted, huntersOnMe)
-    audio.setTension(clamp(huntersOnMe * 0.28 + alerted * 0.05, 0, 1))
+    this.driveScore(alerted, huntersOnMe)
+  }
+
+  /**
+   * What the score is reacting to.
+   *
+   * Rifles pointed at you are worth the most, because that is the situation the
+   * arrangement was written for. Everything else is a modifier: a village that
+   * has woken up, a health bar in the red, a chain going, and frenzy, which
+   * simply pins it. The score smooths this itself — fast on the way up, slow on
+   * the way down — so a single shout does not detonate the whole orchestra.
+   */
+  private driveScore(alerted: number, huntersOnMe: number) {
+    const threat = Math.min(1, huntersOnMe * 0.3 + alerted * 0.045)
+    const wounded = 1 - this.tiger.health / TIGER.maxHealth
+    const chain = Math.min(1, this.chain / 5)
+    const intensity = clamp(
+      threat + wounded * 0.3 + chain * 0.2 + (this.tiger.frenzy > 0 ? 0.6 : 0),
+      0,
+      1,
+    )
+    audio.setIntensity(intensity)
+    audio.setFrenzy(this.tiger.frenzy > 0)
+    audio.setAmbience(this.darkness, this.wave)
   }
 
   private updatePickups(dt: number) {

@@ -29,7 +29,9 @@ source: tiger fur, cloth, blood decals, grass blades, leaf cards and particle
 sprites are drawn into 2D canvases (`src/world/textures.ts`), the sky is a
 Preetham analytic model (`src/render/sky.ts`), all geometry is built as
 `BufferGeometry` in code, and all audio is synthesised with WebAudio
-oscillators and noise buffers (`src/engine/audio.ts`).
+oscillators and noise buffers — sound effects and the reverb impulse responses
+in `src/engine/audio.ts`, the adaptive score in `src/engine/music.ts`. There are
+no audio files, so there is nothing to license and nothing to fail to load.
 
 ## Libraries
 

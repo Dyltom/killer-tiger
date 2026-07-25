@@ -23,7 +23,20 @@ const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getEleme
  * and headless screenshot runs can't grab the pointer, so this keeps the game
  * drivable for testing. Mouse-look is disabled; keyboard still works.
  */
-const NOLOCK = new URLSearchParams(location.search).has('nolock')
+const QUERY = new URLSearchParams(location.search)
+const NOLOCK = QUERY.has('nolock')
+
+/**
+ * `?t=0.25` opens at a chosen point in the day-night cycle instead of at
+ * DAY.start, and `?freeze` stops the clock there.
+ *
+ * A full rotation is half an hour of real time, so without these, checking what
+ * anything looks like at noon means either waiting or editing config.ts — and
+ * editing the config to look at the game is how the shipped start time ends up
+ * being whatever the last person was debugging.
+ */
+const START_T = QUERY.has('t') ? Number(QUERY.get('t')) : null
+const FREEZE_TIME = QUERY.has('freeze')
 
 const app = $('app')
 const menu = $('menu')
@@ -56,6 +69,7 @@ scene.add(camera)
 initMaterials(renderer)
 
 const sky = new Sky(scene)
+if (START_T !== null && Number.isFinite(START_T)) sky.day.setPhase(START_T)
 sky.buildEnvironment(renderer)
 
 const input = new Input(renderer.domElement)
@@ -96,9 +110,14 @@ game.onStateChange = (state) => {
     showOnly(null)
     hud.show()
     audio.resume()
+    audio.setMusicMode('hunt')
   } else if (state === 'paused') {
     showOnly(pausedEl)
     input.releaseLock()
+    // The score keeps playing behind the pause card, but it backs off to the
+    // drone — a full arrangement under a menu is the tell of a game that
+    // stopped simulating and forgot to tell its mixer.
+    audio.setMusicMode('menu')
   } else if (state === 'dead') {
     hud.hide()
     input.releaseLock()
@@ -110,13 +129,17 @@ game.onStateChange = (state) => {
   } else {
     hud.hide()
     showOnly(menu)
+    audio.setMusicMode('menu')
   }
 }
 
 function beginHunt() {
+  // The context can only be created inside a gesture, so everything audio is
+  // brought up here rather than at module load.
   audio.init()
   audio.resume()
   audio.startAmbience()
+  audio.startMusic()
   game.start()
   if (!NOLOCK) input.requestLock()
 }
@@ -128,7 +151,7 @@ function beginHunt() {
  */
 Object.assign(window, {
   __kt: {
-    game, world, input, camera, renderer, scene, sky, postfx, quality, THREE,
+    game, world, input, camera, renderer, scene, sky, postfx, quality, audio, THREE,
     step: (frames = 1, dt = 1 / 60) => { for (let i = 0; i < frames; i++) frame(dt) },
     hold: (code: string) => dispatchEvent(new KeyboardEvent('keydown', { code })),
     release: (code: string) => dispatchEvent(new KeyboardEvent('keyup', { code })),
@@ -178,7 +201,7 @@ function frame(dt: number) {
 
   // Pause freezes the clock too; coming back to a different time of day after
   // an alt-tab reads as a bug, not as a cycle.
-  if (game.state === 'playing') sky.update(dt, game.tiger.pos)
+  if (game.state === 'playing' && !FREEZE_TIME) sky.update(dt, game.tiger.pos)
   else sky.update(0, game.tiger.pos)
   renderer.toneMappingExposure = POST.exposure * sky.day.state.exposure
 

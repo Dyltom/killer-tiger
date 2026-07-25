@@ -228,19 +228,27 @@ export const CAMERA = {
   /** Mouse sensitivity, radians per pixel. */
   sensitivity: 0.0022,
   pitchLimit: 1.45,
-  /** Head bob. */
-  bobFreq: 9.2,
-  bobAmp: 0.075,
+  /**
+   * Forefoot strides per second at walkSpeed. Cadence scales as speed^0.7 from
+   * here, so a sprint is a longer stride as well as a quicker one — scaling it
+   * linearly makes a fast animal look like a wound-up toy.
+   */
+  strideRate: 1.5,
   swayAmp: 0.05,
   /**
-   * The bound. A quadruped at speed is airborne once per stride and lands on
-   * its forelegs, so the vertical is a rectified arc with a hard bottom rather
-   * than the symmetric sine a biped's head traces. `boundPitch` is the nose
-   * dropping as the forepaws take the landing.
+   * The bound, as amplitudes of a plain sinusoid of the gait phase — the head is
+   * lowest just after a forefoot plants, highest through the swing, and the nose
+   * pitches down into the landing.
+   *
+   * These are half the old values because the old curve was rectified
+   * (`pow(max(sin, 0), 0.6)`) and so only ever moved the head one way from rest.
+   * A symmetric sine of the same amplitude travels twice as far. It is also
+   * multiplied by the gait amplitude, which reaches 1.5 at a sprint, so a bound
+   * at full speed still throws the head further than a walk does.
    */
-  boundAmp: 0.20,
-  boundPitch: 0.055,
-  boundRoll: 0.022,
+  boundAmp: 0.10,
+  boundPitch: 0.032,
+  boundRoll: 0.020,
 }
 
 export const COLORS = {
@@ -319,10 +327,13 @@ export const SKY = {
   cloudElevation: 0.38,
   /**
    * Drift, in the same pre-1000x units: this times 1000 is noise cells per
-   * second. 2.2e-5 walks the field about one cell every forty-five seconds, so
-   * a cloud crosses the sky in a few minutes — weather, not a boiling shader.
+   * second. About seven cells span the sky between the zenith and the haze
+   * line, so 1.4e-4 walks a cloud right across the view in roughly fifty
+   * seconds. The old 2.2e-5 took five minutes to do the same, which over the
+   * length of one hunt is a painted backdrop rather than weather — you could
+   * stand and watch and nothing up there would have moved.
    */
-  cloudDrift: 0.000022,
+  cloudDrift: 0.00014,
   /**
    * Moonlit cloud. The stock shader multiplies cloud colour by the sun's
    * intensity term, which is zero once the sun is down — so at night the clouds
@@ -354,13 +365,29 @@ export const SKY = {
 export const DAY = {
   /**
    * Nominal seconds per rotation, *before* `dwell` stretches and squeezes it.
-   * The real cycle is `period` times the average dwell — about fourteen minutes.
+   * The weights below average to 1.07, so the real cycle is a little over
+   * thirty-two minutes: about sixteen of daylight falling into a long evening,
+   * then sixteen of night coming back up to dawn.
    */
-  period: 720,
-  /** Late golden hour: the hunt opens on the light the game was designed for. */
-  start: 0.472,
+  period: 1800,
+  /**
+   * Mid-morning, with the sun still climbing. Opening at 0.472 put it four
+   * hundredths of a rotation from setting, so the hunt began with the sun
+   * dropping straight out of the sky — the one part of the arc where elevation
+   * changes fastest, and the reason the cycle read as a light being switched
+   * off rather than as a day passing. From here it climbs for a third of the
+   * rotation, crosses overhead, and only then goes down.
+   */
+  start: 0.045,
   /** Peak sun elevation in degrees; elevation follows sin(2*pi*t) times this. */
   maxElevation: 62,
+  /**
+   * Compass bearing of the sun at noon (t = 0.25), from which the whole arc is
+   * laid out: sunrise 90 degrees before it, sunset 90 after. 168 puts midday
+   * over the village, so the player still stalks in toward the light and every
+   * hut and villager is rimmed by it for most of the day.
+   */
+  noonAzimuth: 168,
   /**
    * Preetham's sun-intensity term hits exactly zero at a 92.3-degree zenith
    * angle, so anything below about -2.3 degrees renders a pure black dome, not
@@ -388,29 +415,73 @@ export const DAY = {
   moonGlow: 4.5,
 
   /**
-   * `dwell` is why the cycle no longer sprints. It is a multiplier on how long
-   * the clock lingers at that point in the rotation: `t` advances by
-   * `dt / (period * dwell)`, so 3.2 means the golden hour passes at under a
-   * third of nominal speed and 0.42 means midnight passes at nearly two and a
-   * half times it.
+   * `dwell` is a multiplier on how long the clock lingers at that point in the
+   * rotation: `t` advances by `dt / (period * dwell)`, so 1.6 means the golden
+   * hour passes at five eighths of nominal speed and 0.8 means midnight passes
+   * at a quarter again faster.
    *
    * A uniform clock cannot give a good hunt. Elevation follows sin(2*pi*t), so
    * the interesting light — the twenty degrees either side of the horizon — is
-   * only a tenth of the rotation, and at a flat rate the whole sunset was over
-   * in twenty seconds and the player then sat in six minutes of darkness. With
-   * these weights the same rotation spends about five minutes in golden hour and
-   * dusk, two and a half in true night, and comes back up through three minutes
-   * of dawn into daylight. Fourteen minutes round, and it never parks anywhere
-   * you cannot hunt in.
+   * only a tenth of the rotation, and at a flat rate the whole sunset is over
+   * before you have crossed the village.
+   *
+   * But the weights have to stay *close* to each other. The old table ran from
+   * 3.2 down to 0.42, a factor of nearly eight, and a clock that changes speed
+   * eightfold is one you can see changing speed: the sun would hang on the
+   * horizon, then visibly break into a run once it was under. This range is a
+   * factor of two, which is enough to buy a long dusk and still read as one
+   * steady day going past.
+   */
+  /**
+   * A note on the `sunI` column, because it is not the light's intensity.
+   *
+   * It is the irradiance the key light lands on *level ground* — near enough to
+   * "how bright the lit dirt reads". The elevation term is divided back out in
+   * DayNight.keyIntensity() before the DirectionalLight ever sees it.
+   *
+   * Authoring intensity directly is what blew the day out. Ground brightness is
+   * `intensity * sin(elevation)`, and this table used to raise intensity toward
+   * noon while sin(elevation) was climbing from 0.19 to 0.88 underneath it — the
+   * same factor counted twice. Noon came out at six and a half times the golden
+   * hour every material in the game had been tuned against, so the paths clipped
+   * to white, the tiger's stripes went to cream and the whole frame read milky.
+   * Worse, it was invisible in the table: the numbers looked like a gentle
+   * morning-to-noon ramp.
+   *
+   * As irradiance the column is directly comparable down its own length, which
+   * is the only way to see that a bright moonlit night should not out-light noon.
+   * The night rows below are the exact irradiances the old numbers were already
+   * producing, so nightfall is untouched.
+   *
+   * And a note on `env`, because the two columns were fighting each other.
+   *
+   * `env` scales an IBL baked from the sky dome — and the bake used to include
+   * the sun disc, which Preetham renders at sunE * 19000. Prefiltered into the
+   * roughness-1 mip that lambert surfaces read, that one small hot patch arrived
+   * as *ambient* light: 8.5 units of ground irradiance at noon against 0.5 from
+   * the actual DirectionalLight. Sixteen times the key light, coming from
+   * everywhere at once. It is why the near ground clipped to white in the morning
+   * while golden hour looked right — the disc's contribution scales with
+   * sin(elevation) and with atmospheric extinction, so it is worth almost nothing
+   * at a 10-degree sun and everything at a 62-degree one, and no amount of
+   * exposure could hold both ends of that.
+   *
+   * With the disc out of the bake (see render/sky.ts, which zeroes showSunDisc
+   * around the PMREM call) the day rows had to take that energy back into the
+   * column it belonged in. The day `sunI` values are therefore much larger than
+   * they look next to the old table, and `env` is *lower*: the same total light
+   * on lit ground, but coming from a direction, so normal maps read and shadows
+   * exist. Shadow-side brightness is deliberately left near where it was, since
+   * the golden hour was signed off with those shadows.
    */
   phases: [
     // t      turbidity rayleigh  mie    dome   sun       sunI  skyBounce gndBounce bounceI env   fogSun    fogAway   density  stars exposure dwell
-    { t: 0.000, turbidity: 4.2, rayleigh: 3.4, mie: 0.010, dome: 0.55, sun: 0xffb070, sunI: 1.4,  skyB: 0x9fb6d8, gndB: 0x6a5a38, bounceI: 0.85, env: 1.6, fogSun: 0xffb98a, fogAway: 0x9aa9bd, density: 0.0075, stars: 0.25, exposure: 1.00, dwell: 1.60 },
-    { t: 0.120, turbidity: 2.6, rayleigh: 2.2, mie: 0.005, dome: 0.34, sun: 0xfff0d8, sunI: 3.9,  skyB: 0x8fb4e6, gndB: 0x7a6a48, bounceI: 0.70, env: 1.55, fogSun: 0xcdd8e6, fogAway: 0x8ea6c6, density: 0.0030, stars: 0.00, exposure: 0.93, dwell: 1.00 },
-    { t: 0.250, turbidity: 2.2, rayleigh: 1.6, mie: 0.004, dome: 0.30, sun: 0xfffaf0, sunI: 4.6,  skyB: 0x9cc4ff, gndB: 0x8a7a58, bounceI: 0.72, env: 1.60, fogSun: 0xd6e2f0, fogAway: 0x97b0d0, density: 0.0024, stars: 0.00, exposure: 0.90, dwell: 0.85 },
-    { t: 0.400, turbidity: 2.8, rayleigh: 2.4, mie: 0.005, dome: 0.36, sun: 0xffe6c0, sunI: 4.1,  skyB: 0x8fb0dd, gndB: 0x7d6a44, bounceI: 0.75, env: 1.65, fogSun: 0xf2c99a, fogAway: 0x8ea2be, density: 0.0032, stars: 0.00, exposure: 0.94, dwell: 1.60 },
-    { t: 0.472, turbidity: 3.2, rayleigh: 3.0, mie: 0.006, dome: 0.42, sun: 0xffd0a0, sunI: 3.3,  skyB: 0x6f90bd, gndB: 0x6a5a38, bounceI: 1.15, env: 2.4, fogSun: 0xffc286, fogAway: 0x8fa2ba, density: 0.0055, stars: 0.05, exposure: 1.00, dwell: 3.20 },
-    { t: 0.520, turbidity: 4.6, rayleigh: 4.0, mie: 0.011, dome: 0.46, sun: 0xff8b46, sunI: 1.5,  skyB: 0x50648c, gndB: 0x50432c, bounceI: 1.20, env: 2.1, fogSun: 0xff9a5a, fogAway: 0x6d7e9c, density: 0.0075, stars: 0.30, exposure: 1.05, dwell: 2.40 },
+    { t: 0.000, turbidity: 4.2, rayleigh: 3.4, mie: 0.010, dome: 0.55, sun: 0xffb070, sunI: 2.60, skyB: 0x9fb6d8, gndB: 0x6a5a38, bounceI: 0.85, env: 1.05, fogSun: 0xffb98a, fogAway: 0x9aa9bd, density: 0.0075, stars: 0.25, exposure: 1.00, dwell: 1.35 },
+    { t: 0.120, turbidity: 2.6, rayleigh: 2.2, mie: 0.005, dome: 0.30, sun: 0xfff0d8, sunI: 4.20, skyB: 0x8fb4e6, gndB: 0x7a6a48, bounceI: 0.70, env: 1.20, fogSun: 0xcdd8e6, fogAway: 0x8ea6c6, density: 0.0030, stars: 0.00, exposure: 0.84, dwell: 1.00 },
+    { t: 0.250, turbidity: 2.2, rayleigh: 1.6, mie: 0.004, dome: 0.26, sun: 0xfffaf0, sunI: 4.55, skyB: 0x9cc4ff, gndB: 0x8a7a58, bounceI: 0.72, env: 1.15, fogSun: 0xd6e2f0, fogAway: 0x97b0d0, density: 0.0024, stars: 0.00, exposure: 0.80, dwell: 0.85 },
+    { t: 0.400, turbidity: 2.8, rayleigh: 2.4, mie: 0.005, dome: 0.32, sun: 0xffe6c0, sunI: 4.20, skyB: 0x8fb0dd, gndB: 0x7d6a44, bounceI: 0.75, env: 1.25, fogSun: 0xf2c99a, fogAway: 0x8ea2be, density: 0.0032, stars: 0.00, exposure: 0.86, dwell: 1.15 },
+    { t: 0.472, turbidity: 3.2, rayleigh: 3.0, mie: 0.006, dome: 0.42, sun: 0xffd0a0, sunI: 2.65, skyB: 0x6f90bd, gndB: 0x6a5a38, bounceI: 1.15, env: 2.4, fogSun: 0xffc286, fogAway: 0x8fa2ba, density: 0.0055, stars: 0.05, exposure: 1.00, dwell: 1.60 },
+    { t: 0.520, turbidity: 4.6, rayleigh: 4.0, mie: 0.011, dome: 0.46, sun: 0xff8b46, sunI: 0.29, skyB: 0x50648c, gndB: 0x50432c, bounceI: 1.20, env: 2.1, fogSun: 0xff9a5a, fogAway: 0x6d7e9c, density: 0.0075, stars: 0.30, exposure: 1.05, dwell: 1.55 },
     // Night is lit by a moon, not by nothing. Real moonlight is about a
     // millionth of daylight, which on screen is an unplayable black frame — so
     // the night rows are a stylised moonlit blue: bright enough to read the
@@ -418,9 +489,9 @@ export const DAY = {
     // night. The exposure lift and the desaturated key light do most of it,
     // the village practicals in world/lamps.ts light the rest, and the grade's
     // night-eye lift in postfx.ts catches whatever is left in the shadows.
-    { t: 0.580, turbidity: 5.4, rayleigh: 4.6, mie: 0.008, dome: 1.25, sun: 0xa8c0f0, sunI: 2.40, skyB: 0x5c7cab, gndB: 0x3b3d3c, bounceI: 2.50, env: 2.7, fogSun: 0x7787b2, fogAway: 0x46536f, density: 0.0080, stars: 0.85, exposure: 1.22, dwell: 0.90 },
-    { t: 0.750, turbidity: 6.0, rayleigh: 3.0, mie: 0.004, dome: 1.55, sun: 0xc2d4ff, sunI: 3.10, skyB: 0x6284bd, gndB: 0x3f4656, bounceI: 2.80, env: 3.0, fogSun: 0x88a2d8, fogAway: 0x33415f, density: 0.0075, stars: 1.00, exposure: 1.32, dwell: 0.42 },
-    { t: 0.920, turbidity: 5.0, rayleigh: 4.2, mie: 0.006, dome: 1.30, sun: 0xb6c8ec, sunI: 2.50, skyB: 0x5e7dab, gndB: 0x3c3f42, bounceI: 2.60, env: 2.8, fogSun: 0x8594bc, fogAway: 0x4b5875, density: 0.0085, stars: 0.70, exposure: 1.22, dwell: 0.75 },
+    { t: 0.580, turbidity: 5.4, rayleigh: 4.6, mie: 0.008, dome: 1.25, sun: 0xa8c0f0, sunI: 1.20, skyB: 0x5c7cab, gndB: 0x3b3d3c, bounceI: 2.50, env: 2.7, fogSun: 0x7787b2, fogAway: 0x46536f, density: 0.0080, stars: 0.85, exposure: 1.22, dwell: 1.10 },
+    { t: 0.750, turbidity: 6.0, rayleigh: 3.0, mie: 0.004, dome: 1.55, sun: 0xc2d4ff, sunI: 2.74, skyB: 0x6284bd, gndB: 0x3f4656, bounceI: 2.80, env: 3.0, fogSun: 0x88a2d8, fogAway: 0x33415f, density: 0.0075, stars: 1.00, exposure: 1.32, dwell: 0.80 },
+    { t: 0.920, turbidity: 5.0, rayleigh: 4.2, mie: 0.006, dome: 1.30, sun: 0xb6c8ec, sunI: 1.25, skyB: 0x5e7dab, gndB: 0x3c3f42, bounceI: 2.60, env: 2.8, fogSun: 0x8594bc, fogAway: 0x4b5875, density: 0.0085, stars: 0.70, exposure: 1.22, dwell: 1.00 },
   ],
 }
 
@@ -516,6 +587,201 @@ export const POST = {
    * Scaled by DayNight.darkness, so 1.0 here is the look at true midnight.
    */
   nightEye: 1.0,
+  /**
+   * ...but `darkness` is the `stars` ramp, and that ramp does not reach zero
+   * until well after sunrise: it is still 0.18 at the opening t=0.045, with the
+   * sun 17 degrees up. So the tiger's night vision was running in broad
+   * daylight, putting a col^(1/1.16) lift under the morning shadows and draining
+   * hue out of anything darker than mid-grey — part of why the morning read
+   * washed out and flat. These two thresholds knee it off: below `onset` there is
+   * no night eye at all, above `full` the value passes through untouched, so the
+   * night itself is bit-for-bit what it was.
+   */
+  nightEyeOnset: 0.22,
+  nightEyeFull: 0.5,
+}
+
+/**
+ * The mix.
+ *
+ * Everything you hear is synthesised at runtime — there is not a single audio
+ * file in the build — so these are the knobs a mixing engineer would reach for
+ * rather than per-asset volumes: bus trims, the distance model, and how hard
+ * the score gets out of the way when something loud happens.
+ */
+export const AUDIO = {
+  /** Bus trims, pre-limiter. */
+  master: 0.92,
+  sfx: 1.0,
+  music: 0.55,
+  ambience: 0.42,
+
+  /**
+   * Distance model. Inverse-square alone makes anything past 30 m inaudible and
+   * anything under 3 m deafening, so this is inverse-plus-quadratic: gentle up
+   * close, steep out where a rifle should still read as a rifle but a distant one.
+   */
+  falloff: 0.055,
+  falloffSq: 0.0016,
+  /**
+   * Air absorption, in nepers per metre of high-frequency rolloff. Sound loses
+   * treble before it loses volume, which is the single cue that separates "a
+   * shot forty metres away" from "a quiet shot next to your ear".
+   */
+  airAbsorption: 0.021,
+  airFloor: 420,
+  /** Metres per second. Distant gunshots arrive late, because they do. */
+  speedOfSound: 343,
+  /** Rifles carry further than bodies do. See `Place.roll`. */
+  gunRoll: 0.3,
+
+  /** Concurrent voice budget. Past this, low-priority one-shots are dropped. */
+  maxVoices: 40,
+
+  /** Two reverbs: a tight treeline slap and the long valley behind it. */
+  nearSeconds: 0.55,
+  nearDecay: 2.6,
+  farSeconds: 2.9,
+  farDecay: 1.5,
+  /** Base send levels; both scale up with distance. */
+  wetNear: 0.20,
+  wetFar: 0.09,
+  /**
+   * How much wetter a sound gets with distance, as an exponent on the distance
+   * attenuation. 0 keeps the wet/dry ratio fixed; 1 would hold the wet level
+   * flat no matter how far away the source is. Anything above 1 would make
+   * distant sounds louder than near ones, which is not a mix, it is a bug.
+   */
+  wetSlopeNear: 0.4,
+  wetSlopeFar: 0.7,
+  /** Ceiling on that, so a shot across the map is not pure reverb. */
+  wetSpreadMax: 3.5,
+
+  /**
+   * Mix-bus soft clipping. Below `satCeiling / 3` the curve is exactly linear
+   * and nothing happens at all; between there and `satCeiling * 2 / 3` it
+   * bends; above that it is flat. So this number sets where the mix stops
+   * being allowed to get louder — and, because the linear region has to cover
+   * every normal sound, it also sets the loudest a normal sound may be.
+   */
+  satCeiling: 2.0,
+  satMakeup: 0.95,
+
+  /** Sidechain. Big events pull the score down and let it back up. */
+  duckAmount: 0.55,
+  duckAttack: 0.035,
+  duckRelease: 0.42,
+}
+
+/**
+ * The score.
+ *
+ * A single evolving piece rather than a playlist: one scheduler runs a bar
+ * clock for the whole session and each layer is faded in by the hunt number and
+ * by how much trouble the player is in. Hunt 1 is a tanpura drone and a
+ * heartbeat; hunt 8 with three rifles on you is drums, a sitar ostinato, brass
+ * and a dissonant string cluster, twenty beats a minute faster and a mode
+ * darker. Nothing loops back to the top, so it never reads as a track repeating.
+ */
+export const MUSIC = {
+  /** Tempo = base + wave ramp + intensity ramp (+ frenzy). */
+  bpmBase: 76,
+  bpmPerWave: 4.5,
+  bpmIntensity: 16,
+  bpmFrenzy: 13,
+  /** Hunts past this stop adding tempo; it is already a siege. */
+  waveCap: 8,
+
+  /** Root pitch, A1. Everything is derived from it. */
+  root: 55,
+  /**
+   * The mode turns at this hunt. Aeolian for the early nights — sad, ordinary
+   * minor — then Phrygian dominant, whose flat second over a major third is the
+   * interval that makes the back of your neck go cold.
+   */
+  exoticFrom: 4,
+
+  /**
+   * Which hunt each layer unlocks on, and how much combat intensity it needs
+   * before it comes up. Two gates, because a layer that only tracks the hunt
+   * number never reacts and one that only tracks intensity never grows.
+   */
+  layers: {
+    drone: { wave: 1, need: 0.0 },
+    pulse: { wave: 1, need: 0.0 },
+    bass: { wave: 1, need: 0.18 },
+    frame: { wave: 2, need: 0.10 },
+    ostinato: { wave: 3, need: 0.22 },
+    taiko: { wave: 4, need: 0.15 },
+    brass: { wave: 5, need: 0.35 },
+    choir: { wave: 6, need: 0.20 },
+    strings: { wave: 7, need: 0.45 },
+  },
+
+  /** Seconds for the intensity signal to chase combat. Slow up, slower down. */
+  riseTime: 1.1,
+  fallTime: 4.5,
+  /** Scheduler: how far ahead notes are queued, and how often we top it up. */
+  lookahead: 0.22,
+  tickMs: 28,
+}
+
+/**
+ * Per-voice output trims — the mix, in one place.
+ *
+ * Every sound in `audio.ts` is built from layers whose gains are chosen for
+ * *timbre*: how much crack against how much body, how much tear against how
+ * much sub. Those numbers say nothing about how loud the finished sound should
+ * be relative to every other sound, and if you try to make them do both jobs
+ * you can never change one without breaking the other.
+ *
+ * So they don't. Each voice is designed at whatever internal level sounds
+ * right, then scaled once on its way to the bus by the trim below. These
+ * numbers were set by rendering each sound offline and measuring its loudest
+ * 300 ms window, then adjusting until the table read the way a mix should:
+ * gunfire and the roar at the top, impacts just under them, texture far below.
+ *
+ * The ordering matters more than the absolute values. A rifle going off six
+ * metres away has to be the most alarming thing you can hear, or the hunters
+ * are not frightening; a footstep has to sit thirty decibels down, or the
+ * player stops hearing anything else.
+ */
+export const LEVELS = {
+  // Apex: the sounds allowed to take over the mix. These are the only ones
+  // that should ever reach the soft clipper, and only on their transient.
+  gunshot: 1.7,
+  roar: 0.5,
+  biteKill: 2.0,
+
+  // Impacts. Loud, but they must not outrun the gun, and — more importantly —
+  // they must not be sitting on the ceiling when a gun goes off on top of them.
+  clawHit: 3.0,
+  land: 1.4,
+  hurt: 1.5,
+
+  // Voices. Two humans yelling at each other across a village is most of what
+  // sells the place as inhabited, so they are not allowed to disappear.
+  scream: 1.6,
+  shout: 5.5,
+  growl: 7.0,
+
+  // Stingers. These were eating the whole headroom; they are deliberately
+  // under the gun now, and they duck the score instead of shouting over it.
+  waveStart: 0.2,
+  gameOver: 0.4,
+  frenzy: 0.26,
+  powerup: 0.5,
+
+  // Texture. Constant, so it lives a long way down. A footstep at the same
+  // peak level as a claw strike is not a loud footstep, it is a broken mix:
+  // every step steals a decibel of the limiter from whatever else is playing.
+  swipe: 3.0,
+  bulletWhiz: 9.0,
+  pounce: 9.0,
+  footstep: 4.5,
+  pickup: 1.6,
+  comboTick: 1.4,
+  distantShot: 1.6,
 }
 
 export const STORAGE_KEY = 'killer-tiger:best'
