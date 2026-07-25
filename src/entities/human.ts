@@ -25,9 +25,65 @@ export interface ShotEvent {
 // Darker than they look on a swatch. The sun is 3.3 intensity and the grade
 // adds contrast on top, so anything above about 0xc08150 clips to featureless
 // white the moment a villager steps out of shade.
-const SKIN = [0x8d5a3b, 0xa4703f, 0x6b4229, 0x9c6a44, 0x5c3a24]
-const SHIRT = [0x6d7b52, 0x8a5a3c, 0x4c5b6b, 0x7a6b4f, 0x9c8461, 0x5c4a3a]
-const HUNTER_SHIRT = [0x3f4a35, 0x4a3f2f, 0x35404a]
+const SKIN = [0x6d4527, 0x7d5433, 0x4f301d, 0x86593a, 0x412818]
+const SHIRT = [0x59653f, 0x71462c, 0x3d4a58, 0x655840, 0x7d684a, 0x4a3b2e]
+const HUNTER_SHIRT = [0x333d2a, 0x3d3325, 0x2b333c]
+const TROUSER = [0x3d3527, 0x4a4030, 0x2e2a22, 0x554c3c, 0x6a6152, 0x484030]
+const HAIR = [0x241a13, 0x1b1410, 0x3a2a1c]
+const GREY = [0x6e665c, 0x857d72]
+const TURBAN = [0xb0a48b, 0xa5522c, 0xbdb39c, 0x5f7488, 0xa8873c, 0x93362d]
+
+/** Leather, felt and brass on the hunters' kit. */
+const LEATHER = 0x513520
+const FELT = 0x3f342a
+const BRASS = 0xa9853f
+
+/** Tapered tube hanging *down* from `y`: it spans y - len to y. */
+function seg(r0: number, r1: number, len: number, y: number, radial = 8): THREE.BufferGeometry {
+  const g = new THREE.CylinderGeometry(r0, r1, len, radial)
+  g.translate(0, y - len / 2, 0)
+  return g
+}
+
+function ball(r: number, y: number, x = 0, z = 0, sx = 1, sy = 1, sz = 1): THREE.BufferGeometry {
+  const g = new THREE.SphereGeometry(r, 10, 8)
+  g.scale(sx, sy, sz)
+  g.translate(x, y, z)
+  return g
+}
+
+/** Open-ended band, for belts and hat crowns. */
+function band(r: number, h: number, y: number, sz = 1): THREE.BufferGeometry {
+  const g = new THREE.CylinderGeometry(r, r, h, 16, 1, true)
+  g.scale(1, 1, sz)
+  g.translate(0, y, 0)
+  return g
+}
+
+function merged(parts: THREE.BufferGeometry[]): THREE.BufferGeometry {
+  return mergeGeometries(parts, false)!
+}
+
+/**
+ * Bake a colour into a geometry's vertices.
+ *
+ * Hair, beard, turban and headwear all want different colours but have to stay
+ * in one mesh — with fifty-odd humans alive, splitting a head across four
+ * materials is two hundred draw calls for something nobody looks at up close.
+ * Vertex colours put all four in one buffer for free.
+ */
+function tint(g: THREE.BufferGeometry, hex: number): THREE.BufferGeometry {
+  const c = new THREE.Color(hex)
+  const n = g.attributes.position!.count
+  const arr = new Float32Array(n * 3)
+  for (let i = 0; i < n; i++) {
+    arr[i * 3] = c.r
+    arr[i * 3 + 1] = c.g
+    arr[i * 3 + 2] = c.b
+  }
+  g.setAttribute('color', new THREE.BufferAttribute(arr, 3))
+  return g
+}
 
 /** Fresh in the wound, and the darker stain it leaves in cloth. */
 const WET_BLOOD = new THREE.Color(0x8c0d10)
@@ -78,6 +134,11 @@ export class Human {
   private torso!: THREE.Mesh
   private head!: THREE.Mesh
   private rifle: THREE.Group | null = null
+  /** Hunter-only kit: bandolier and belt on the body, slouch hat on the head. */
+  private kitBody: THREE.Mesh | null = null
+  private kitHat: THREE.Mesh | null = null
+  /** A turban already fills the space a hat would go, so this slot never gets one. */
+  private turbaned = false
   private wounds!: THREE.Mesh
   private woundMat!: THREE.MeshStandardMaterial
   private body = new THREE.Group()
@@ -99,12 +160,18 @@ export class Human {
 
   // ----------------------------------------------------------------- rig
   /**
-   * The rig is still exactly six meshes — torso, head, hair, two arms, two legs
-   * — because with up to forty humans alive at once every extra mesh is another
-   * forty draw calls. What changed is that each of those meshes is now several
-   * primitives merged into one buffer rather than a single box, which costs
-   * nothing at draw time and is the whole difference between a stack of cuboids
-   * and something with shoulders, a jaw and knees.
+   * A villager is six meshes — torso, head, hair, two arms, two legs — because
+   * with fifty-two slots in the pool every extra mesh is another fifty draw
+   * calls. Each of those meshes is several primitives merged into one buffer,
+   * which costs nothing at draw time and is the difference between a stack of
+   * cuboids and something with shoulders, a jaw and knees.
+   *
+   * Everything that varies between people is baked here, once, because the
+   * geometry can't change when a slot is recycled: build, sleeve length, hair,
+   * headwear, beard. Colours are the only thing spawn() can still touch. That
+   * constraint is also why none of the variety can be kind-specific — any slot
+   * may come back as either a villager or a hunter, so the hunters' kit is a
+   * pair of meshes toggled on top rather than a different body.
    *
    * Pivots are unchanged: limbs still hang from their top vertex and the torso
    * and head still rotate about their centres, so the animation code below
@@ -112,29 +179,29 @@ export class Human {
    */
   private buildRig() {
     const tex = textures()
-    const skin = new THREE.MeshStandardMaterial({ color: this.rng.pick(SKIN), roughness: 0.9 })
+    const rng = this.rng
+    const skin = new THREE.MeshStandardMaterial({ color: rng.pick(SKIN), roughness: 0.9 })
     const shirt = new THREE.MeshStandardMaterial({ map: tex.cloth, color: 0xffffff, roughness: 1 })
     const pants = new THREE.MeshStandardMaterial({ color: 0x3d3527, roughness: 1 })
     this.mats = [skin, shirt, pants]
 
-    const scale = this.rng.range(0.94, 1.06)
+    // Build. Height and girth vary independently, which is what separates a
+    // crowd from a row of the same doll at slightly different sizes: one
+    // uniform scale makes everyone the same shape, and shape is what you read
+    // at forty metres through grass.
+    const tall = rng.range(0.92, 1.08)
+    const wide = rng.range(0.88, 1.15)
+    // Sleeve length. Cheap, but it changes the arm silhouette, and half the
+    // village being in short sleeves and half in long is more variety than any
+    // amount of recolouring buys.
+    const cuff = rng.pick([0.2, 0.2, 0.44, 0.0])
 
-    /** Tapered tube hanging *down* from `y`: it spans y - len to y. */
-    const seg = (r0: number, r1: number, len: number, y: number, radial = 8) => {
-      const g = new THREE.CylinderGeometry(r0, r1, len, radial)
-      g.translate(0, y - len / 2, 0)
-      return g
-    }
-    const ball = (r: number, y: number, x = 0, z = 0, sx = 1, sy = 1, sz = 1) => {
-      const g = new THREE.SphereGeometry(r, 10, 8)
-      g.scale(sx, sy, sz)
-      g.translate(x, y, z)
-      return g
-    }
-    const merged = (parts: THREE.BufferGeometry[]) => mergeGeometries(parts, false)!
+    // Tapered, and started up inside the shoulder ball: a straight tube of
+    // constant radius reads as a pauldron bolted to the side of the chest,
+    // which is exactly what long sleeves looked like before the taper.
     const sleeve = (x: number) => {
-      const g = new THREE.CylinderGeometry(0.086, 0.074, 0.21, 10)
-      g.translate(x, 0.14, 0)
+      const g = new THREE.CylinderGeometry(0.098, cuff > 0.3 ? 0.058 : 0.078, cuff, 10)
+      g.translate(x, 0.26 - cuff / 2, 0)
       return g
     }
 
@@ -143,26 +210,25 @@ export class Human {
     // body still spans roughly 0.85 to 1.47 as before.
     // seg() hangs downward, so the chest is anchored by its *top* at +0.24 —
     // level with the shoulder balls the arms swing from.
-    this.torso = new THREE.Mesh(
-      merged([
-        seg(0.2, 0.155, 0.48, 0.24, 12).scale(1, 1, 0.62) as THREE.BufferGeometry,
-        ball(0.17, -0.25, 0, 0, 1, 0.85, 0.66), // hips
-        // A wrap over the hips. Without it the legs read as bare from the waist
-        // down, which makes every villager look like they are in their
-        // underwear. Kept short and a touch wider than the hips so a swinging
-        // thigh doesn't punch through the static cloth.
-        seg(0.2, 0.195, 0.26, -0.2).scale(1, 1, 0.72) as THREE.BufferGeometry,
-        ball(0.085, 0.215, -0.19, 0, 1, 1, 0.85),
-        ball(0.085, 0.215, 0.19, 0, 1, 1, 0.85),
-        // Short sleeves. Built into the torso rather than into the arm so they
-        // cost nothing: an arm split across two materials would be two draw
-        // calls each, and at forty humans that is a hundred and sixty extra.
-        // The arm swings inside the cuff, which is what a real sleeve does.
-        sleeve(-0.205),
-        sleeve(0.205),
-      ]),
-      shirt,
-    )
+    const torsoParts = [
+      seg(0.2, 0.155, 0.48, 0.24, 12).scale(1, 1, 0.62),
+      ball(0.17, -0.25, 0, 0, 1, 0.85, 0.66), // hips
+      // A wrap over the hips. Without it the legs read as bare from the waist
+      // down, which makes every villager look like they are in their
+      // underwear. Kept short and a touch wider than the hips so a swinging
+      // thigh doesn't punch through the static cloth.
+      seg(0.2, 0.195, 0.26, -0.2).scale(1, 1, 0.72),
+      ball(0.098, 0.205, -0.185, 0, 1, 1, 0.82),
+      ball(0.098, 0.205, 0.185, 0, 1, 1, 0.82),
+    ]
+    // Sleeves. Built into the torso rather than into the arm so they cost
+    // nothing: an arm split across two materials would be two draw calls each,
+    // and at fifty humans that is two hundred extra. The arm swings inside the
+    // cuff, which is what a real sleeve does. A zero cuff is the sleeveless
+    // one, and gets a collar band instead so the shirt still has a neckline.
+    if (cuff > 0) torsoParts.push(sleeve(-0.205), sleeve(0.205))
+    else torsoParts.push(seg(0.115, 0.135, 0.08, 0.28, 12).scale(1, 1, 0.72))
+    this.torso = new THREE.Mesh(merged(torsoParts), shirt)
     this.torso.position.y = 1.16
     this.body.add(this.torso)
 
@@ -182,26 +248,69 @@ export class Human {
     this.head.position.y = 1.62
     this.body.add(this.head)
 
-    // Skull cap rather than a slab on top — a hemisphere clipped at the brow.
-    // Clipped at 0.42pi, not 0.6pi: past the equator it swallows the ears and
-    // the temples and the head stops reading as hair at all, it reads as a
-    // motorcycle helmet.
-    const cap = new THREE.SphereGeometry(0.126, 14, 10, 0, Math.PI * 2, 0, Math.PI * 0.42)
-    cap.scale(1, 1.12, 1.04)
-    cap.translate(0, 0.008, 0.006)
-    // Eyes ride on the hair mesh purely because it is already the right dark
-    // brown — two dots is all it takes for a head to stop reading as an egg,
-    // and it costs no extra draw call.
-    const hairGeo = mergeGeometries([
-      cap,
-      // Occiput. Pushed back far enough to break the skull silhouette but not
-      // so far that it reaches the brow: 0.122 - 0.04 = 0.082, comfortably
-      // inside the 0.115 head, so nothing surfaces on the face.
-      ball(0.122, -0.005, 0, 0.04, 1, 0.94, 1),
-      ball(0.019, 0.005, -0.045, -0.1, 1, 0.8, 1),
-      ball(0.019, 0.005, 0.045, -0.1, 1, 0.8, 1),
-    ], false)!
-    const hair = new THREE.Mesh(hairGeo, new THREE.MeshStandardMaterial({ color: 0x241a13, roughness: 1 }))
+    // ---- hair, headwear and face furniture. One vertex-coloured mesh, so a
+    // white beard under a red turban over dark brows is still a single draw
+    // call. This is where nearly all the crowd variety lives: the body is a
+    // body, but you read a person from the head.
+    const old = rng.chance(0.22)
+    const hairCol = old ? rng.pick(GREY) : rng.pick(HAIR)
+    const style = rng.pick(['cap', 'cap', 'cap', 'turban', 'turban', 'bald', 'long'] as const)
+    const hairParts: THREE.BufferGeometry[] = [
+      // Eyes and brows. Two dots is all it takes for a head to stop reading as
+      // an egg; the brows are what give it an expression at any distance.
+      tint(ball(0.019, 0.005, -0.045, -0.1, 1, 0.8, 1), 0x140d09),
+      tint(ball(0.019, 0.005, 0.045, -0.1, 1, 0.8, 1), 0x140d09),
+      tint(ball(0.028, 0.043, -0.047, -0.094, 1.25, 0.4, 0.6), hairCol),
+      tint(ball(0.028, 0.043, 0.047, -0.094, 1.25, 0.4, 0.6), hairCol),
+    ]
+
+    this.turbaned = style === 'turban'
+    if (style === 'turban') {
+      // A wrapped band sitting on the brow with a tail down the nape. Reads
+      // from further away than any hairstyle does, because it is a different
+      // colour from the head rather than a darker version of it.
+      const cloth = rng.pick(TURBAN)
+      hairParts.push(
+        tint(ball(0.133, 0.052, 0, 0.01, 1, 0.66, 1.02), cloth),
+        tint(ball(0.115, 0.095, 0, 0.014, 1, 0.55, 1), cloth),
+        tint(ball(0.045, -0.03, 0, 0.108, 0.9, 1.5, 0.6), cloth),
+      )
+    } else if (style === 'bald') {
+      // Fringe round the back and sides only — the crown stays skin.
+      hairParts.push(tint(ball(0.118, -0.038, 0, 0.042, 1.02, 0.62, 0.95), hairCol))
+    } else {
+      // Skull cap rather than a slab on top — a hemisphere clipped at the brow.
+      // Clipped at 0.42pi, not 0.6pi: past the equator it swallows the ears and
+      // the temples and the head stops reading as hair at all, it reads as a
+      // motorcycle helmet.
+      const cap = new THREE.SphereGeometry(0.126, 14, 10, 0, Math.PI * 2, 0, Math.PI * 0.42)
+      cap.scale(1, 1.12, 1.04)
+      cap.translate(0, 0.008, 0.006)
+      hairParts.push(
+        tint(cap, hairCol),
+        // Occiput. Pushed back far enough to break the skull silhouette but not
+        // so far that it reaches the brow: 0.122 - 0.04 = 0.082, comfortably
+        // inside the 0.115 head, so nothing surfaces on the face.
+        tint(ball(0.122, -0.005, 0, 0.04, 1, 0.94, 1), hairCol),
+      )
+      // Hair to the nape. Hangs off the back of the head, so it never crosses
+      // the face however far the head pitches.
+      if (style === 'long') {
+        hairParts.push(tint(ball(0.13, -0.06, 0, 0.055, 1, 1.35, 0.85), hairCol))
+      }
+    }
+
+    // Beards. Centre sits behind and below the nose, so the sphere never
+    // reaches the nose tip at z -0.108 — the face stays a face.
+    if (rng.chance(0.45)) {
+      hairParts.push(tint(ball(0.095, -0.072, 0, -0.018, 1, 0.92, 1), hairCol))
+      if (rng.chance(0.6)) hairParts.push(tint(ball(0.042, -0.032, 0, -0.088, 1.5, 0.42, 0.7), hairCol))
+    }
+
+    const hair = new THREE.Mesh(
+      merged(hairParts),
+      new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 1 }),
+    )
     // Child of the head, so it follows when the head pitches.
     this.head.add(hair)
 
@@ -259,7 +368,7 @@ export class Human {
     this.wounds.visible = false
     this.body.add(this.wounds)
 
-    this.body.scale.setScalar(scale)
+    this.body.scale.set(wide, tall, wide)
     this.body.traverse((o) => {
       if (o instanceof THREE.Mesh) {
         o.castShadow = true
@@ -306,7 +415,9 @@ export class Human {
     this.wounds.visible = false
     this.woundMat.color.setHex(0x4a0509)
 
+    this.mats[2]!.color.setHex(this.rng.pick(TROUSER))
     this.setRifleVisible(kind === 'hunter')
+    this.setKit(kind === 'hunter')
     this.group.visible = true
     this.group.rotation.set(0, this.yaw, 0)
     this.body.rotation.set(0, 0, 0)
@@ -341,6 +452,74 @@ export class Human {
       this.rifle = g
     }
     if (this.rifle) this.rifle.visible = on
+  }
+
+  /**
+   * The hunters' kit — bandolier, belt and slouch hat.
+   *
+   * Two extra meshes, and only ever on hunters, which the wave table caps at
+   * fourteen. Villagers stay at six. That is the trade: the one silhouette in
+   * the crowd you have to identify before it shoots you is worth twenty-eight
+   * draw calls, and dressing all fifty-two is not.
+   *
+   * Built lazily and vertex-coloured, so leather, felt and brass share one
+   * material. Unlike the rifle this stays on the corpse — the gun is dropped,
+   * the webbing is not.
+   */
+  private setKit(on: boolean) {
+    if (on && !this.kitBody) {
+      const gear = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.72 })
+
+      // Bandolier: over the left shoulder to the right hip, with the return
+      // strap round the back so it doesn't read as a stripe painted on.
+      const strap = (angle: number, z: number) => {
+        const g = new THREE.CylinderGeometry(0.028, 0.028, 0.52, 8)
+        g.scale(1, 1, 0.5)
+        g.rotateZ(angle)
+        g.translate(-0.005, 1.19, z)
+        return tint(g, LEATHER)
+      }
+      const parts: THREE.BufferGeometry[] = [strap(0.72, -0.125), strap(-0.72, 0.115)]
+      // Cartridges up the front of the strap, spaced along its axis.
+      for (let i = -3; i <= 3; i++) {
+        const t = i * 0.062
+        const c = new THREE.CylinderGeometry(0.017, 0.017, 0.052, 6)
+        c.rotateX(Math.PI / 2)
+        c.translate(-0.005 - t * 0.66, 1.19 + t * 0.755, -0.15)
+        parts.push(tint(c, BRASS))
+      }
+      // Belt over the hip wrap, with a pouch on the hip.
+      parts.push(tint(band(0.212, 0.06, 0.94, 0.76), LEATHER))
+      const pouch = new THREE.BoxGeometry(0.12, 0.11, 0.07)
+      pouch.translate(0.135, 0.925, -0.11)
+      parts.push(tint(pouch, LEATHER))
+
+      this.kitBody = new THREE.Mesh(merged(parts), gear)
+      this.body.add(this.kitBody)
+
+      // Slouch hat. Brim wide enough to throw the eyes into shadow, which is
+      // most of why a hunter reads as a different animal from a villager.
+      const brim = new THREE.CylinderGeometry(0.235, 0.215, 0.022, 16)
+      brim.translate(0, 0.088, 0.004)
+      const crown = new THREE.CylinderGeometry(0.107, 0.133, 0.115, 16)
+      crown.translate(0, 0.152, 0.004)
+      const dome = ball(0.107, 0.208, 0, 0.004, 1, 0.55, 1)
+      if (!this.turbaned) {
+        this.kitHat = new THREE.Mesh(
+          merged([tint(brim, FELT), tint(crown, FELT), tint(dome, FELT), tint(band(0.136, 0.032, 0.105), LEATHER)]),
+          gear,
+        )
+        this.head.add(this.kitHat)
+      }
+
+      for (const m of [this.kitBody, this.kitHat]) {
+        if (!m) continue
+        m.castShadow = true
+        m.receiveShadow = true
+      }
+    }
+    if (this.kitBody) this.kitBody.visible = on
+    if (this.kitHat) this.kitHat.visible = on
   }
 
   private syncTransform() {
