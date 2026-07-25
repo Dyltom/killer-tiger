@@ -57,6 +57,8 @@ export class Game {
   /** Progress on the corpse currently being eaten, 0..1. */
   private feedProgress = 0
   private feedTarget: Human | null = null
+  /** Counts down to the next mouthful while feeding. */
+  private chewTimer = 0
   private pickupTimer = PICKUP.spawnInterval * 0.4
   private spawnTimer = 0
   private time = 0
@@ -346,9 +348,21 @@ export class Game {
     if (this.feedTarget !== nearest) {
       this.feedTarget = nearest
       this.feedProgress = 0
+      this.chewTimer = 0
     }
     this.feedProgress += dt
     this.hud.setDevour(this.feedProgress / HUMAN.feedTime)
+
+    // Feeding used to be silent right up until it paid out, and then it played
+    // the kill sound — so the act had no voice and its reward was ambiguous.
+    // Chewing on an irregular beat gives the wait its own identity, and the
+    // beat tightens as the meal goes on so the bar filling is audible.
+    this.chewTimer -= dt
+    if (this.chewTimer <= 0) {
+      audio.chew()
+      const urgency = this.feedProgress / HUMAN.feedTime
+      this.chewTimer = (0.42 - urgency * 0.13) * (0.8 + this.rng.next() * 0.45)
+    }
 
     if (this.feedProgress >= HUMAN.feedTime) {
       nearest.feed()
@@ -360,7 +374,9 @@ export class Game {
       this.particles.gore(nearest.chestPos, 14)
       this.world.addBloodDecal(nearest.pos.x, nearest.pos.z, 1.8)
       this.tiger.shake(0.2)
-      audio.biteKill(this.placeOf(nearest.pos))
+      // A swallow, not a kill. This is the moment the health lands, and it has
+      // to read as *feeding finished* rather than as *something just died*.
+      audio.gulp(true)
       this.hud.toast(`Fed — +${HUMAN.feedHeal} health`, 'good')
       // Eating a hunter is worth a buff on top; their bodies are the good ones.
       if (nearest.kind === 'hunter') this.applyBuff('ironHide')
@@ -605,7 +621,10 @@ export class Game {
       audio.footstep({ pan: this.footIsLeft ? -0.28 : 0.28 }, this.tiger.sprinting)
     }
     if (this.tiger.landedEvent) {
-      audio.land()
+      // How hard it hit, not just that it did. A step off a kerb and the end of
+      // a full pounce arc are the same event to the game and very different
+      // sounds; 8 m/s is about a flat run's worth of drop.
+      audio.land(this.tiger.landImpact / 8)
       this.particles.dust(this.tiger.pos, 8, 0.45)
     }
     if (this.tiger.pounceEvent) audio.pounce()

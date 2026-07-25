@@ -474,6 +474,67 @@ export class Audio {
   }
 
   /**
+   * A scatter of very short noise bursts, each with its own band, level, time
+   * and stereo position.
+   *
+   * This is the primitive the whole sound design was missing. Dry grass, grit
+   * thrown off a paw, soil compacting, debris off a bullet strike and tissue
+   * tearing are all the same physical event: a few hundred tiny independent
+   * collisions spread over a few tens of milliseconds. A single filtered noise
+   * burst with a smooth exponential envelope is the one thing that emphatically
+   * is *not* that — it is a hiss, and the ear files it as a synthesiser.
+   *
+   * Scattering the energy into grains buys three things at once. The sound gets
+   * a texture, because the envelope is now jagged on the millisecond scale the
+   * ear reads material from. It stops repeating, because six grains at random
+   * times and bands never land the same way twice. And it gets width for free,
+   * since each grain is panned independently — which is most of why the result
+   * sounds recorded rather than generated.
+   *
+   * Grains are biased toward the front of the window: debris leaves an impact
+   * all at once and then peters out, rather than arriving evenly.
+   */
+  private grains(
+    dest: GainNode,
+    count: number,
+    spread: number,
+    gain: number,
+    fLo: number,
+    fHi: number,
+    grainLo: number,
+    grainHi: number,
+    at = 0,
+    q = 1.8,
+    width = 0,
+  ) {
+    const ctx = this.ctx
+    if (!ctx) return
+    for (let i = 0; i < count; i++) {
+      let d = dest
+      if (width > 0 && ctx.createStereoPanner) {
+        const g = ctx.createGain()
+        const p = ctx.createStereoPanner()
+        p.pan.value = rand(-width, width)
+        g.connect(p)
+        p.connect(dest)
+        d = g
+      }
+      const f = rand(fLo, fHi)
+      this.noise(
+        d,
+        rand(grainLo, grainHi),
+        gain * rand(0.4, 1),
+        'bandpass',
+        f,
+        f * rand(0.65, 1.15),
+        at + Math.pow(Math.random(), 0.7) * spread,
+        q,
+        0.0006,
+      )
+    }
+  }
+
+  /**
    * A vocal tract. A buzzing source through three resonant bandpasses is the
    * whole trick behind anything that sounds like a throat rather than a synth —
    * the formant frequencies are what your ear reads as a vowel, and moving them
@@ -673,14 +734,21 @@ export class Audio {
 
     // Two bands sweeping past each other is what turns a noise fade into
     // something moving through air.
-    this.noise(mid, dur, heavy ? 0.2 : 0.15, 'bandpass', rand(400, 550), rand(1600, 2200), 0, 1.6)
-    this.noise(mid, dur * 0.8, 0.09, 'highpass', 1800, 4200, 0.02, 0.8)
+    this.noise(mid, dur, heavy ? 0.34 : 0.26, 'bandpass', rand(400, 550), rand(1600, 2200), 0, 1.6)
+    this.noise(mid, dur * 0.8, 0.2, 'highpass', 1800, 4200, 0.02, 0.8)
     // Displaced air. Without this the whoosh is all hiss and reads as a sword
     // rather than as a limb with a hundred kilos of cat behind it — a paw that
     // wide pushes a slug of low-mid ahead of itself, and the ear uses exactly
     // that to judge how heavy the thing swinging is.
-    this.noise(mid, dur * 1.1, heavy ? 0.26 : 0.17, 'lowpass', rand(260, 340), rand(90, 130), 0.01, 1.1, 0.05)
-    this.tone(mid, 'sine', heavy ? 190 : 240, heavy ? 70 : 96, dur * 0.75, heavy ? 0.14 : 0.07, 0.01, 0.04)
+    //
+    // It is a *slug*, though, not the sound itself. Carrying it at the level it
+    // used to be left the swing measuring 86% below 250 Hz — the air layers it
+    // is supposed to sit under were 15 dB down, and the whoosh had no whoosh in
+    // it. It gives weight from underneath; it does not get to be the sound.
+    this.noise(mid, dur * 1.1, heavy ? 0.15 : 0.1, 'lowpass', rand(260, 340), rand(90, 130), 0.01, 1.1, 0.05)
+    this.tone(mid, 'sine', heavy ? 190 : 240, heavy ? 70 : 96, dur * 0.75, heavy ? 0.09 : 0.045, 0.01, 0.04)
+    // Fur moving through its own air, up where the ear places motion.
+    this.noise(mid, dur * 0.9, 0.07, 'bandpass', rand(3000, 4200), rand(5500, 7500), 0.01, 0.9, 0.03)
   }
 
   /**
@@ -698,12 +766,22 @@ export class Audio {
     // measured, a fatter transient took the strike's peak *above* a rifle going
     // off while leaving it four decibels quieter, which is the worst of both.
     // The ear reads sharpness from the transient and force from what follows.
-    this.noise(dest, 0.02, 0.35, 'highpass', 5200 * j, 2600, 0, 0.7, 0.0008)
+    //
+    // Its corner also sits well below the rifle's. Measured, a claw strike and a
+    // close gunshot were the two most confusable sounds in the game — both loud,
+    // both broadband, both instant — which in play means not knowing whether you
+    // just hit someone or just got shot. A claw is not a blast: it is duller on
+    // the very top and far wetter underneath, and separating them there is what
+    // makes the two unmistakable without making either quieter.
+    this.noise(dest, 0.022, 0.2, 'highpass', 3600 * j, 2200, 0, 0.7, 0.0012)
     // Flat impact on a torso.
     this.noise(dest, 0.14, 0.6, 'lowpass', 900 * j, 220, 0.004, 1.2, 0.002)
     this.tone(dest, 'triangle', 330 * j, 88, 0.13, 0.28, 0.004, 0.002)
-    // Wet drag. Bandpassed noise with a slow tail is cloth and skin opening.
-    this.noise(dest, 0.26, 0.28, 'bandpass', 1400 * j, 620, 0.02, 2.4, 0.01)
+    // Wet drag. Bandpassed noise with a slow tail is cloth and skin opening —
+    // and it is the claw's identity, so it carries rather than garnishes.
+    this.noise(dest, 0.34, 0.46, 'bandpass', 1400 * j, 620, 0.02, 2.4, 0.012)
+    // Tissue and cloth separating fibre by fibre.
+    this.grains(dest, 8, 0.2, 0.16, 800, 3600, 0.006, 0.03, 0.025, 2.8, 0.5)
     // Weight.
     this.tone(dest, 'sine', 130, 44, 0.24, 0.42, 0, 0.003)
   }
@@ -841,26 +919,47 @@ export class Audio {
     const p: Place = { pan: place.pan, dist: distance, roll: AUDIO.gunRoll }
     const dest = this.out(LEVELS.gunshot, p, 1.6)
     if (!dest) return
-    this.budget(PRI.high, 0.9)
+    this.budget(PRI.high, 1.2)
     const near = 1 / (1 + distance * 0.06)
     if (distance < 26) this.duck(0.3 * near)
     const at = this.travel(p)
     const j = rand(0.94, 1.08)
 
-    // Firing pin, then the crack. Both are transients measured in milliseconds.
+    /**
+     * How much top end is left by the time it arrives.
+     *
+     * This is the number that was missing, and it is why the old shot measured
+     * identically at six metres and sixty — 1% midrange and no presence at all
+     * at either. Level was the only thing distance changed, so every shot was
+     * the same shot at a different volume. Real distance is a *lowpass*: it
+     * takes the crack off a rifle long before it takes the weight out of it,
+     * which is exactly why you can tell a near shot from a far one instantly
+     * even when both are loud.
+     *
+     * A 22 m e-folding is steeper than dry-air absorption alone would give,
+     * which is correct here: the sound is crossing scrub and a treeline, and
+     * foliage scatters treble far harder than air does.
+     */
+    const bright = Math.exp(-distance / 22)
+
+    // Firing pin and hammer — mechanical, and only if you are next to him.
+    if (distance < 30) {
+      this.noise(dest, 0.004, 0.14 * near * bright, 'highpass', 5000, 5000, at - 0.002, 0.7, 0.0004)
+    }
+
+    // The crack. Short, *high*, and its filter corner does not move.
     //
-    // These are kept deliberately modest. A crack is the *shape* of a gunshot,
-    // not its loudness: pushing it higher only buys peak, and peak is the one
-    // currency the limiter confiscates. Everything below the crack is what
-    // actually makes the shot feel loud.
-    //
-    // Measured, the earlier balance spent an eighteen-decibel crest factor on a
-    // six-millisecond spike and arrived five decibels *under* the roar. Moving
-    // that budget into the blast and the slap — longer and louder, the pin and
-    // crack cut back to pay for it — buys loudness at the same peak, because
-    // loudness is energy over a window and a spike has almost none.
-    this.noise(dest, 0.006, 0.2 * near, 'highpass', 6000, 4000, at, 0.7, 0.0006)
-    this.noise(dest, 0.035, 0.48 * near, 'highpass', 3800 * j, 900, at + 0.001, 0.9, 0.0008)
+    // The old crack was a highpass sweeping 3800 Hz down to 900 over 35 ms —
+    // so it spent almost its entire life as a wide-open low-mid hiss, which is
+    // the opposite of a crack. Held at 2.5 kHz and over in 7 ms, the same
+    // energy reads as the snap of a supersonic round leaving a barrel.
+    this.noise(dest, 0.007, 0.62 * bright, 'highpass', 2500 * j, 2500 * j, at, 0.6, 0.0004)
+    // The very top of it. This is nearly all that separates a rifle from a
+    // shotgun, and it is the first thing distance takes away.
+    this.noise(dest, 0.004, 0.4 * bright, 'bandpass', 7000 * j, 7000 * j, at + 0.0004, 0.8, 0.0003)
+    // Blast edge: the broadband middle of the muzzle report.
+    this.noise(dest, 0.03, 0.5 * (0.35 + 0.65 * bright), 'bandpass', 1500 * j, 1200, at + 0.001, 0.7, 0.0006)
+
     // Muzzle blast — the loud part, and the part that survives distance.
     this.noise(dest, 0.24, 1.05, 'lowpass', 1600 * j, 260, at + 0.002, 1.3, 0.0015)
     // The slap off the shooter's own chest and the ground under him. This band
@@ -869,6 +968,12 @@ export class Audio {
     this.noise(dest, 0.18, 0.72, 'bandpass', 1100 * j, 500, at + 0.003, 1.1, 0.002)
     this.tone(dest, 'sine', 130 * j, 42, 0.26, 0.7, at + 0.002, 0.0015)
     this.tone(dest, 'square', 78, 34, 0.16, 0.3, at + 0.002, 0.0015)
+
+    // Ground bounce. A rifle fired over open dirt sends a copy of itself into
+    // the ground and gets it back a few milliseconds later, darker; that short
+    // double is a lot of why a real shot outdoors sounds like it has a floor
+    // under it rather than happening in a vacuum.
+    this.noise(dest, 0.09, 0.3 * (0.4 + 0.6 * bright), 'lowpass', 1300, 300, at + rand(0.007, 0.013), 1.0, 0.001)
 
     // The tail. Distant shots are almost entirely this: a low roll coming back
     // off the treeline, longer and darker the further out the shooter is.
@@ -885,12 +990,43 @@ export class Audio {
     const tail = 0.35 + Math.min(1.1, distance * 0.03)
     this.noise(dest, tail, 0.24 * Math.sqrt(0.4 / tail), 'lowpass', 900, 150, at + 0.05, 0.9, 0.03)
 
+    // Discrete slapback off the treeline and the valley wall, ahead of the
+    // convolved tail.
+    //
+    // A reverb tail alone is a smooth wash, and smooth is what makes a gunshot
+    // sound like a plugin. Outdoors you do not get a wash — you get three or
+    // four separate, individually audible returns from named directions, each
+    // darker and wider than the last, and *then* the wash. Panning them
+    // opposite the shot puts them on the far side of the valley where they
+    // belong, and is most of the reason this now reads as a place rather than
+    // as an effect.
+    const ctx = this.ctx
+    if (ctx) {
+      const echoes = distance > 12 ? 4 : 3
+      for (let i = 0; i < echoes; i++) {
+        const delay = 0.11 + i * rand(0.1, 0.19) + distance * 0.0016
+        const lvl = 0.19 * Math.pow(0.62, i) * (0.5 + 0.5 * near)
+        let d = dest
+        if (ctx.createStereoPanner) {
+          const g = ctx.createGain()
+          const pan = ctx.createStereoPanner()
+          pan.pan.value = -(place.pan ?? 0) * rand(0.4, 0.9) + rand(-0.3, 0.3)
+          g.connect(pan)
+          pan.connect(dest)
+          d = g
+        }
+        this.noise(d, 0.16 + i * 0.06, lvl, 'lowpass', 1500 * Math.pow(0.68, i), 260, at + delay, 0.9, 0.012)
+      }
+    }
+
     // Working the bolt. Only audible if he is close enough to matter.
     if (distance < 22) {
       const b = at + rand(0.34, 0.46)
       this.noise(dest, 0.03, 0.14 * near, 'bandpass', 2800, 1800, b, 6, 0.001)
       this.noise(dest, 0.045, 0.1 * near, 'bandpass', 1600, 3200, b + 0.1, 5, 0.002)
       this.tone(dest, 'triangle', 2400, 1900, 0.04, 0.05 * near, b + 0.105, 0.001)
+      // Brass hitting dirt.
+      this.grains(dest, 2, 0.06, 0.05 * near, 3000, 6000, 0.004, 0.012, b + 0.26, 4, 0.5)
     }
   }
 
@@ -902,29 +1038,55 @@ export class Audio {
     const ctx = this.ctx
     if (!ctx) return
     const dest = this.out(LEVELS.bulletWhiz, { pan: 0 }, 0.4)
-    if (!dest || !this.budget(PRI.normal, 0.2)) return
+    if (!dest || !this.budget(PRI.normal, 0.35)) return
     const t = this.t
-    const dur = 0.13
+    const dur = 0.1
     const side = (place.pan ?? 0) >= 0 ? 1 : -1
 
+    // The ballistic crack. A round going past faster than sound does not
+    // whistle — it drags a shock cone that arrives as a single spike, and that
+    // spike is the entire identity of "someone is shooting at me". It is also
+    // what keeps this from being mistaken for getting hit: it is over in three
+    // milliseconds and has no low end underneath it at all.
+    let crackDest = dest
+    if (ctx.createStereoPanner) {
+      const g = ctx.createGain()
+      const pan = ctx.createStereoPanner()
+      pan.pan.value = -0.7 * side
+      g.connect(pan)
+      pan.connect(dest)
+      crackDest = g
+    }
+    this.noise(crackDest, 0.003, 0.75, 'highpass', 3500, 3500, 0, 0.6, 0.0003)
+    this.noise(crackDest, 0.0025, 0.5, 'bandpass', 8000, 8000, 0.0003, 0.9, 0.0003)
+
+    // The zip behind it, dropping in pitch as it goes by. This is real Doppler:
+    // the band falls because the source is receding, and the pan sweeps with it.
     const src = ctx.createBufferSource()
     src.buffer = this.noiseShort
     src.loop = true
     const bp = ctx.createBiquadFilter()
     bp.type = 'bandpass'
-    bp.frequency.setValueAtTime(rand(2600, 3400), t)
-    bp.frequency.exponentialRampToValueAtTime(rand(900, 1200), t + dur)
-    bp.Q.value = 4.5
+    bp.frequency.setValueAtTime(rand(4200, 5200), t)
+    bp.frequency.exponentialRampToValueAtTime(rand(1500, 2000), t + dur)
+    bp.Q.value = 3.2
+    // Keep the body of the zip out of the low end, so it stays a passing round
+    // rather than a thump. The old one measured 44% sub, which is why it read
+    // as an impact.
+    const hp = ctx.createBiquadFilter()
+    hp.type = 'highpass'
+    hp.frequency.value = 900
     const env = ctx.createGain()
     env.gain.setValueAtTime(0.0001, t)
-    env.gain.exponentialRampToValueAtTime(0.22, t + 0.03)
+    env.gain.exponentialRampToValueAtTime(0.3, t + 0.008)
     env.gain.exponentialRampToValueAtTime(0.0001, t + dur)
     src.connect(bp)
-    bp.connect(env)
+    bp.connect(hp)
+    hp.connect(env)
     if (ctx.createStereoPanner) {
       const pan = ctx.createStereoPanner()
-      pan.pan.setValueAtTime(-0.85 * side, t)
-      pan.pan.linearRampToValueAtTime(0.85 * side, t + dur)
+      pan.pan.setValueAtTime(-0.9 * side, t)
+      pan.pan.linearRampToValueAtTime(0.9 * side, t + dur)
       env.connect(pan)
       pan.connect(dest)
     } else {
@@ -933,50 +1095,171 @@ export class Audio {
     src.start(t, Math.random() * 0.5)
     src.stop(t + dur + 0.02)
 
-    // Where it landed, a moment later.
-    this.noise(dest, 0.09, 0.1, 'lowpass', 1200, 300, dur + 0.02, 1.2, 0.001)
+    // Where it landed, a moment later — dirt kicked up, off to one side.
+    this.grains(dest, 5, 0.08, 0.13, 1200, 5000, 0.004, 0.014, dur + 0.03, 1.6, 0.8)
+    this.noise(dest, 0.07, 0.11, 'lowpass', 900, 260, dur + 0.03, 1.2, 0.001)
   }
 
-  /** Taking a round. Meat, a yelp, and the world going briefly deaf. */
+  /**
+   * Taking a round.
+   *
+   * This has to be the least ambiguous sound in the game. It is the one event
+   * the player must identify instantly, without looking at the health bar, and
+   * without confusing it for a near miss, a kill, or a feed — so it is built
+   * around one thing nothing else in the mix is allowed to do: **a sustained
+   * pure high tone.** Every other sound here is noise, formants or a low
+   * oscillator. The ring is the signature, and it works because a listener can
+   * pick a steady sine out of a broadband mix at almost any level.
+   *
+   * The rest is the physical event, in the order it happens: the shock of the
+   * round arriving, the wet slap of it entering, the body absorbing it, the
+   * animal's own cry heard from inside its skull, and blood in the ears while
+   * the concussion filter drags the whole world dark for a beat.
+   */
   hurt() {
+    const ctx = this.ctx
     const dest = this.out(LEVELS.hurt, {}, 0.9)
     if (!dest) return
-    this.budget(PRI.high, 0.8)
-    this.concuss(0.75)
-    this.duck(0.5)
-    // Impact into the tiger's own body — close, so mostly low end.
-    this.noise(dest, 0.06, 0.45, 'lowpass', 1400, 260, 0, 1.1, 0.001)
+    this.budget(PRI.high, 1.2)
+    this.concuss(0.8)
+    this.duck(0.55)
+
+    // The round arriving — a hard, bright edge, and then meat.
+    this.noise(dest, 0.004, 0.32, 'highpass', 3200, 3200, 0, 0.7, 0.0004)
+    // Wet entry. Granular and mid-forward: this is the layer that says flesh
+    // rather than drum, and the old version had nothing like it.
+    this.grains(dest, 7, 0.045, 0.2, 700, 3400, 0.004, 0.016, 0.001, 2.2, 0.35)
+    this.noise(dest, 0.05, 0.42, 'lowpass', 1500, 300, 0, 1.1, 0.0012)
+    // The body taking it.
     this.tone(dest, 'sine', 170, 52, 0.2, 0.4, 0, 0.002)
-    // The animal's own reaction, heard from inside its head.
-    const ctx = this.ctx
+    this.tone(dest, 'sine', 68, 30, 0.32, 0.3, 0.004, 0.004)
+
     if (ctx) {
       const t = this.t + 0.03
+
+      // The cry. Built like the roar rather than as a bare sawtooth — a
+      // fluttering, saturated source through a wide-open tract — because a
+      // wounded animal's voice tears in exactly the way a clean oscillator
+      // cannot. The pitch snaps up, breaks, and collapses.
+      const am = ctx.createGain()
+      am.gain.value = 0.6
+      const lfo = ctx.createOscillator()
+      lfo.type = 'triangle'
+      lfo.frequency.setValueAtTime(38, t)
+      lfo.frequency.linearRampToValueAtTime(62, t + 0.4)
+      const lg = ctx.createGain()
+      lg.gain.value = 0.45
+      lfo.connect(lg)
+      lg.connect(am.gain)
+      lfo.start(t)
+      lfo.stop(t + 0.46)
+
       const osc = ctx.createOscillator()
       osc.type = 'sawtooth'
       osc.frequency.setValueAtTime(230, t)
       osc.frequency.exponentialRampToValueAtTime(430, t + 0.05)
       osc.frequency.exponentialRampToValueAtTime(120, t + 0.42)
+      osc.connect(am)
+      osc.start(t)
+      osc.stop(t + 0.45)
+
       const env = ctx.createGain()
       env.gain.setValueAtTime(0.0001, t)
       env.gain.exponentialRampToValueAtTime(0.3, t + 0.03)
       env.gain.exponentialRampToValueAtTime(0.0001, t + 0.42)
       env.connect(dest)
-      this.formants(env, osc, [420, 1250, 2600], [1, 0.4, 0.1], 7)
-      osc.start(t)
-      osc.stop(t + 0.45)
+      if (this.drive) {
+        const sh = ctx.createWaveShaper()
+        sh.curve = this.drive
+        sh.oversample = '2x'
+        am.connect(sh)
+        this.formants(env, sh, [420, 1250, 2600], [1, 0.4, 0.12], 7)
+      } else {
+        this.formants(env, am, [420, 1250, 2600], [1, 0.4, 0.12], 7)
+      }
+
+      // Tinnitus. The signature — and the only sustained pure tone in the game.
+      //
+      // It comes in a beat *after* the impact rather than with it, which is
+      // both what actually happens and what keeps it from being buried by the
+      // transient. Two detuned partials beat slowly against each other so it
+      // shimmers instead of sitting there like a test tone.
+      const ring = ctx.createGain()
+      ring.gain.setValueAtTime(0.0001, t)
+      ring.gain.exponentialRampToValueAtTime(0.075, t + 0.09)
+      ring.gain.exponentialRampToValueAtTime(0.0001, t + 1.5)
+      ring.connect(dest)
+      const rf = rand(4100, 4900)
+      for (const [mult, lvl] of [[1, 1], [1.006, 0.7], [2.02, 0.22]] as const) {
+        const o = ctx.createOscillator()
+        o.type = 'sine'
+        o.frequency.value = rf * mult
+        const g = ctx.createGain()
+        g.gain.value = lvl
+        o.connect(g)
+        g.connect(ring)
+        o.start(t)
+        o.stop(t + 1.55)
+      }
     }
+
     // Blood in the ears.
     this.noise(dest, 0.5, 0.08, 'lowpass', 300, 90, 0.05, 1, 0.02)
   }
 
-  /** Meat. Not a coin — a wet, low, satisfying swallow. */
-  pickup() {
+  /**
+   * One mouthful, while feeding.
+   *
+   * Eating used to fire `biteKill` — the identical sound to killing someone —
+   * and the seconds of feeding before it were silent. So the single most
+   * repeated action in the game had no voice of its own and its payoff was
+   * indistinguishable from a kill.
+   *
+   * A chew is deliberately built out of everything a kill is not: no bone, no
+   * transient, no sub. It is slow, wet, mid-heavy and *soft-edged* — the attack
+   * is twenty times longer than any impact in the game — so it can repeat every
+   * few hundred milliseconds without fatiguing, and can never be mistaken for
+   * damage in either direction.
+   */
+  chew() {
+    const dest = this.out(LEVELS.chew, {}, 0.7)
+    if (!dest || !this.budget(PRI.low, 0.4)) return
+    const j = rand(0.86, 1.18)
+    // Jaw closing through soft tissue — no edge on it at all.
+    this.noise(dest, rand(0.1, 0.16), 0.22 * j, 'bandpass', 480 * j, 260, 0, 1.5, 0.022)
+    // Wet fibre separating. Granular, so each mouthful is its own mouthful, and
+    // the band runs well up into the mids — the detail that reads as *wet* is
+    // all above 1 kHz, and without it a chew is just a soft thud.
+    this.grains(dest, 7, 0.13, 0.26, 700, 4200, 0.006, 0.026, 0.01, 2.6, 0.45)
+    // Suction as the jaw opens again.
+    this.noise(dest, 0.09, 0.16 * j, 'bandpass', 1800 * j, 900, rand(0.11, 0.17), 3.2, 0.02)
+    // Just enough body that it has a mouth around it.
+    this.tone(dest, 'sine', 120 * j, 78, 0.14, 0.09, 0.005, 0.02)
+  }
+
+  /**
+   * Swallowing — the payoff at the end of a feed, and the meat pickup.
+   *
+   * A descending wet gulp. Nothing else in the game falls in pitch through the
+   * low mids like this, which is what makes "I got the health" legible without
+   * a toast.
+   */
+  gulp(big = false) {
     const dest = this.out(LEVELS.pickup, {}, 0.6)
     if (!dest) return
-    this.budget(PRI.normal, 0.4)
-    this.noise(dest, 0.12, 0.16, 'lowpass', 1100, 300, 0, 1.4, 0.004)
-    this.tone(dest, 'sine', 180, 320, 0.16, 0.16, 0.03, 0.01)
-    this.tone(dest, 'triangle', 540, 810, 0.2, 0.07, 0.06, 0.015)
+    this.budget(PRI.normal, 0.5)
+    const j = rand(0.92, 1.1)
+    // The throat working, top to bottom.
+    this.noise(dest, big ? 0.26 : 0.18, big ? 0.24 : 0.17, 'bandpass', 900 * j, 260 * j, 0, 2.8, 0.015)
+    this.tone(dest, 'sine', 260 * j, 90 * j, big ? 0.3 : 0.22, big ? 0.2 : 0.14, 0.01, 0.02)
+    this.grains(dest, big ? 5 : 3, 0.1, 0.07, 500, 2200, 0.006, 0.022, 0.02, 2.4, 0.35)
+    // Settling.
+    if (big) this.tone(dest, 'sine', 70, 44, 0.4, 0.22, 0.1, 0.03)
+  }
+
+  /** Meat. Not a coin — a wet, low, satisfying swallow. */
+  pickup() {
+    this.gulp(false)
   }
 
   /**
@@ -998,54 +1281,156 @@ export class Audio {
     this.noise(dest, 0.5, 0.05, 'highpass', 3000, 8000, 0, 0.7, 0.2)
   }
 
-  /** Leaving the ground: an effort grunt and the air moving. */
+  /**
+   * Leaving the ground.
+   *
+   * The old version of this was a sawtooth run through vowel formants, which is
+   * a synthesiser making an "uh" noise, not an animal jumping. A pounce is
+   * three physical events and only one of them is voiced: the hind claws
+   * digging in and tearing a divot out of the ground, the body's own mass
+   * loading and releasing, and an involuntary exhale forced out by the
+   * abdominal wall — which is *breath*, mostly noise, with only a trace of
+   * vocal fold under it.
+   *
+   * The push-off is the loudest part and it is the part that was missing
+   * entirely. It is what tells you the jump had a hundred kilos behind it.
+   */
   pounce() {
-    const dest = this.out(LEVELS.pounce, {}, 0.5)
-    if (!dest || !this.budget(PRI.normal, 0.4)) return
     const ctx = this.ctx
-    this.noise(dest, 0.22, 0.1, 'bandpass', 500, 1900, 0, 1.5, 0.02)
-    if (ctx) {
-      const t = this.t
-      const osc = ctx.createOscillator()
-      osc.type = 'sawtooth'
-      osc.frequency.setValueAtTime(150 * rand(0.9, 1.1), t)
-      osc.frequency.exponentialRampToValueAtTime(95, t + 0.2)
-      const env = ctx.createGain()
-      env.gain.setValueAtTime(0.0001, t)
-      env.gain.exponentialRampToValueAtTime(0.16, t + 0.02)
-      env.gain.exponentialRampToValueAtTime(0.0001, t + 0.2)
-      env.connect(dest)
-      this.formants(env, osc, [500, 1100, 2400], [1, 0.3, 0.08], 6)
-      osc.start(t)
-      osc.stop(t + 0.22)
-    }
-  }
+    const dest = this.out(LEVELS.pounce, {}, 0.5)
+    if (!ctx || !dest || !this.budget(PRI.normal, 0.5)) return
+    const t = this.t
+    const j = rand(0.92, 1.1)
 
-  /** Two hundred kilos arriving. Pads, then the dirt, then the chest. */
-  land() {
-    const dest = this.out(LEVELS.land, {}, 0.8)
-    if (!dest) return
-    this.budget(PRI.normal, 0.5)
-    this.noise(dest, 0.09, 0.32, 'lowpass', 520, 130, 0, 1.2, 0.001)
-    this.tone(dest, 'sine', 90, 38, 0.22, 0.28, 0, 0.003)
-    // Grit thrown out from under the paws.
-    this.noise(dest, 0.26, 0.1, 'highpass', 2400, 5200, 0.02, 0.8, 0.006)
+    // Claws into dirt, and the divot coming out. Granular and spread over a
+    // long window rather than stacked on the first millisecond.
+    //
+    // A pounce must not read as an impact. Measured against a close rifle it
+    // was the second most confusable pair in the game, for the same reason the
+    // claw strike was: an instant broadband attack with a low thump under it
+    // describes a gunshot exactly. So the push-off *swells* — the ground loads
+    // over eighty milliseconds before it lets go — and the sound's centre of
+    // mass is the breath, which nothing else here has.
+    this.grains(dest, 8, 0.13, 0.055, 700, 4200, 0.006, 0.022, 0.005, 1.5, 0.5)
+    this.noise(dest, 0.13, 0.06, 'lowpass', 620 * j, 190, 0, 1.1, 0.03)
+    // Soil compressing under the load.
+    this.tone(dest, 'sine', 96 * j, 52, 0.16, 0.055, 0, 0.03)
+
+    // The exhale. Noise through a slightly open tract, so it is a breath with a
+    // voice behind it rather than a vowel: the formants are fed from the noise,
+    // and the sawtooth sits underneath at a fifth of the level just to give the
+    // breath a pitch centre.
+    const bs = ctx.createBufferSource()
+    bs.buffer = this.noiseShort
+    bs.loop = true
+    const bp = ctx.createBiquadFilter()
+    bp.type = 'bandpass'
+    bp.frequency.setValueAtTime(720 * j, t + 0.01)
+    bp.frequency.exponentialRampToValueAtTime(340 * j, t + 0.26)
+    bp.Q.value = 0.9
+    const breath = ctx.createGain()
+    breath.gain.setValueAtTime(0.0001, t + 0.01)
+    breath.gain.exponentialRampToValueAtTime(0.22, t + 0.06)
+    breath.gain.exponentialRampToValueAtTime(0.0001, t + 0.34)
+    bs.connect(bp)
+    bp.connect(breath)
+    breath.connect(dest)
+    bs.start(t + 0.01, Math.random() * 0.4)
+    bs.stop(t + 0.32)
+    this.formants(breath, bp, [520 * j, 1150, 2500], [0.5, 0.22, 0.07], 4)
+
+    const osc = ctx.createOscillator()
+    osc.type = 'sawtooth'
+    osc.frequency.setValueAtTime(128 * j, t + 0.012)
+    osc.frequency.exponentialRampToValueAtTime(88, t + 0.22)
+    const ve = ctx.createGain()
+    ve.gain.setValueAtTime(0.0001, t + 0.012)
+    ve.gain.exponentialRampToValueAtTime(0.045, t + 0.04)
+    ve.gain.exponentialRampToValueAtTime(0.0001, t + 0.24)
+    osc.connect(ve)
+    ve.connect(dest)
+    osc.start(t + 0.012)
+    osc.stop(t + 0.26)
+
+    // Fur and the air it drags. Quiet, but it is the part that reads as a body.
+    this.noise(dest, 0.3, 0.03, 'highpass', 2600, 1500, 0.03, 0.7, 0.05)
   }
 
   /**
-   * A paw on ground. Pads are soft, so there is no click: a dull low thud and
-   * the grass it went through. Everything about it is randomised, because
-   * footsteps are the sound a player hears ten thousand times.
+   * Two hundred kilos arriving. Pads, then the dirt, then the chest.
+   *
+   * `force` is roughly how fast it hit, normalised so 1 is a landing off a flat
+   * run and 2 is the end of a full pounce arc. It moves everything at once —
+   * level, how much soil is displaced, whether the air gets knocked out — which
+   * is the whole difference between a hop and a crash, and is what stops every
+   * landing in the game sounding like the same landing.
+   */
+  land(force = 1) {
+    const dest = this.out(LEVELS.land, {}, 0.8)
+    if (!dest) return
+    this.budget(PRI.normal, 0.6)
+    const f = Math.max(0.35, Math.min(2.2, force))
+    const j = rand(0.9, 1.12)
+
+    // Pad slap. Fast, but not a click — the cushion takes the edge off.
+    this.noise(dest, 0.055, 0.2 * f, 'bandpass', 520 * j, 300, 0, 1.1, 0.0012)
+    // The ground taking the weight.
+    this.noise(dest, 0.1, 0.3 * f, 'lowpass', 460 * j, 120, 0.002, 1.2, 0.0015)
+    this.tone(dest, 'sine', 88 * j, 36, 0.24, 0.26 * f, 0, 0.003)
+    // Soil and grit thrown out sideways from under the paws. Granular and wide:
+    // this is the layer that says "dirt" rather than "drum", and the old single
+    // highpassed hiss did not survive the mix at all.
+    this.grains(dest, Math.round(6 + f * 5), 0.13, 0.16 * f, 1400, 7000, 0.003, 0.014, 0.006, 1.6, 0.75)
+    // Dry litter kicked up, quieter and later than the grit.
+    this.grains(dest, 4, 0.22, 0.07 * f, 2600, 9000, 0.004, 0.02, 0.03, 1.3, 0.85)
+    // Air forced out of the chest, but only when it actually hurt.
+    if (f > 1.15) {
+      this.noise(dest, 0.2, 0.06 * (f - 1), 'bandpass', 620, 300, 0.02, 1.2, 0.02)
+    }
+  }
+
+  /**
+   * A paw on ground.
+   *
+   * Pads are soft, so there is no click — but the old version was *only* the
+   * pad, a lowpassed thud with an optional whisper of grass twenty decibels
+   * under it. Measured, it was 100% sub and low: a kick drum, not a footfall.
+   * What identifies a surface is entirely in the top four octaves, and it has
+   * to be at a level comparable to the thud, not hidden beneath it.
+   *
+   * The litter is granular rather than a single hiss because dry ground is a
+   * few dozen separate small collisions, and because grains at random times,
+   * bands and pan positions mean no two of the ten thousand steps a player
+   * hears are the same step.
    */
   footstep(place: Place = {}, heavy = false) {
     const dest = this.out(LEVELS.footstep, place, 0.35)
-    if (!dest || !this.budget(PRI.low, 0.2)) return
+    if (!dest || !this.budget(PRI.low, 0.3)) return
     const j = rand(0.85, 1.2)
-    this.noise(dest, heavy ? 0.11 : 0.085, (heavy ? 0.15 : 0.1) * j, 'lowpass', 380 * j, 110, 0, 1.3, 0.002)
-    this.tone(dest, 'sine', 78 * j, 44, heavy ? 0.1 : 0.08, heavy ? 0.08 : 0.055, 0, 0.002)
-    // Dry grass. Two thirds of the time, so the gait is not a metronome.
-    if (Math.random() < 0.68) {
-      this.noise(dest, rand(0.06, 0.13), rand(0.02, 0.05), 'bandpass', rand(2600, 4400), rand(1800, 3200), rand(0, 0.02), 1.1, 0.005)
+    const w = heavy ? 1 : 0.68
+
+    // The pad. Soft-edged and short.
+    this.noise(dest, heavy ? 0.09 : 0.07, 0.1 * w * j, 'lowpass', 400 * j, 150, 0, 1.2, 0.002)
+    // Weight through the leg.
+    this.tone(dest, 'sine', 78 * j, 44, heavy ? 0.1 : 0.08, 0.06 * w, 0, 0.0025)
+    // Ground litter. Always present — a step with no surface in it is a thump.
+    this.grains(
+      dest,
+      heavy ? 5 : 4,
+      heavy ? 0.05 : 0.07,
+      (heavy ? 0.09 : 0.065) * j,
+      1800,
+      heavy ? 7500 : 6000,
+      0.003,
+      0.012,
+      0.001,
+      1.7,
+      0.6,
+    )
+    // A blade of grass caught and released, or a claw over grit. Occasional, so
+    // the gait has variety rather than a fixed signature.
+    if (Math.random() < 0.45) {
+      this.noise(dest, rand(0.03, 0.07), rand(0.018, 0.032), 'bandpass', rand(3200, 6500), rand(1600, 3000), rand(0.005, 0.03), 2.2, 0.002)
     }
   }
 
