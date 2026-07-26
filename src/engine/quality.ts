@@ -38,20 +38,35 @@ export interface QualityPreset {
   smaa: boolean
   /** Multiplier on every foliage field's draw distance. */
   foliageDistance: number
+  /**
+   * Practical lights in the pool (see world/lamps.ts).
+   *
+   * Every one of them is evaluated for every lit pixel in the frame whether it
+   * is contributing anything or not — three has no per-object light culling, so
+   * a point light two hundred metres away still costs a full GGX evaluation on
+   * every blade of grass in front of the camera. Measured on the ground plane
+   * that came to roughly 0.7 ms per light at 1.3 megapixels, which made the pool
+   * the most expensive single thing in the frame.
+   *
+   * Unlike everything else here this is read once, at boot: the pool size is the
+   * scene's point-light count, and changing it recompiles every material in the
+   * world. See the note at the top of world/lamps.ts.
+   */
+  lightPool: number
 }
 
 /** Ordered worst to best; `tier` indexes this. */
 export const PRESETS: QualityPreset[] = [
   // mm/texel:                                                    47
-  { name: 'Low',    pixelRatio: 1.0,  shadowMapSize: 1024, shadowExtent: 24, godrays: false, bloom: false, smaa: false, foliageDistance: 0.5 },
+  { name: 'Low',    pixelRatio: 1.0,  shadowMapSize: 1024, shadowExtent: 24, godrays: false, bloom: false, smaa: false, foliageDistance: 0.5,  lightPool: 3 },
   // 29 mm/texel — the tightest of the four, because a 1024 map at this extent
   // would be the low tier and 2048 has the density to spend on coverage.
-  { name: 'Medium', pixelRatio: 1.25, shadowMapSize: 2048, shadowExtent: 30, godrays: false, bloom: true,  smaa: true,  foliageDistance: 0.72 },
+  { name: 'Medium', pixelRatio: 1.25, shadowMapSize: 2048, shadowExtent: 30, godrays: false, bloom: true,  smaa: true,  foliageDistance: 0.72, lightPool: 5 },
   // 33 mm/texel. This is where most machines settle, so it is the one tuned
   // against: 34 m covers the whole 30 m engagement range plus the huts behind it.
-  { name: 'High',   pixelRatio: 1.5,  shadowMapSize: 2048, shadowExtent: 34, godrays: true,  bloom: true,  smaa: true,  foliageDistance: 1.0 },
+  { name: 'High',   pixelRatio: 1.5,  shadowMapSize: 2048, shadowExtent: 34, godrays: true,  bloom: true,  smaa: true,  foliageDistance: 1.0,  lightPool: 7 },
   // 21 mm/texel *and* 44 m of reach — 4096 is the only tier that can buy both.
-  { name: 'Ultra',  pixelRatio: 2.0,  shadowMapSize: 4096, shadowExtent: 44, godrays: true,  bloom: true,  smaa: true,  foliageDistance: 1.25 },
+  { name: 'Ultra',  pixelRatio: 2.0,  shadowMapSize: 4096, shadowExtent: 44, godrays: true,  bloom: true,  smaa: true,  foliageDistance: 1.25, lightPool: 10 },
 ]
 
 /** 60 fps target with a little headroom before we call a frame late. */

@@ -644,7 +644,13 @@ export const DAY = {
  * so the budget is always spent on what the player can actually see.
  */
 export const LIGHTS = {
-  /** Lights in the pool. Every one of them exists for the whole session. */
+  /**
+   * Default pool size, used only when nobody says otherwise. What actually
+   * ships is `QualityPreset.lightPool`, chosen from the tier picked at boot —
+   * every light in the pool is shaded for every lit pixel in the frame whether
+   * it is lit or not, so the count is a frame-time decision before it is an art
+   * one. See engine/quality.ts and world/lamps.ts.
+   */
   pool: 10,
   /** Warm, short-range and physically falling off, so it pools on the ground. */
   fireColor: 0xff7a22,

@@ -16,6 +16,15 @@
  *
  * Anchors come from village.ts: one per campfire, one per hut doorway. Lamps
  * only burn after dusk, which the day/night clock drives through `darkness`.
+ *
+ * How big the pool is, though, is a performance decision rather than an art
+ * one. Three evaluates every point light in the scene for every lit pixel, with
+ * no per-object culling and no early-out for a light that is contributing
+ * nothing: an unlit lamp on the far side of the village still costs a full GGX
+ * evaluation on every blade of grass in front of the camera. Ten of them were
+ * measured at 6-9 ms of a 20 ms frame — more than the entire post chain. So the
+ * size comes from the quality tier picked at boot, and the pool simply spends
+ * whatever it is given more carefully.
  */
 import * as THREE from 'three'
 import { LIGHTS } from '../config'
@@ -58,9 +67,13 @@ export class Lamps {
   /**
    * Allocate the pool. Called once, after the village has registered every
    * anchor — the lights exist from here until the page closes.
+   *
+   * @param count How many lights to afford. The quality tier chosen at boot
+   * decides this, and nothing can change it afterwards: see the note above on
+   * why the count is fixed for the session.
    */
-  build() {
-    for (let i = 0; i < LIGHTS.pool; i++) {
+  build(count = LIGHTS.pool) {
+    for (let i = 0; i < count; i++) {
       // Decay exponent 2 is physical inverse-square falloff, which is what keeps
       // a fire pooling on the ground around itself instead of flatly lifting the
       // whole clearing.

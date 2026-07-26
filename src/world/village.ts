@@ -7,14 +7,23 @@
  * them with the clutter that sells a place as lived-in: fences, pots, baskets,
  * woodpiles, drying racks and carts.
  *
- * Everything is assembled from a handful of shared geometries and materials so
- * a village of twenty-odd huts is still only a few dozen draw calls.
+ * Everything is assembled from a handful of shared materials, and then baked:
+ * `mergeStatic` at the bottom of the build collapses the seven-hundred-odd
+ * meshes this file authors into one buffer per material per 40 m cell. Authoring
+ * a cart as nineteen parts and drawing it as nineteen draw calls are separate
+ * decisions, and only the first one is worth anything — see world/merge.ts.
+ *
+ * The one rule that falls out of that: anything animated by moving it or by
+ * writing to its material has no transform and no material of its own once
+ * merged, so it has to opt out with `userData.dynamic`. That is the campfire
+ * flames and the doorway glows, and nothing else.
  */
 import * as THREE from 'three'
 import { WORLD } from '../config'
 import { Rng } from '../engine/rng'
 import type { LampAnchor } from './lamps'
 import { surface } from './materials'
+import { mergeStatic } from './merge'
 import type { Collider } from './world'
 
 /** An additive glow the world fades up at dusk and down again at dawn. */
@@ -64,10 +73,20 @@ function lampGlow(ctx: VillageContext, w: number, h: number, color = 0xffa233, b
   ctx.nightGlows.push({ mat, base, phase: ctx.rng.range(0, 20) })
   const mesh = new THREE.Mesh(new THREE.PlaneGeometry(w, h), mat)
   mesh.renderOrder = 3
+  // Each glow owns its own opacity and its own phase; a merged batch would have
+  // one material for all of them and the village would gutter in unison.
+  mesh.userData.dynamic = true
   return mesh
 }
 
-/** Shared across every hut and prop; built once on first use. */
+/**
+ * Shared across every hut and prop; built once on first use.
+ *
+ * Every material a static prop uses has to live here rather than being built
+ * inline next to the mesh. A `new MeshStandardMaterial` per hide or per ash bed
+ * is its own batch in the merge, so ten campfires that ought to collapse to one
+ * draw call stay ten.
+ */
 interface Kit {
   clay: THREE.MeshStandardMaterial
   clayDark: THREE.MeshStandardMaterial
@@ -76,9 +95,30 @@ interface Kit {
   wood: THREE.MeshStandardMaterial
   rock: THREE.MeshStandardMaterial
   dark: THREE.MeshBasicMaterial
+  /** The two cloths on a drying rack. Double-sided; they hang free. */
+  hide: [THREE.MeshStandardMaterial, THREE.MeshStandardMaterial]
+  ash: THREE.MeshStandardMaterial
+  ember: THREE.MeshBasicMaterial
+  flame: THREE.MeshBasicMaterial
+  flameCore: THREE.MeshBasicMaterial
+}
+
+/** Unlit, additive and off the tone map, so fire blows out into the bloom. */
+function fireMat(color: number, opacity: number): THREE.MeshBasicMaterial {
+  return new THREE.MeshBasicMaterial({
+    color,
+    transparent: true,
+    opacity,
+    fog: false,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+    toneMapped: false,
+  })
 }
 
 function makeKit(): Kit {
+  const hideMat = (color: number) =>
+    new THREE.MeshStandardMaterial({ color, roughness: 1, side: THREE.DoubleSide })
   return {
     // Repeats are derived from the geometry these land on, not picked by eye.
     // A hut wall is a ~15 m circumference cylinder 2.5 m tall, so at the old
@@ -95,6 +135,11 @@ function makeKit(): Kit {
     wood: surface('bark', { repeat: [1, 3], roughness: 0.95 }),
     rock: surface('rock', { repeat: [2, 2], roughness: 1 }),
     dark: new THREE.MeshBasicMaterial({ color: 0x080605, fog: true }),
+    hide: [hideMat(0x8a6a4a), hideMat(0x9c9280)],
+    ash: new THREE.MeshStandardMaterial({ color: 0x3a342e, roughness: 1 }),
+    ember: fireMat(0xff4d0d, 0.55),
+    flame: fireMat(0xff7a18, 0.72),
+    flameCore: fireMat(0xffe9a8, 0.9),
   }
 }
 
@@ -173,14 +218,7 @@ function dryingRack(kit: Kit, rng: Rng): THREE.Group {
   for (let i = 0; i < hides; i++) {
     const w = rng.range(0.5, 0.9)
     const h = rng.range(0.7, 1.3)
-    const hide = new THREE.Mesh(
-      new THREE.PlaneGeometry(w, h),
-      new THREE.MeshStandardMaterial({
-        color: rng.chance(0.5) ? 0x8a6a4a : 0x9c9280,
-        roughness: 1,
-        side: THREE.DoubleSide,
-      }),
-    )
+    const hide = new THREE.Mesh(new THREE.PlaneGeometry(w, h), kit.hide[rng.chance(0.5) ? 0 : 1])
     hide.position.set(rng.range(-span / 2 + 0.3, span / 2 - 0.3), 2.0 - h / 2, 0)
     hide.rotation.y = rng.range(-0.2, 0.2)
     hide.castShadow = true
@@ -438,10 +476,7 @@ function campfire(kit: Kit, rng: Rng): THREE.Group {
   }
 
   // Ash bed under the logs.
-  const ash = new THREE.Mesh(
-    new THREE.CircleGeometry(0.85, 16),
-    new THREE.MeshStandardMaterial({ color: 0x3a342e, roughness: 1 }),
-  )
+  const ash = new THREE.Mesh(new THREE.CircleGeometry(0.85, 16), kit.ash)
   ash.rotation.x = -Math.PI / 2
   ash.position.y = 0.02
   ash.receiveShadow = true
@@ -459,29 +494,23 @@ function campfire(kit: Kit, rng: Rng): THREE.Group {
 
   // Two nested flame cones: an outer orange body and a hot inner core. Both
   // skip the tone map so they blow out into the bloom instead of clipping grey.
+  // The world scales and spins this group every frame, so it stays a real object
+  // rather than being baked into the merge.
   const flame = new THREE.Group()
   flame.name = 'flame'
+  flame.userData.dynamic = true
   flame.position.y = 0.45
-  const outer = new THREE.Mesh(
-    new THREE.ConeGeometry(0.42, 1.25, 9),
-    new THREE.MeshBasicMaterial({ color: 0xff7a18, transparent: true, opacity: 0.72, fog: false, depthWrite: false, blending: THREE.AdditiveBlending, toneMapped: false }),
-  )
+  const outer = new THREE.Mesh(new THREE.ConeGeometry(0.42, 1.25, 9), kit.flame)
   outer.position.y = 0.55
   flame.add(outer)
-  const core = new THREE.Mesh(
-    new THREE.ConeGeometry(0.2, 0.8, 8),
-    new THREE.MeshBasicMaterial({ color: 0xffe9a8, transparent: true, opacity: 0.9, fog: false, depthWrite: false, blending: THREE.AdditiveBlending, toneMapped: false }),
-  )
+  const core = new THREE.Mesh(new THREE.ConeGeometry(0.2, 0.8, 8), kit.flameCore)
   core.position.y = 0.34
   flame.add(core)
   flame.renderOrder = 3
   g.add(flame)
 
   // Embers glowing in the ash, independent of the flame flicker.
-  const embers = new THREE.Mesh(
-    new THREE.SphereGeometry(0.28, 8, 6),
-    new THREE.MeshBasicMaterial({ color: 0xff4d0d, transparent: true, opacity: 0.55, fog: false, depthWrite: false, blending: THREE.AdditiveBlending, toneMapped: false }),
-  )
+  const embers = new THREE.Mesh(new THREE.SphereGeometry(0.28, 8, 6), kit.ember)
   embers.position.y = 0.12
   embers.scale.y = 0.4
   g.add(embers)
@@ -636,5 +665,8 @@ export function buildVillage(ctx: VillageContext): THREE.Group {
     }
   }
 
+  // Nothing above this line has to know it is being batched, and nothing below
+  // it can move: from here the village is geometry, not objects.
+  mergeStatic(root, 40)
   return root
 }

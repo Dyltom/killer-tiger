@@ -46,7 +46,12 @@ const loading = $('loading')
 
 // ---------------------------------------------------------------- renderer
 const renderer = new THREE.WebGLRenderer({
-  antialias: true,
+  // Not a typo. Every frame is composed in the post chain's own render targets
+  // and the default framebuffer only ever receives the last fullscreen blit, so
+  // asking for a multisampled back buffer buys nothing and costs the bandwidth
+  // of writing four samples per pixel and resolving them. Antialiasing is the
+  // SMAA pass's job — see render/postfx.ts.
+  antialias: false,
   powerPreference: 'high-performance',
 })
 renderer.setSize(innerWidth, innerHeight)
@@ -78,16 +83,21 @@ sky.buildEnvironment(renderer)
 
 const input = new Input(renderer.domElement)
 input.nolock = NOLOCK
+
+// One place decides how expensive a frame is allowed to be, and it decides it
+// from measured frame time rather than from a settings menu the player has no
+// way to answer correctly. Built before the world because the world has to know
+// its opening tier: the size of the practical-light pool is baked into every
+// shader in the scene and cannot be changed later. Everything else the tier
+// controls is pushed through `onChange` below.
+const quality = new Quality()
+
 const hud = new Hud()
-const world = new World(scene)
+const world = new World(scene, quality.preset.lightPool)
 const game = new Game(scene, camera, world, hud)
 const postfx = new PostFX(renderer, scene, camera, sky.sunDir)
 
 // ------------------------------------------------------------- quality
-// One place decides how expensive a frame is allowed to be, and it decides it
-// from measured frame time rather than from a settings menu the player has no
-// way to answer correctly.
-const quality = new Quality()
 quality.onChange = (p) => {
   renderer.setPixelRatio(Math.min(devicePixelRatio, p.pixelRatio))
   postfx.setSize(innerWidth, innerHeight)

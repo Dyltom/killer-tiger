@@ -9,7 +9,7 @@
  * "am I hidden right now".
  */
 import * as THREE from 'three'
-import { COLORS, SKY, WORLD } from '../config'
+import { COLORS, LIGHTS, SKY, WORLD } from '../config'
 import { fbm, Rng } from '../engine/rng'
 import { buildBushes, buildGrass, buildTrees, type GrassPatch } from './flora'
 import type { ChunkedScatter } from './scatter'
@@ -179,7 +179,8 @@ export class World {
   /** Every chunked foliage field, culled and retuned together. */
   private fields: ChunkedScatter[] = []
 
-  constructor(scene: THREE.Scene) {
+  /** @param lightPool Practical lights to afford; see QualityPreset.lightPool. */
+  constructor(scene: THREE.Scene, lightPool = LIGHTS.pool) {
     this.buildTerrain()
     // Village first: everything after it tests against its colliders to keep
     // trees and rocks from growing through a wall.
@@ -196,7 +197,7 @@ export class World {
     )
     // Allocate the pool now that every fire and doorway has registered. It is
     // never resized after this — see world/lamps.ts.
-    this.lamps.build()
+    this.lamps.build(lightPool)
 
     const flora = {
       rng: this.rng,

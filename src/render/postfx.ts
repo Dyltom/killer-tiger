@@ -7,12 +7,21 @@
  * makes the bloom and the god rays pick up only genuinely bright pixels
  * instead of anything that happens to be pale.
  *
+ * The chain is fill-bound rather than geometry-bound: its cost is a fixed number
+ * of nanoseconds per pixel and it therefore scales with the square of the
+ * device pixel ratio, which is why it is the part of the frame that falls over
+ * first on a retina display. Both of the passes with real per-pixel work behind
+ * them — the god rays' 28-tap radial trace and the bloom pyramid — are run at a
+ * fraction of the frame's resolution and upsampled, because neither produces
+ * anything a full-resolution buffer could represent that a half one cannot.
+ *
  * The grade pass is where the film look comes from: split-toning, vignette,
  * chromatic aberration, grain and a light sharpen, plus the two gameplay hooks
  * (blood frenzy and near-death) that push the image without touching the HUD.
  */
 import * as THREE from 'three'
 import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js'
+import { Pass, FullScreenQuad } from 'three/examples/jsm/postprocessing/Pass.js'
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js'
 import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js'
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js'
@@ -20,6 +29,24 @@ import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js'
 import { SMAAPass } from 'three/examples/jsm/postprocessing/SMAAPass.js'
 import { POST } from '../config'
 import { sunScreenPosition } from './sky'
+
+const FULLSCREEN_VERT = /* glsl */ `
+  varying vec2 vUv;
+  void main() {
+    vUv = uv;
+    gl_Position = projectionMatrix * modelViewMatrix * vec4( position, 1.0 );
+  }
+`
+
+/**
+ * Ceiling on the HDR handed downstream. UnrealBloomPass does not subtract its
+ * threshold — a pixel that passes goes into the blur pyramid at full value — so
+ * the band around a low sun, which covers a big slice of the frame, gets smeared
+ * over everything and comes back as a milky veil that buries the village. ACES
+ * already maps 3.5 to ~0.95, so clamping here costs almost nothing on screen and
+ * bounds what bloom can spread.
+ */
+const HDR_CEILING = 3.5
 
 // --------------------------------------------------------------- god rays
 /**
@@ -29,9 +56,15 @@ import { sunScreenPosition } from './sky'
  * There is no separate occlusion buffer: the scene's own depth already hides
  * the sky behind huts and trees, so the shafts break up against silhouettes
  * for free, which is the whole reason the effect sells.
+ *
+ * This is the trace half, and it runs at a fraction of the frame's resolution.
+ * Twenty-eight taps per pixel over a full 4K-class frame is tens of millions of
+ * texture fetches for something whose entire output is a soft radial smear —
+ * there is nothing in a shaft of light that survives to a single pixel, so the
+ * only thing full resolution buys is the bill.
  */
-const GodRayShader = {
-  name: 'GodRayShader',
+const GodRayTraceShader = {
+  name: 'GodRayTrace',
   uniforms: {
     tDiffuse: { value: null as THREE.Texture | null },
     uSun: { value: new THREE.Vector2(0.5, 0.5) },
@@ -39,13 +72,7 @@ const GodRayShader = {
     uDecay: { value: POST.godrayDecay },
     uAspect: { value: 1 },
   },
-  vertexShader: /* glsl */ `
-    varying vec2 vUv;
-    void main() {
-      vUv = uv;
-      gl_Position = projectionMatrix * modelViewMatrix * vec4( position, 1.0 );
-    }
-  `,
+  vertexShader: FULLSCREEN_VERT,
   fragmentShader: /* glsl */ `
     uniform sampler2D tDiffuse;
     uniform vec2 uSun;
@@ -65,23 +92,8 @@ const GodRayShader = {
      * shaft brightness that uStrength scales linearly.
      */
     const float MAX_SAMPLE = 4.0;
-    /**
-     * Ceiling on the HDR handed downstream. UnrealBloomPass does not subtract
-     * its threshold — a pixel that passes goes into the blur pyramid at full
-     * value — so the band around a low sun, which covers a big slice of the
-     * frame, gets smeared over everything and comes back as a milky veil that
-     * buries the village. ACES already maps 3.5 to ~0.95, so clamping here
-     * costs almost nothing on screen and bounds what bloom can spread.
-     */
-    const float CEILING = 3.5;
 
     void main() {
-      vec4 scene = texture2D( tDiffuse, vUv );
-
-      // Still clamps when the sun is off screen — the bloom pass downstream
-      // needs the ceiling either way.
-      if ( uStrength <= 0.0 ) { gl_FragColor = vec4( min( scene.rgb, vec3( CEILING ) ), scene.a ); return; }
-
       vec2 delta = ( vUv - uSun ) * ( DENSITY / float( SAMPLES ) );
       vec2 uv = vUv;
       float illum = 1.0;
@@ -107,11 +119,119 @@ const GodRayShader = {
       vec2 edge = smoothstep( vec2( -0.35 ), vec2( 0.12 ), uSun )
                 * ( 1.0 - smoothstep( vec2( 0.88 ), vec2( 1.35 ), uSun ) );
 
-      vec3 col = scene.rgb + accum * uStrength * falloff * edge.x * edge.y;
+      gl_FragColor = vec4( accum * uStrength * falloff * edge.x * edge.y, 1.0 );
+    }
+  `,
+}
 
+/**
+ * ...and this is the half that has to run at full resolution: add the traced
+ * shafts back over the sharp frame and apply the ceiling. Two fetches, and the
+ * second of them is skipped outright when the sun is off screen — but the clamp
+ * is not, because bloom needs the ceiling whether there are shafts or not.
+ */
+const GodRayCompositeShader = {
+  name: 'GodRayComposite',
+  uniforms: {
+    tDiffuse: { value: null as THREE.Texture | null },
+    tRays: { value: null as THREE.Texture | null },
+    uRays: { value: 0 },
+  },
+  vertexShader: FULLSCREEN_VERT,
+  fragmentShader: /* glsl */ `
+    uniform sampler2D tDiffuse;
+    uniform sampler2D tRays;
+    uniform float uRays;
+    varying vec2 vUv;
+
+    const float CEILING = ${HDR_CEILING.toFixed(1)};
+
+    void main() {
+      vec4 scene = texture2D( tDiffuse, vUv );
+      vec3 col = scene.rgb;
+      // Uniform branch: every pixel in the frame takes the same side of it, so
+      // the fetch really is skipped rather than merely masked out.
+      if ( uRays > 0.0 ) col += texture2D( tRays, vUv ).rgb;
       gl_FragColor = vec4( min( col, vec3( CEILING ) ), scene.a );
     }
   `,
+}
+
+/**
+ * The two halves as one composer pass, with the small target between them.
+ *
+ * @param scale Resolution of the trace relative to the frame, per axis.
+ */
+class GodRayPass extends Pass {
+  // Cloned, not shared: a ShaderMaterial built straight from a shader object
+  // keeps a reference to that object's uniforms, so two passes from the same
+  // definition would quietly write over each other.
+  private traceMat = new THREE.ShaderMaterial({
+    name: GodRayTraceShader.name,
+    uniforms: THREE.UniformsUtils.clone(GodRayTraceShader.uniforms),
+    vertexShader: GodRayTraceShader.vertexShader,
+    fragmentShader: GodRayTraceShader.fragmentShader,
+  })
+
+  private compositeMat = new THREE.ShaderMaterial({
+    name: GodRayCompositeShader.name,
+    uniforms: THREE.UniformsUtils.clone(GodRayCompositeShader.uniforms),
+    vertexShader: GodRayCompositeShader.vertexShader,
+    fragmentShader: GodRayCompositeShader.fragmentShader,
+  })
+
+  /** The trace's uniforms — uSun, uStrength, uAspect are driven per frame. */
+  readonly uniforms = this.traceMat.uniforms
+
+  private trace = new FullScreenQuad(this.traceMat)
+  private composite = new FullScreenQuad(this.compositeMat)
+  private rays: THREE.WebGLRenderTarget
+
+  constructor(width: number, height: number, private scale = 0.5) {
+    super()
+    // Half float to match the HDR chain: the shafts are summed from linear
+    // values well above white, and an 8-bit target would band them.
+    this.rays = new THREE.WebGLRenderTarget(
+      Math.max(1, Math.round(width * scale)),
+      Math.max(1, Math.round(height * scale)),
+      { type: THREE.HalfFloatType, colorSpace: THREE.LinearSRGBColorSpace, depthBuffer: false },
+    )
+    this.compositeMat.uniforms.tRays!.value = this.rays.texture
+  }
+
+  override setSize(width: number, height: number) {
+    this.rays.setSize(
+      Math.max(1, Math.round(width * this.scale)),
+      Math.max(1, Math.round(height * this.scale)),
+    )
+  }
+
+  override render(
+    renderer: THREE.WebGLRenderer,
+    writeBuffer: THREE.WebGLRenderTarget,
+    readBuffer: THREE.WebGLRenderTarget,
+  ) {
+    const on = this.uniforms.uStrength!.value > 0
+    if (on) {
+      this.uniforms.tDiffuse!.value = readBuffer.texture
+      renderer.setRenderTarget(this.rays)
+      this.trace.render(renderer)
+    }
+
+    this.compositeMat.uniforms.tDiffuse!.value = readBuffer.texture
+    this.compositeMat.uniforms.uRays!.value = on ? 1 : 0
+    renderer.setRenderTarget(this.renderToScreen ? null : writeBuffer)
+    if (this.clear) renderer.clear()
+    this.composite.render(renderer)
+  }
+
+  override dispose() {
+    this.rays.dispose()
+    this.trace.dispose()
+    this.composite.dispose()
+    this.traceMat.dispose()
+    this.compositeMat.dispose()
+  }
 }
 
 // ------------------------------------------------------------------- grade
@@ -266,9 +386,21 @@ const GradeShader = {
   `,
 }
 
+/**
+ * Resolution the bloom pyramid is built at, relative to the frame.
+ *
+ * UnrealBloomPass already halves what it is handed before it builds its mips,
+ * so this is a quarter-resolution pyramid — and the blur levels are where all
+ * the pass's cost is, since each one is a 9- to 13-tap separable kernel run
+ * twice. At a bloom strength of 0.06 there is nothing in the result that a
+ * quarter-resolution blur could not represent; the visible output is a soft
+ * halo around the sun and the fires, and it is upsampled bilinearly anyway.
+ */
+const BLOOM_SCALE = 0.5
+
 export class PostFX {
   readonly composer: EffectComposer
-  readonly godrays: ShaderPass
+  readonly godrays: GodRayPass
   readonly grade: ShaderPass
   readonly bloom: UnrealBloomPass
   private smaa: SMAAPass
@@ -295,11 +427,11 @@ export class PostFX {
 
     this.composer.addPass(new RenderPass(scene, camera))
 
-    this.godrays = new ShaderPass(GodRayShader)
+    this.godrays = new GodRayPass(size.x, size.y)
     this.composer.addPass(this.godrays)
 
     this.bloom = new UnrealBloomPass(
-      new THREE.Vector2(size.x, size.y),
+      new THREE.Vector2(size.x * BLOOM_SCALE, size.y * BLOOM_SCALE),
       POST.bloomStrength,
       POST.bloomRadius,
       POST.bloomThreshold,
@@ -339,6 +471,9 @@ export class PostFX {
     this.composer.setPixelRatio(this.renderer.getPixelRatio())
     this.composer.setSize(w, h)
     const size = this.renderer.getDrawingBufferSize(new THREE.Vector2())
+    // The composer has just sized every pass to the full frame, bloom included,
+    // so its pyramid has to be put back down afterwards rather than before.
+    this.bloom.setSize(size.x * BLOOM_SCALE, size.y * BLOOM_SCALE)
     this.grade.uniforms.uTexel!.value.set(1 / size.x, 1 / size.y)
     this.godrays.uniforms.uAspect!.value = w / h
   }
