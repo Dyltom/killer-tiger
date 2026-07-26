@@ -508,7 +508,13 @@ export class World {
     const geo = new THREE.PlaneGeometry(1, 1)
     geo.rotateX(-Math.PI / 2)
     for (let i = 0; i < 48; i++) {
-      const mat = new THREE.MeshBasicMaterial({
+      // Lit, not basic. A MeshBasicMaterial ignores every light in the scene,
+      // so at dusk — which is the entire game — a pool sat at full daylight
+      // crimson on ground the tone curve had rolled down to near black, and
+      // read as a flat sheet of paint laid over the terrain rather than
+      // anything lying on it. Lambert costs nothing here (no normal map, one
+      // quad) and puts the pool under the same sun and lamps as the dirt.
+      const mat = new THREE.MeshLambertMaterial({
         map: tex.blood,
         transparent: true,
         opacity: 0,
@@ -527,12 +533,21 @@ export class World {
   addBloodDecal(x: number, z: number, scale = 1) {
     const d = this.decals[this.decalPool % this.decals.length]!
     this.decalPool++
-    d.position.set(x, terrainHeight(x, z) + 0.045, z)
+    // Stamps land off-centre from each other, by an amount that grows with the
+    // stamp. Successive pools from one body used to share a centre exactly, so
+    // eight of them made eight concentric rings of the same texture — a target,
+    // not a spill. Offsetting each one by a fraction of its own size gives the
+    // union a lobed edge, which is what spreading liquid has.
+    const s = scale * (1.45 + Math.random() * 0.75)
+    d.position.set(
+      x + (Math.random() - 0.5) * s * 0.42,
+      terrainHeight(x, z) + 0.045,
+      z + (Math.random() - 0.5) * s * 0.42,
+    )
     d.rotation.y = Math.random() * Math.PI * 2
-    const s = scale * (2 + Math.random() * 1.6)
     d.scale.set(s, 1, s)
     d.visible = true
-    ;(d.material as THREE.MeshBasicMaterial).opacity = 0.9
+    ;(d.material as THREE.MeshLambertMaterial).opacity = 0.9
   }
 
   // ------------------------------------------------------------- queries
@@ -678,7 +693,7 @@ export class World {
     // Fade decals slowly so the village accumulates evidence but not forever.
     for (const d of this.decals) {
       if (!d.visible) continue
-      const m = d.material as THREE.MeshBasicMaterial
+      const m = d.material as THREE.MeshLambertMaterial
       m.opacity -= dt * 0.012
       if (m.opacity <= 0) d.visible = false
     }

@@ -2140,7 +2140,16 @@ export class Human {
       // 11.4 cm deep, so it came through the front and the back of the shirt
       // even at heights where it was safely inside it at the sides.
       cloth(['skirt'], trunk(0.56, shirted ? 0.940 : 0.955, 0.235, r(shirted ? 0.130 : 0.158), 0.78, 14), Reg.trouser)
-      cloth(['skirt'], ell(0, 0.59, 0, 0.235, 0.05, 0.184, 14, 4), Reg.trouser)
+      // The hem, and it has to sit *on* the trunk's rim. It used to be centred at
+      // 0.59, three centimetres up the cone, where the ellipsoid's own taper has
+      // pulled it in to 0.188 against a rim of 0.235: a 4.7 cm lip of open
+      // cylinder stood proud of it all the way round. Nothing hides that. Looking
+      // up at a standing villager, or along a corpse lying on its side, the skirt
+      // is a bucket with the legs coming out of the middle of it — which is most
+      // of what made a dead man in a dhoti read as furniture rather than a body.
+      // Equator on the rim, four millimetres outside it, so the seal is also the
+      // turn-under every hemmed edge has.
+      cloth(['skirt'], ell(0, 0.566, 0, 0.239, 0.055, 0.187, 14, 4), Reg.trouser)
       if (!shirted) {
         // The tie: a separate band, wide enough to swallow the top of the skirt.
         // Under a shirt there is nothing to swallow and nothing to see.
@@ -3697,10 +3706,14 @@ export class Human {
     // on his side — and what it takes out of that axis it gives back to the
     // other, because fabric collapsing under its own weight spreads, it does not
     // shrink. Damped rather than set, so it settles as he does.
+    // It also gets shorter. A hem that hung at the knee off a standing man is
+    // resting on his thigh once he is horizontal, and cloth that has stopped
+    // being pulled straight by gravity gathers rather than staying at length.
     const flat = Math.abs(face)
     const sq = this.skirt.scale
-    sq.x = damp(sq.x, 1 - 0.34 * side + 0.16 * flat, 3.5, dt)
-    sq.z = damp(sq.z, 1 - 0.34 * flat + 0.16 * side, 3.5, dt)
+    sq.x = damp(sq.x, 1 - 0.46 * side + 0.20 * flat, 3.5, dt)
+    sq.z = damp(sq.z, 1 - 0.46 * flat + 0.20 * side, 3.5, dt)
+    sq.y = damp(sq.y, 0.87, 3.5, dt)
 
     // One leg drawn up under him, the other straight out. Both flat is a
     // shop-window dummy and both drawn up is the beetle again; one of each is
@@ -3811,7 +3824,12 @@ export class Human {
         this.poolNext = 1.7
         this.poolCount++
         this.chest.getWorldPosition(this.poolPos)
-        this.poolScale = 0.5 + this.poolCount * 0.42
+        // The eighth stamp used to come out at 3.86, which the decal's own
+        // 2–3.6x spread turned into a fourteen-metre disc of blood from one
+        // man. A body empties about five litres; on packed dirt that is a metre
+        // and a half of pool, not a tennis court. The ramp now ends a little
+        // under one, and the widening still reads because it starts small.
+        this.poolScale = 0.30 + this.poolCount * 0.075
         this.poolPulse = true
       }
     }

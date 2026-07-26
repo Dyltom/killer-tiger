@@ -3,6 +3,7 @@
  * Additive off, vertex-coloured, gravity-affected, no allocation per burst.
  */
 import * as THREE from 'three'
+import { atmosphere } from '../render/atmosphere'
 import { textures } from '../world/textures'
 import { terrainHeight } from '../world/world'
 
@@ -32,8 +33,24 @@ export class Particles {
       // draw. A hand-rolled falloff gives every particle the same flat edge
       // profile; the sprite has a hot core and a long tail, which is what makes
       // a blood spray look wet and an ember look like it is glowing.
-      uniforms: { uMap: { value: textures().spark } },
+      // Fogged, like everything else in the world. These are the only sprites
+      // in the game that were not: a spray thrown at thirty metres came out as
+      // crisp arterial red dots in front of terrain the haze had washed to grey,
+      // which is exactly the read of a particle system sitting on top of a
+      // scene rather than in it. The chunks are the game's own height-fog
+      // override, so the four extra uniforms have to be supplied by hand — a
+      // raw ShaderMaterial gets nothing from ShaderLib.
+      uniforms: {
+        uMap: { value: textures().spark },
+        ...THREE.UniformsLib.fog,
+        fogSunDir: { value: atmosphere.sunDir },
+        fogSunColor: { value: atmosphere.sunColor },
+        fogAwayColor: { value: atmosphere.awayColor },
+        fogParams: { value: atmosphere.params },
+      },
+      fog: true,
       vertexShader: /* glsl */ `
+        #include <fog_pars_vertex>
         attribute float size;
         attribute float alpha;
         varying vec3 vColor;
@@ -41,25 +58,29 @@ export class Particles {
         void main() {
           vColor = color;
           vAlpha = alpha;
-          vec4 mv = modelViewMatrix * vec4(position, 1.0);
+          // Named for the fog chunk, which reads mvPosition and nothing else.
+          vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
           // size is a diameter in metres. 700 is half the viewport height
           // divided by tan(fov/2) at the shipping 75 degree FOV, so a 0.1 m
           // droplet four metres out covers about 17 px — the number it would
           // cover if it were real geometry. Clamped because an unbounded
           // perspective size turns one droplet near the eye into a full-screen
           // disc.
-          gl_PointSize = clamp(size * (700.0 / -mv.z), 1.0, 90.0);
-          gl_Position = projectionMatrix * mv;
+          gl_PointSize = clamp(size * (700.0 / -mvPosition.z), 1.0, 90.0);
+          gl_Position = projectionMatrix * mvPosition;
+          #include <fog_vertex>
         }
       `,
       fragmentShader: /* glsl */ `
         uniform sampler2D uMap;
         varying vec3 vColor;
         varying float vAlpha;
+        #include <fog_pars_fragment>
         void main() {
           float a = texture2D(uMap, gl_PointCoord).a * vAlpha;
           if (a < 0.02) discard;
           gl_FragColor = vec4(vColor, a);
+          #include <fog_fragment>
         }
       `,
       transparent: true,
