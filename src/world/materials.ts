@@ -13,6 +13,7 @@
  * fog working without reimplementing any of it.
  */
 import * as THREE from 'three'
+import { addContactShade } from './contact'
 import { TERRAIN_SIZE } from './terrain'
 
 export interface PbrSet {
@@ -282,6 +283,10 @@ export function terrainMaterial(size: number): THREE.MeshStandardMaterial {
         `,
       )
   }
+
+  // The ground under the player's own feet. Chained on after the terrain's own
+  // injection, so it sees the finished diffuseColor.
+  addContactShade(mat)
 
   // Any change to the injected source needs a distinct cache key or three will
   // hand back the program it compiled for a different terrain size.

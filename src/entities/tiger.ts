@@ -9,6 +9,7 @@ import * as THREE from 'three'
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
 import { CAMERA, TIGER } from '../config'
 import { clamp, damp } from '../engine/rng'
+import { setContact } from '../world/contact'
 import { terrainHeight, World } from '../world/world'
 import type { Input } from '../engine/input'
 
@@ -137,8 +138,15 @@ const PAW = {
    * them half out, and the claws are the one part of the viewmodel that says what
    * the player is — so the tips stay showing over the toe fur even at rest and
    * only come the whole way out to strike. See setClaws().
+   *
+   * Down from 0.34, which was not "the tips". At 0.34 four centimetres of a six
+   * centimetre claw stood clear of each toe, and against dark ground five bright
+   * horn spikes per foot are the first thing in the frame — the paw read as a
+   * garden fork rather than a foot. A tenth leaves a couple of millimetres of tip
+   * showing, which is what you see on a cat that is merely walking, and the whole
+   * of the rest of the claw is still there the moment anything is worth striking.
    */
-  clawIdle: 0.34,
+  clawIdle: 0.1,
   /** Scale of the paw group. Life size — the geometry below is already in metres. */
   scale: 1.0,
   /**
@@ -183,8 +191,22 @@ const PAW = {
  * the limb could read as a striped sausage crossing the frame. Now the foot goes
  * exactly where it is wanted and the leg follows it, so no pose can leave the
  * paw disconnected from the body.
+ *
+ * x and y are set where they are by the torso, not by anatomy. Measured against
+ * torsoGeo()'s skin at z = 0.06 — the bare ellipse there is 0.181 by 0.167 about
+ * a centre at y = -0.47, and the scapula lump adds about 8 cm along the normal —
+ * the surface reaches 0.259 m from that centre in the shoulder direction. At the
+ * old x = 0.20, y = -0.30 the joint sat 0.2625 m out: a few millimetres *outside*
+ * its own body, which is a hairline of daylight between arm and chest at any
+ * angle that catches it. Pulled in to 0.185 / -0.315 the root is buried 1.8 cm
+ * deep and no pose can open that gap.
+ *
+ * Growing the shoulder mass to swallow the old position would have worked too and
+ * was the wrong trade: the scapula lumps carry to the spine, so the four
+ * millimetres needed at the joint cost four millimetres of extra withers, and
+ * withers height is exactly what was cut to stop the back hiding a swinging leg.
  */
-const SHOULDER = { x: 0.20, y: -0.30, z: 0.06 }
+const SHOULDER = { x: 0.185, y: -0.315, z: 0.06 }
 
 /**
  * Duty factor: the fraction of a stride a forefoot spends on the ground. Solved
@@ -345,6 +367,272 @@ function shade(geo: THREE.BufferGeometry, top: number, under: number, y0: number
 /** A part in one flat colour. Same attribute as shade(), so the two can merge. */
 function tint(geo: THREE.BufferGeometry, hex: number): THREE.BufferGeometry {
   return shade(geo, hex, hex, 0, 1)
+}
+
+/**
+ * Countershade a chest mass and put the shoulder bars on it.
+ *
+ * Separate from shade() because the body's markings are not the leg's. A tiger's
+ * shoulder stripes are broad vertical bars — a hand wide, a hand apart — that
+ * sweep backward as they come down over the point of the shoulder and stop dead
+ * on the white of the brisket. The narrow tapering slashes limbGeo() draws are
+ * the *leg's* markings and would read as scratches at this size.
+ *
+ * `s = z + 0.55 * |x|` is the sweep. Bars at constant z are vertical bars on the
+ * animal's midline, and on the sides of a barrel that is what they stay — which
+ * is wrong: they rake backward the further round the ribs they go, and the rake
+ * is most of what makes a striped body read as a body rather than as a barrel
+ * with hoops painted on it.
+ */
+function chestShade(geo: THREE.BufferGeometry, bars: number[]): THREE.BufferGeometry {
+  const cTop = new THREE.Color(LIMB_TOP)
+  const cUnder = new THREE.Color(LIMB_UNDER)
+  const cBand = new THREE.Color(LIMB_BAND)
+  const c = new THREE.Color()
+  const p = geo.attributes.position as THREE.BufferAttribute
+  const arr = new Float32Array(p.count * 3)
+  for (let i = 0; i < p.count; i++) {
+    const x = p.getX(i)
+    const y = p.getY(i)
+    const z = p.getZ(i)
+    // Withers to brisket. The transition is hard: on a tiger the flank is tawny
+    // almost all the way down and then turns white over about a hand, and a soft
+    // gradient through the middle of the body is the moulded-plastic look
+    // shade()'s comment warns about.
+    //
+    // It also rides higher at the front. The white on a tiger is not a waterline
+    // — it climbs the brisket to between the elbows and then drops away along
+    // the belly, and that rise is the single marking that reads as "chest"
+    // rather than "underside of a barrel" from directly above.
+    const y0 = -0.645 + 0.055 * (1 - smoothstep(z / 0.45))
+    const up = smoothstep((y - y0) / 0.2)
+    c.copy(cUnder).lerp(cTop, up)
+    // Same trick as limbGeo: a coat that is one exact value everywhere reads as
+    // paint whatever shape it is on.
+    const mot = Math.sin(x * 37 + 0.7) * Math.sin(y * 43 + 2.2) * Math.sin(z * 31 + 4.4)
+    c.offsetHSL(0, 0, mot * 0.045 * up)
+
+    // The wobble is not decoration. A bar drawn at an exact constant s is a
+    // machined hoop, and the eye picks that out as printed-on before it picks
+    // out anything else about the animal.
+    // 0.32, not the 0.55 this started at. The sweep is what stops the bars being
+    // hoops, but at 0.55 the pair either side of the spine met in a chevron
+    // pointing straight down the barrel and the back read as a chameleon's.
+    const s = z + Math.abs(x) * 0.32 + Math.sin(y * 9 + x * 4) * 0.014
+    // The dorsal line. A tiger seen from directly above — which is the whole of
+    // what the player sees of its own body — has a dark stripe running the length
+    // of the spine that every bar on the back runs into, and its absence is why
+    // the first version of this read as a striped cushion.
+    let dark = (1 - smoothstep((Math.abs(x) - 0.010) / 0.016)) * smoothstep((up - 0.75) / 0.2) * 0.8
+    for (let k = 0; k < bars.length; k++) {
+      const b = bars[k]!
+      // Widest on the spine and tapering as they come down the ribs, which is
+      // the shape of the real marking and also what keeps them from closing into
+      // hoops round the belly. Varied per bar off the bar's own position: a set
+      // of identical bars is as obviously drawn as a set of straight ones.
+      const w = (0.024 + up * 0.018) * (0.75 + 0.55 * Math.abs(Math.sin(b * 12.9898)))
+      // w is the bar's full width, so it reaches w/2 either side of the centre —
+      // solid to half of that and ramping over the rest. Reading w as the
+      // half-width, which is what this did, darkens 2w and at a bar spacing of
+      // 0.16 the widest bars then met their neighbours: the back came out black
+      // with tawny gaps between the stripes, which is a tiger inside out.
+      //
+      // Ramping across the whole width instead of the outer half is the other way
+      // to get this wrong — it leaves a black core a centimetre wide inside eight
+      // centimetres of gradient, and eight centimetres of gradient on a shoulder
+      // is not a stripe, it is a dent.
+      dark = Math.max(dark, 1 - smoothstep((Math.abs(s - b) - w * 0.35) / (w * 0.15)))
+      // Every other bar forks, and only out on the flank. A tiger's bars split
+      // and rejoin constantly; a set of clean parallel bands is a deckchair.
+      if (k % 2 === 1) {
+        const branch = Math.abs(s - (b + 0.036)) - w * 0.25
+        dark = Math.max(dark, smoothstep((Math.abs(x) - 0.09) / 0.06) * (1 - smoothstep(branch / (w * 0.2))))
+      }
+    }
+    // Bars carry onto the white at 40% rather than being cut off at the
+    // countershading line. Suppressing them entirely — which is what
+    // min(1, up * 1.5) did on its own — left the brisket a bare cream panel, and
+    // the brisket is most of what is on screen at the pitch where the player is
+    // looking at their own feet. A tiger's chest is not blank: the flank bars run
+    // down over it and fade rather than stop, and the throat carries its own
+    // short crossing ones.
+    c.lerp(cBand, dark * (0.4 + 0.6 * Math.min(1, up * 1.5)))
+    arr[i * 3] = c.r
+    arr[i * 3 + 1] = c.g
+    arr[i * 3 + 2] = c.b
+  }
+  geo.setAttribute('color', new THREE.Float32BufferAttribute(arr, 3))
+  return geo
+}
+
+/**
+ * Muscle masses laid over the forequarters, as centre / radius / height in
+ * viewmodel metres. Each pushes the skin out along its own normal by a gaussian
+ * in distance, which is a metaball in everything but name and — unlike welding
+ * separate ellipsoids together — cannot produce a seam, because there is only
+ * ever one surface.
+ *
+ * The two scapulae are the ones that have to be right. The humerus starts at
+ * SHOULDER, x = 0.20 and y = -0.30, and the bare ribcage at that station is only
+ * 0.17 across at that height; without these the arm leaves the body four
+ * centimetres inside thin air, which is exactly the fault being fixed.
+ */
+const TORSO_LUMPS = [
+  { x: 0.205, y: -0.355, z: 0.11, r: 0.24, a: 0.075 },
+  { x: -0.205, y: -0.355, z: 0.11, r: 0.24, a: 0.075 },
+  // Points of the shoulder, below and in front of the blades.
+  { x: 0.155, y: -0.515, z: 0.06, r: 0.15, a: 0.030 },
+  { x: -0.155, y: -0.515, z: 0.06, r: 0.15, a: 0.030 },
+  // The keel of the brisket, between the elbows.
+  { x: 0, y: -0.6, z: 0.18, r: 0.2, a: 0.026 },
+  // Ribs, well back, mostly to stop the barrel being a surface of revolution.
+  { x: 0.235, y: -0.44, z: 0.5, r: 0.24, a: 0.03 },
+  { x: -0.235, y: -0.44, z: 0.5, r: 0.24, a: 0.03 },
+]
+
+/**
+ * The forequarters, as one continuous skin.
+ *
+ * This was three merged ellipsoids — brisket, barrel, two scapulae — and it read
+ * as three orange balloons in a bag. Two separate faults, both fatal. The merge
+ * leaves every ellipsoid's surface intact inside the others, so the render shows
+ * the intersection curves as hard creases where no crease belongs; and at 20x14
+ * segments the vertex spacing is 8 cm, so the shoulder bars — 5 cm wide, and
+ * carried in a vertex attribute like every other marking on this model — fell
+ * between the rings and did not appear at all. The chest came out bald.
+ *
+ * So: a swept surface instead, 150 rings by 44, which is 8 mm along the body and
+ * puts six rings across a bar. The profile is an ellipse per station whose width,
+ * depth and centre vary along z — narrow high brisket at the front, opening into
+ * a deep barrel behind the camera, with a swelling over the shoulder — and the
+ * masses in TORSO_LUMPS are then pushed out through it.
+ *
+ * Normals are computed from the parametric grid rather than by
+ * computeVertexNormals, and that is not fussiness. The seam column is duplicated
+ * so the fur UVs can wrap, and averaging face normals gives each copy only the
+ * faces on its own side, which draws a lit hairline straight down the front of
+ * the chest. Differencing across the grid with a wrap in the ring index gives
+ * both copies the same answer and there is no seam to see.
+ */
+function torsoGeo(rings = 150, radial = 44): THREE.BufferGeometry {
+  // Front cap a little below the eye, back cap behind it. Both are outside the
+  // frustum at every pitch the player can reach; they exist so the body is
+  // closed, not to be looked at.
+  const Z0 = -0.05
+  const Z1 = 1.05
+  const stride = radial + 1
+  const nv = (rings + 1) * stride
+  const pos = new Float32Array(nv * 3)
+  const nrm = new Float32Array(nv * 3)
+  const uv = new Float32Array(nv * 2)
+
+  for (let i = 0; i <= rings; i++) {
+    const t = i / rings
+    const z = Z0 + (Z1 - Z0) * t
+    // A semicircular envelope closes both ends smoothly. The 0.55 power fattens
+    // the middle back out again — a plain ellipsoid taper puts the widest part
+    // of the animal halfway down its own length, and a tiger's is at the ribs.
+    const f = Math.pow(Math.max(0, 1 - (2 * t - 1) ** 2), 0.5 * 0.55)
+    const sh = Math.exp(-(((z - 0.12) / 0.2) ** 2))
+    const hx = f * (0.19 + 0.068 * smoothstep((z - 0.14) / 0.36) + 0.055 * sh)
+    // The withers used to be four centimetres higher, and four centimetres of
+    // back was enough to hide a swinging foreleg completely: at a sprint both
+    // feet come up behind the shoulder, and what the player saw was a paw
+    // apparently resting on top of the animal's back with no leg under it. The
+    // body has to sit low enough that the legs pass in front of its skyline.
+    const hy = f * (0.175 + 0.062 * smoothstep((z - 0.18) / 0.42) + 0.05 * sh)
+    const cy = -0.47 + 0.02 * smoothstep((z - 0.25) / 0.55)
+    for (let j = 0; j <= radial; j++) {
+      const a = (j / radial) * Math.PI * 2
+      const sx = Math.sin(a)
+      const sy = Math.cos(a)
+      const o = (i * stride + j) * 3
+      pos[o] = sx * hx
+      // Flatter underneath than over the spine, because a chest is.
+      pos[o + 1] = cy + sy * hy * (sy > 0 ? 1 : 0.9)
+      pos[o + 2] = z
+      const u = (i * stride + j) * 2
+      // Three wraps of the fur canvas round the body and 2.4 per metre along it,
+      // which is the density limbGeo uses so the grain matches at the shoulder.
+      uv[u] = (j / radial) * 3
+      uv[u + 1] = z * 2.4
+    }
+  }
+
+  const A = new THREE.Vector3()
+  const B = new THREE.Vector3()
+  const P = new THREE.Vector3()
+  const at = (i: number, j: number, out: THREE.Vector3) => {
+    const o = (i * stride + (((j % radial) + radial) % radial)) * 3
+    return out.set(pos[o]!, pos[o + 1]!, pos[o + 2]!)
+  }
+  const reNormal = () => {
+    for (let i = 0; i <= rings; i++) {
+      for (let j = 0; j <= radial; j++) {
+        at(Math.min(rings, i + 1), j, A).sub(at(Math.max(0, i - 1), j, P))
+        at(i, j + 1, B).sub(at(i, j - 1, P))
+        P.copy(A).cross(B)
+        // Both caps collapse to a point, where there is no ring to difference.
+        if (P.lengthSq() < 1e-12) P.set(0, 0, i === 0 ? -1 : 1)
+        P.normalize()
+        const o = (i * stride + j) * 3
+        nrm[o] = P.x
+        nrm[o + 1] = P.y
+        nrm[o + 2] = P.z
+      }
+    }
+  }
+  const displace = (amount: (x: number, y: number, z: number) => number) => {
+    for (let v = 0; v < nv; v++) {
+      const o = v * 3
+      const d = amount(pos[o]!, pos[o + 1]!, pos[o + 2]!)
+      pos[o] += nrm[o]! * d
+      pos[o + 1] += nrm[o + 1]! * d
+      pos[o + 2] += nrm[o + 2]! * d
+    }
+  }
+
+  reNormal()
+  displace((x, y, z) => {
+    let d = 0
+    for (const l of TORSO_LUMPS) {
+      const dx = x - l.x
+      const dy = y - l.y
+      const dz = z - l.z
+      d += l.a * Math.exp(-(dx * dx + dy * dy + dz * dz) / (l.r * l.r))
+    }
+    return d
+  })
+  reNormal()
+  // The same two octaves ruffle() uses — inlined because ruffle() would recompute
+  // normals the averaging way and reopen the seam this function exists to close.
+  displace((x, y, z) => {
+    const a = Math.sin(x * 47 + 0.6) * Math.sin(y * 61 + 1.7) * Math.sin(z * 53 + 3.7)
+    const b = Math.sin(x * 113 + 2.2) * Math.sin(y * 131 + 1) * Math.sin(z * 97 + 5.5)
+    return 0.011 * (a + b * 0.45)
+  })
+  reNormal()
+
+  const idx = new Uint32Array(rings * radial * 6)
+  let n = 0
+  for (let i = 0; i < rings; i++) {
+    for (let j = 0; j < radial; j++) {
+      const a = i * stride + j
+      idx[n++] = a
+      idx[n++] = a + stride
+      idx[n++] = a + 1
+      idx[n++] = a + 1
+      idx[n++] = a + stride
+      idx[n++] = a + stride + 1
+    }
+  }
+
+  const g = new THREE.BufferGeometry()
+  g.setAttribute('position', new THREE.BufferAttribute(pos, 3))
+  g.setAttribute('normal', new THREE.BufferAttribute(nrm, 3))
+  g.setAttribute('uv', new THREE.BufferAttribute(uv, 2))
+  g.setIndex(new THREE.BufferAttribute(idx, 1))
+  return g
 }
 
 /**
@@ -635,51 +923,6 @@ function pawGrain(): THREE.CanvasTexture {
   return t
 }
 
-/**
- * The blot a paw puts on the ground under it.
- *
- * This is the fix for the paws hovering, and no amount of work on the foot itself
- * substitutes for it. The viewmodel does not cast into the shadow map — it is a
- * camera child that would need its own pass, and at a low sun a shoulder joint
- * that lives inside the animal's chest would throw a wall of shadow across the
- * whole frame — so before this there was not one pixel anywhere in the render
- * connecting a foot to the dirt it was standing on. A paw with no contact shadow
- * reads as floating however accurately it is placed, because "floating" is
- * precisely the absence of that cue.
- *
- * Soft-edged and quite small: it is ambient occlusion under a foot, not a sun
- * shadow, so it does not stretch or take a direction. Its job is to say the foot
- * is *touching*, and it fades out as the paw lifts through the swing — which is
- * the other half of the cue, because a shadow that stays put while the foot rises
- * is worse than none at all.
- */
-function contactTex(): THREE.CanvasTexture {
-  const S = 128
-  const cv = document.createElement('canvas')
-  cv.width = cv.height = S
-  const c = cv.getContext('2d')!
-  // Squared falloff rather than a linear gradient: occlusion under a foot is
-  // dense right beneath the pads and gone within a paw's width, and a linear ramp
-  // reads as a painted grey disc.
-  //
-  // The dense core is deliberately wider than it looks like it should be. Seen
-  // from a standing player's eye the foot is almost directly below, so the paw
-  // covers its own contact shadow entirely — everything the player can see of it
-  // is the penumbra that reaches out past the toes. A tight blot is invisible in
-  // the one view the player spends the most time in.
-  const g = c.createRadialGradient(S / 2, S / 2, 0, S / 2, S / 2, S / 2)
-  g.addColorStop(0, 'rgba(0,0,0,0.88)')
-  g.addColorStop(0.42, 'rgba(0,0,0,0.68)')
-  g.addColorStop(0.68, 'rgba(0,0,0,0.30)')
-  g.addColorStop(0.86, 'rgba(0,0,0,0.07)')
-  g.addColorStop(1, 'rgba(0,0,0,0)')
-  c.fillStyle = g
-  c.fillRect(0, 0, S, S)
-  const t = new THREE.CanvasTexture(cv)
-  t.colorSpace = THREE.SRGBColorSpace
-  return t
-}
-
 /** Fresh arterial blood, for whatever the claws have been in. */
 const BLOOD = new THREE.Color(0x6d0a0c)
 /**
@@ -690,7 +933,10 @@ const BLOOD = new THREE.Color(0x6d0a0c)
  * they had drifted apart, so wiping the blood off left the claws a different
  * colour from the ones the hunt started with.
  */
-const CLAW_CLEAN = 0xd9cbb4
+// Down from 0xd9cbb4, which under a direct sun at intensity 3 came back out of
+// ACES as flat white — five specular white slivers per foot, brighter than
+// anything else in the frame and the loudest thing on the whole viewmodel.
+const CLAW_CLEAN = 0xb5a58c
 const CLAW_ROUGH = 0.26
 const lunge = new THREE.Vector3()
 /** Axis a fresh limb segment runs along once its top is put at the origin. */
@@ -787,6 +1033,8 @@ export class Tiger {
   private gaitDuty = DUTY_MAX
   /** Stride offset between the two forefeet: 0.5 alternating, near 0 bounding. */
   private pairPhase = 0.5
+  /** Breathing clock for the chest, in radians. See updateChest(). */
+  private breath = 0
   /** 0 on the ground, 1 in the air. Tucks the forelegs into a reach mid-pounce. */
   private airBlend = 0
   /** Seconds off the ground. Gates airBlend, so a lip in the dirt is not a leap. */
@@ -837,9 +1085,8 @@ export class Tiger {
   private armR!: THREE.Mesh
   private foreL!: THREE.Mesh
   private foreR!: THREE.Mesh
-  /** The blot each paw puts on the ground. See contactTex(). */
-  private shadowL!: THREE.Mesh
-  private shadowR!: THREE.Mesh
+  /** Brisket, barrel and both scapulae, merged. See buildViewmodel(). */
+  private chest!: THREE.Mesh
   /** The five hooks on each foot, in build order, for sheathing. See setClaws(). */
   private clawsL: THREE.Group[] = []
   private clawsR: THREE.Group[] = []
@@ -938,7 +1185,12 @@ export class Tiger {
     // foot is the same animal as the leg; it gets the same albedo.
     const FUR_TOP = LIMB_TOP // dorsal ochre, over the metacarpus
     const FUR_UNDER = LIMB_UNDER // the cream that comes round from the belly
-    const TOE_TOP = 0x8a5626 // toe knuckles catch the light, so a shade lighter
+    // The toes get the leg's ochre too. They used to be 0x8a5626, a shade lighter
+    // on the theory that a knuckle catches more light — which it does, and the
+    // geometry was already doing it. Painting the lift in on top of it as well
+    // made the front of the foot the brightest thing in the frame, and four bright
+    // knobs on the end of a dark leg is the mitten read the whole paw is fighting.
+    const TOE_TOP = LIMB_TOP
     const CLEFT = 0x2c1a0c // the shadowed gap between two toes
     const PAD = 0x1b1210 // pads are near black and always in shadow
     const BAND = LIMB_BAND // the last of the leg's stripes, dying at the wrist
@@ -1013,9 +1265,9 @@ export class Tiger {
         // A cat's toe is 6 cm across and 7.6 long, wider than it is deep, and at
         // 5.2 cm apart they overlap each other by nearly a centimetre: the clefts
         // between them are creases, not gaps.
-        const tx = side * k * 0.052
+        const tx = side * k * 0.049
         const tz = -0.094 + back
-        const toe = ellipsoid(0.030, 0.025, 0.038, 12, 9)
+        const toe = ellipsoid(0.034, 0.025, 0.038, 12, 9)
         // Turned out, and the outer toes rolled over onto their sides a little.
         toe.rotateY(-side * t * 0.26)
         toe.rotateX(0.10)
@@ -1028,7 +1280,7 @@ export class Tiger {
         // four of them merging into one lump under a flat overhead sun.
         if (i < Tiger.TOES - 1) {
           const cleft = ellipsoid(0.006, 0.021, 0.034, 6, 6)
-          cleft.translate(side * (k + 0.5) * 0.052, -0.050, tz - 0.004)
+          cleft.translate(side * (k + 0.5) * 0.049, -0.050, tz - 0.004)
           fur.push(tint(cleft, CLEFT))
         }
 
@@ -1169,56 +1421,88 @@ export class Tiger {
 
     this.vm.add(this.shoulderL, this.shoulderR)
 
-    // Contact shadows. Parented to the viewmodel rather than to a paw, because
-    // they belong to the *ground*: the foot rolls and pitches through a stride
-    // and its shadow does not, so hanging them off the foot would tip them off
-    // the dirt at every plant.
-    const contact = new THREE.MeshBasicMaterial({
-      color: 0x000000,
-      map: contactTex(),
-      // Plain alpha blending of black, which works out to a multiply: the result
-      // is dst * (1 - a). So the blot darkens whatever it lands on rather than
-      // painting a grey disc over it — grass, wet mud and pale dirt all take it
-      // differently, and that is what stops it reading as a decal.
-      //
-      // Not THREE.MultiplyBlending, which is dst * src.rgb and ignores alpha
-      // entirely: with an all-black source that is a black square with hard
-      // edges, which is what the first version of this drew.
-      transparent: true,
-      depthWrite: false,
-      // Depth-tested, so grass and the lip of a rise in front of the foot cut into
-      // the blot the way they would cut into a real one. Taking it off the depth
-      // buffer instead — which is the usual dodge for a decal sitting on a
-      // bilinear height field — draws the whole disc over everything in front of
-      // it, and at this range that is a black hole the size of a quarter of the
-      // screen. The polygon offset is what keeps it off the dirt without that.
-      polygonOffset: true,
-      polygonOffsetFactor: -4,
-      polygonOffsetUnits: -8,
-      toneMapped: false,
-    })
-    // -PI/2. A PlaneGeometry faces +z, and R_x(θ) takes that to (0, -sinθ, cosθ),
-    // so it is the *negative* quarter turn that lays the quad face-up. Getting the
-    // sign wrong points it at the dirt, and back-face culling then eats it whole.
-    const quad = new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2)
-    // A material each: the two feet are at different heights for most of a
-    // stride, and opacity is how the blot reports height. Sharing one would give
-    // both feet whichever fade updateContact() wrote last.
-    this.shadowL = new THREE.Mesh(quad, contact)
-    this.shadowR = new THREE.Mesh(quad, contact.clone())
-    this.vm.add(this.shadowL, this.shadowR)
+    // --- the animal the legs belong to.
+    //
+    // Without this the forelegs enter the frame out of two points in mid-air at
+    // the bottom corners, and no amount of work on the legs themselves fixes
+    // that: a limb is only read as attached if you can see the thing it is
+    // attached to. It is the other half of "floating", and the cheaper half —
+    // the contact shadow says the foot is on the ground, the chest says the leg
+    // is on an animal.
+    //
+    // Sizes are the animal's. The brisket sits 0.51 m off the ground and the
+    // withers 0.93, against an eye at 1.10, which is where those numbers put
+    // them on a Bengal tiger; the chest is 0.52 m across the shoulders. What
+    // that works out to in the frame is nothing at all at level pitch — the top
+    // of it is 0.21 m below the eye and level with it in z, so it is outside the
+    // frustum until you look down about twenty degrees — and then it fills the
+    // bottom of the frame between the legs, which is what a tiger sees.
+    //
+    // Bars a hand apart down the body, in the sweep coordinate chestShade()
+    // uses. The front five land on the brisket and the shoulders, which is all
+    // the player ever sees of it.
+    //
+    // Spacing is 8 cm and not the 16 cm this had. Sixteen put two bars in the
+    // whole of the visible back, which at the distance this sits from the eye is
+    // a tawny animal with a couple of dark bands on it rather than a striped one;
+    // a Bengal's trunk carries a dozen. They are deliberately not evenly spaced —
+    // an even set is a barcode.
+    this.chest = new THREE.Mesh(
+      // The first two are ahead of the front cap in z. They are not wasted: the
+      // sweep adds 0.32 * |x|, so a bar at a negative station still crosses the
+      // shoulder out on the flank, and without them the crest of the withers —
+      // the first thing that comes into frame on the way down, and the only part
+      // of the body visible at all between about -0.7 and -0.9 — was a bald
+      // orange band a hand deep.
+      chestShade(torsoGeo(), [
+        -0.15, -0.075, 0.0, 0.085, 0.17, 0.245, 0.33, 0.415, 0.49, 0.58, 0.66, 0.745, 0.83, 0.915, 1.0,
+      ]),
+      pawMat,
+    )
+    this.vm.add(this.chest)
 
     // Viewmodel renders slightly in front of the world; keep it out of walls.
+    // The contact shadow under each foot is not here — it lives in the ground's
+    // own materials, see updateContact() and world/contact.ts.
     this.vm.traverse((o) => {
       if (o instanceof THREE.Mesh) {
         o.renderOrder = 10
         o.castShadow = false
-        // ...except the contact shadows, which have to draw under the limb.
-        if (o === this.shadowL || o === this.shadowR) o.renderOrder = 9
-        else (o.material as THREE.Material).depthTest = true
+        ;(o.material as THREE.Material).depthTest = true
       }
     })
     this.resetPaws()
+  }
+
+  /**
+   * Breathe, and roll the chest onto whichever foreleg is carrying.
+   *
+   * A body that holds perfectly still while its own legs swing under it is worse
+   * than no body at all — it reads as a prop the legs are passing in front of.
+   * Both terms here are small on purpose: the camera already carries the walk's
+   * bob and sway, and doubling that up on the chest makes the animal look like
+   * it is coming apart.
+   *
+   * The roll is at the stride frequency and the sink is at twice it, because a
+   * quadruped's chest drops onto each forefoot in turn: one roll per stride, two
+   * dips. Getting those two the same way round is the difference between a walk
+   * and a limp.
+   */
+  private updateChest(dt: number) {
+    this.breath = (this.breath + dt * (0.9 + this.gaitAmp * 1.6)) % (Math.PI * 2)
+    const w = this.gaitPhase * Math.PI
+    const amp = this.gaitAmp
+    // Which forefoot is down. pairPhase is the offset between them, so this is
+    // the same clock place() reads and the chest cannot drift out of step.
+    const carry = Math.sin(w * 2 - this.pairPhase * Math.PI * 2)
+    this.chest.position.y = Math.sin(this.breath) * 0.006 - Math.abs(Math.sin(w * 2)) * 0.022 * amp
+    this.chest.position.z = Math.sin(w * 2) * 0.010 * amp
+    this.chest.rotation.z = carry * 0.055 * amp
+    this.chest.rotation.x = Math.sin(w * 2 + 0.9) * 0.030 * amp
+    // Ribs. Barely visible, and that is the point — a chest that does not move at
+    // all while you stand still is the one thing here the eye checks for.
+    const b = 1 + Math.sin(this.breath) * 0.012 * (1 - amp * 0.6)
+    this.chest.scale.set(b, b, 1)
   }
 
   /** Drop both feet onto the ground wherever the gait currently wants them. */
@@ -1691,6 +1975,7 @@ export class Tiger {
     // sky the moment you look up — which is what "on the ground" costs.
     this.vm.rotation.x = -this.pitch * PAW.pitchFollow
     this.updateClaws(dt)
+    this.updateChest(dt)
 
     if (this.pawState === 'idle') {
       this.gaitPose(-1, poseP, poseR)
@@ -1885,21 +2170,27 @@ export class Tiger {
   }
 
   /**
-   * Put each paw's blot on the ground under it, and fade it as the foot lifts.
+   * Tell the ground where the feet are, and how hard they are pressing on it.
    *
-   * Both halves matter. A shadow that appears under a planted foot is what says
-   * the foot is on the dirt; a shadow that then *stays* while the foot swings
-   * forward would say the opposite about every other frame of a stride. So it
-   * tracks the foot horizontally, sits on the ground vertically, and trades size
-   * for opacity with height exactly the way a real contact shadow does — wider
-   * and weaker as the thing casting it climbs away.
+   * The darkening itself is the ground's job — terrain and grass shade
+   * themselves from these two points, see world/contact.ts. Both halves of the
+   * cue matter. A shadow that appears under a planted foot is what says the foot
+   * is on the dirt; a shadow that then *stays* while the foot swings forward
+   * would say the opposite about every other frame of a stride. So it tracks the
+   * foot horizontally, sits on the ground vertically, and trades size for density
+   * with height exactly the way a real contact shadow does.
    */
   private updateContact() {
-    for (const [paw, blot, side] of [
-      [this.pawL, this.shadowL, -1],
-      [this.pawR, this.shadowR, 1],
+    // Viewmodel space is level and forward is -z, so a paw's offset maps into
+    // the world through the same basis slopeAt() uses.
+    const sy = Math.sin(this.yaw)
+    const cy = Math.cos(this.yaw)
+    for (const [paw, i, side] of [
+      [this.pawL, 0, -1],
+      [this.pawR, 1, 1],
     ] as const) {
-      const ground = -this.eyeAbove + this.slopeAt(side)
+      const slope = this.slopeAt(side)
+      const ground = -this.eyeAbove + slope
       // Back out of shoulder space; see place().
       const px = side * SHOULDER.x + paw.position.x
       const pz = SHOULDER.z + paw.position.z
@@ -1907,14 +2198,17 @@ export class Tiger {
       // Gone by a third of a metre up, which is well above the gait's peak lift
       // but not so high that a pounce leaves a blot hanging under the animal.
       const near = Math.max(0, 1 - h / 0.34)
-      blot.position.set(px, ground + 0.02, pz)
-      // Two and a half times the foot at contact, and wider still as it climbs.
-      // The paw is 0.22 m across and hides everything directly under it, so the
-      // blot has to be big enough to show past the toes or it shows nowhere.
-      blot.scale.setScalar(0.54 + h * 1.1)
-      const m = blot.material as THREE.MeshBasicMaterial
-      m.opacity = near * near * 0.8
-      blot.visible = m.opacity > 0.01
+      // Wider and weaker as the foot climbs, the way a real contact shadow
+      // trades size for density with the height of the thing casting it.
+      setContact(
+        i,
+        this.pos.x + cy * px + sy * pz,
+        this.eyeGround + slope,
+        this.pos.z - sy * px + cy * pz,
+        near * near * 0.88,
+        0.34 + h * 0.5,
+        0.5 + h * 0.5,
+      )
     }
   }
 
@@ -1949,8 +2243,10 @@ export class Tiger {
     const hide = 1 - out
     for (const claw of hooks) {
       const rest = claw.userData.rest as { y: number; z: number; rx: number }
+      // The z travel has to be most of the claw's own length or "sheathed" still
+      // leaves half of it in the air. 0.030 against a 0.060 claw did exactly that.
       claw.position.y = rest.y + hide * 0.013
-      claw.position.z = rest.z + hide * 0.030
+      claw.position.z = rest.z + hide * 0.046
       claw.rotation.x = rest.rx - hide * 0.55
     }
   }

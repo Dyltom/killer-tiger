@@ -22,6 +22,7 @@ import { Rng } from '../engine/rng'
 import { ChunkedScatter } from './scatter'
 import { surface } from './materials'
 import { textures } from './textures'
+import { addContactShade } from './contact'
 import { addDistanceFade, addTranslucency, addWind } from './wind'
 import type { Collider } from './world'
 
@@ -319,6 +320,7 @@ export function buildBushes(ctx: FloraContext): ChunkedScatter {
   addWind(mat, { amplitude: 0.14, height: 1, speed: 1.7, gust: 1.0 })
   addTranslucency(mat, 0.6, 3.0)
   addDistanceFade(mat, 105, 150)
+  addContactShade(mat)
 
   const field = new ChunkedScatter(SHRUB_CELL)
   const tint = new THREE.Color()
@@ -374,6 +376,9 @@ export function buildGrass(ctx: FloraContext): GrassResult {
   // and a wide lobe here washes out the whole plain.
   addTranslucency(tallMat, 0.9, 4.0)
   addDistanceFade(tallMat, 96, 128)
+  // A paw planted in tall grass is standing on the bases of these blades, and
+  // this is the only thing in the render that says so. See contact.ts.
+  addContactShade(tallMat)
 
   const patches: GrassPatch[] = []
   const centres: THREE.Vector3[] = []
@@ -425,6 +430,7 @@ export function buildGrass(ctx: FloraContext): GrassResult {
   // The shader fade and the chunk cull have to agree: the fade finishes at 68 m
   // so a chunk switched off past ~72 m can never pop, it was already invisible.
   addDistanceFade(coverMat, 46, 68)
+  addContactShade(coverMat)
 
   const cover = new ChunkedScatter(COVER_CELL)
   for (let c = 0; c < WORLD.groundCover; c++) {
