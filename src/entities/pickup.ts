@@ -414,6 +414,12 @@ export class Pickup {
       depthWrite: false,
       blending: THREE.AdditiveBlending,
       toneMapped: false,
+      // Additive layers must not be fogged. Fog mixes toward the fog colour,
+      // which on an additive pass means distance makes the halo brighter
+      // instead of dimmer — the drop across the plain glows harder than the
+      // one at your feet. They fade correctly on their own, because the thing
+      // they're drawn over is already fogged.
+      fog: false,
     }))
     this.halo.scale.setScalar(1.5)
     this.halo.position.y = 0.32
@@ -446,6 +452,7 @@ export class Pickup {
         blending: THREE.AdditiveBlending,
         side: THREE.DoubleSide,
         toneMapped: false,
+        fog: false,
       }),
     )
     this.ring.position.y = 0.03

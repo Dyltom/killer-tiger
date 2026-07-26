@@ -88,16 +88,26 @@ export function installAtmosphericFog() {
     #endif
   `
 
-  // Mirrors what three's own <worldpos_vertex> does, but unconditionally —
-  // that chunk only defines worldPosition when lighting happens to need it.
+  // The fragment side wants a world position, which three only computes when
+  // lighting happens to need it (<worldpos_vertex> is conditional). So derive
+  // it here instead — from `mvPosition`, not from `transformed`.
+  //
+  // That distinction is the whole point. `transformed` only exists in shaders
+  // that ran <begin_vertex>, and the sprite shader doesn't: it builds
+  // `mvPosition` straight from the model-view matrix's translation column and
+  // then includes <fog_vertex> anyway. Reading `transformed` there failed to
+  // link, and since this chunk is global, that silently killed every
+  // SpriteMaterial in the scene. `mvPosition` is the safe choice because
+  // three's own fog already depends on it — see the line above.
+  //
+  // Undoing the view transform recovers the world position. The view matrix's
+  // upper 3x3 is a rotation, so transposing inverts it, and the translation is
+  // just the camera. This also drops the instancing branch for free:
+  // mvPosition already has the instance and skin transforms folded in.
   THREE.ShaderChunk.fog_vertex = /* glsl */ `
     #ifdef USE_FOG
       vFogDepth = - mvPosition.z;
-      vec4 fogWorld = vec4( transformed, 1.0 );
-      #ifdef USE_INSTANCING
-        fogWorld = instanceMatrix * fogWorld;
-      #endif
-      vFogWorld = ( modelMatrix * fogWorld ).xyz;
+      vFogWorld = cameraPosition + transpose( mat3( viewMatrix ) ) * mvPosition.xyz;
     #endif
   `
 
