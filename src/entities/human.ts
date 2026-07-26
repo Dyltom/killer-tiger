@@ -30,12 +30,22 @@ import { HUMAN } from '../config'
 import { clamp, damp, Rng } from '../engine/rng'
 import { textures } from '../world/textures'
 import { terrainHeight, World } from '../world/world'
+import {
+  addWoundShading, clearWounds, createWoundSet, cutWound, extendRun, RUN_SLOTS, startRun,
+} from './wounds'
 
 export type HumanKind = 'villager' | 'hunter'
 /** What a pool slot was built wearing. Baked once; see buildRig. */
 export type Dress = 'shirt' | 'vest' | 'bare'
 export type Lower = 'trouser' | 'dhoti' | 'shorts'
 export type HumanState = 'wander' | 'suspicious' | 'flee' | 'hunt' | 'panic' | 'dead'
+
+/**
+ * What opened the wound. Claws rake and jaws puncture, and the two leave marks
+ * a player can tell apart without ever being told to look — which is the point
+ * of carrying the distinction this far down at all.
+ */
+export type BlowKind = 'claw' | 'bite'
 
 export interface ShotEvent {
   origin: THREE.Vector3
@@ -629,6 +639,12 @@ const RIG: BoneDef[] = (() => {
     { name: 'hips', parent: null, p: V(0, 0.92, 0), tip: V(0, 1.075, 0) },
     { name: 'spine', parent: 'hips', p: V(0, 1.075, 0), tip: V(0, 1.245, 0) },
     { name: 'chest', parent: 'spine', p: V(0, 1.245, 0), tip: V(0, 1.415, 0) },
+    // Carries the dhoti and nothing else. It never rotates — it exists to be
+    // *scaled*, because a wrapped skirt bound rigidly to the pelvis is a cone,
+    // and a cone does not care that its wearer is lying down. On a corpse that
+    // read as a lampshade round the hips with two legs coming out of it, which
+    // is the single loudest tell left on a body on the ground.
+    { name: 'skirt', parent: 'hips', p: V(0, 0.92, 0), tip: V(0, 0.60, 0) },
     { name: 'neck', parent: 'chest', p: V(0, 1.415, 0.01), tip: V(0, 1.52, 0.012) },
     { name: 'head', parent: 'neck', p: V(0, 1.52, 0.012), tip: V(0, 1.66, 0.016) },
   ]
@@ -1121,8 +1137,14 @@ function weigh(g: THREE.BufferGeometry, bones: string[]) {
   g.setAttribute('skinWeight', new THREE.Float32BufferAttribute(wgt, 4))
 }
 
-/** Fresh in the wound, and the darker stain it leaves in cloth. */
-const WET_BLOOD = new THREE.Color(0x8c0d10)
+/**
+ * The overall soak, which is the *only* blood the vertex colours carry.
+ *
+ * Wounds themselves live in the fragment shader — see wounds.ts for why they
+ * have to. What is left here is the general darkening of a man who has been
+ * losing blood for a while, which is broad, soft and low-contrast, and so is
+ * exactly the kind of thing vertex colours are good at.
+ */
 const SOAKED = new THREE.Color(0x3a0709)
 
 /** One skinned layer: its mesh, and the buffers needed to repaint it. */
@@ -1339,6 +1361,25 @@ export class Human {
   private bleedTimer = 0
   private bleedNext = 0
   private fed = false
+  /** Where the last blow landed, in bind-pose body space. */
+  private lastCut = new THREE.Vector3()
+
+  /**
+   * How the body goes down, decided by the blow that did it and then fixed.
+   *
+   * `force` 0 is a man whose legs stopped working under him and 1 is a man
+   * thrown off his feet; `roll` is the twist about his own spine on the way
+   * down, which is what decides whether he lands on his face, his back or his
+   * shoulder; `jitter` is a per-death seed that pushes every slack joint angle
+   * off the shared default, so twenty corpses are not one corpse twenty times.
+   */
+  private deathForce = 1
+  private deathRoll = 0
+  private jitter: number[] = []
+  /** Ground pools stamped so far, the cap, and the clock to the next one. */
+  private poolCount = 0
+  private poolMax = 4
+  private poolNext = 0
 
   /** Pose blends, all damped so nothing snaps between stances. */
   private aimBlend = 0
@@ -1353,6 +1394,7 @@ export class Human {
   private chest!: THREE.Bone
   private neck!: THREE.Bone
   private head!: THREE.Bone
+  private skirt!: THREE.Bone
   private arms: Limb[] = []
   private legs: Leg[] = []
 
@@ -1373,9 +1415,19 @@ export class Human {
   private kitHat: THREE.Mesh | null = null
   /** A turban already fills the space a hat would go, so this slot never gets one. */
   private turbaned = false
-  private wounds!: THREE.Mesh
-  private woundMat!: THREE.MeshStandardMaterial
   private body = new THREE.Group()
+  /** Every material on this body, for the dissolve at the end of the corpse's life. */
+  private mats: THREE.MeshStandardMaterial[] = []
+  /** Every capsule cut into this body. Handed straight to its two shaders. */
+  private wounds = createWoundSet()
+  /**
+   * Where blood is still leaving from, in bind-pose body space, with the slot
+   * holding the streak below it. Only as many as the shader has room for; past
+   * that the oldest source stops growing, which nobody has ever noticed on a
+   * body that by then is more red than not.
+   */
+  private runs: { x: number; y: number; z: number; slot: number; len: number }[] = []
+  private runNext = 0
 
   pendingShot: ShotEvent | null = null
   pendingShout = false
@@ -1384,6 +1436,13 @@ export class Human {
   bleedPulse = false
   /** Where the last wound was opened, in world space. */
   readonly woundPos = new THREE.Vector3()
+  /**
+   * Set for one frame when the corpse has soaked enough ground to be worth a
+   * decal. The game stamps it; the body only knows where and how big.
+   */
+  poolPulse = false
+  readonly poolPos = new THREE.Vector3()
+  poolScale = 1
 
   constructor(seed: number) {
     this.rng = new Rng(seed)
@@ -1430,6 +1489,7 @@ export class Human {
     this.chest = at('chest')
     this.neck = at('neck')
     this.head = at('head')
+    this.skirt = at('skirt')
     for (const s of ['L', 'R'] as const) {
       this.arms.push({
         clav: at(`clav${s}`),
@@ -2079,8 +2139,8 @@ export class Human {
       // skirt's 0.78 z-squash makes it 12.3 cm deep at 0.955 against a shirt
       // 11.4 cm deep, so it came through the front and the back of the shirt
       // even at heights where it was safely inside it at the sides.
-      cloth(['hips'], trunk(0.56, shirted ? 0.940 : 0.955, 0.235, r(shirted ? 0.130 : 0.158), 0.78, 14), Reg.trouser)
-      cloth(['hips'], ell(0, 0.59, 0, 0.235, 0.05, 0.184, 14, 4), Reg.trouser)
+      cloth(['skirt'], trunk(0.56, shirted ? 0.940 : 0.955, 0.235, r(shirted ? 0.130 : 0.158), 0.78, 14), Reg.trouser)
+      cloth(['skirt'], ell(0, 0.59, 0, 0.235, 0.05, 0.184, 14, 4), Reg.trouser)
       if (!shirted) {
         // The tie: a separate band, wide enough to swallow the top of the skirt.
         // Under a shirt there is nothing to swallow and nothing to see.
@@ -2241,6 +2301,11 @@ export class Human {
     const tex = textures()
     this.skinMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.86 })
     this.clothMat = new THREE.MeshStandardMaterial({ vertexColors: true, map: tex.cloth, roughness: 1 })
+    this.mats.push(this.skinMat, this.clothMat)
+    // Both layers, because a claw that opens a shirt opens the man under it and
+    // the cut has to cross the hem without noticing it is there.
+    addWoundShading(this.skinMat, this.wounds)
+    addWoundShading(this.clothMat, this.wounds)
     for (const [layer, mat] of [['skin', this.skinMat], ['cloth', this.clothMat]] as const) {
       const mine = parts.filter((p) => p.layer === layer)
       if (!mine.length) continue
@@ -2310,26 +2375,16 @@ export class Human {
       mesh.receiveShadow = true
       mesh.bind(skeleton, new THREE.Matrix4())
       this.body.add(mesh)
-      this.layers.push({ mesh, region, base, shade, attr: geo.attributes.color as THREE.BufferAttribute, alt })
+      this.layers.push({
+        mesh,
+        region,
+        base,
+        shade,
+        attr: geo.attributes.color as THREE.BufferAttribute,
+        alt,
+      })
     }
     this.body.add(root)
-
-    // ---- wounds. Flattened blobs a hair proud of the torso, hidden until
-    // something opens them up. Hung off the chest bone, so the geometry is
-    // pre-shifted into that bone's local space.
-    this.woundMat = new THREE.MeshStandardMaterial({ color: 0x4a0509, roughness: 0.35 })
-    const wound = mergeGeometries([
-      ell(-0.086, 1.27, -0.112, 0.095, 0.075, 0.035),  // across the ribs
-      ell(0.13, 1.35, -0.088, 0.06, 0.08, 0.03),       // right shoulder
-      ell(-0.155, 1.15, 0.02, 0.03, 0.09, 0.06),       // left flank
-      ell(0.04, 1.21, 0.122, 0.09, 0.08, 0.03),        // back
-      ell(-0.045, 1.46, -0.052, 0.05, 0.04, 0.04),     // throat
-    ], false)!
-    wound.translate(0, -1.245, 0)
-    this.wounds = new THREE.Mesh(wound, this.woundMat)
-    this.wounds.visible = false
-    this.wounds.castShadow = false
-    this.chest.add(this.wounds)
 
     this.wide = wide
     this.body.scale.set(wide, tall, wide)
@@ -2353,19 +2408,54 @@ export class Human {
         // fixed alike: an eye socket has to darken the eye in it as well as the
         // lids around it, or the eye is a lamp at the bottom of a hole.
         const s = l.shade[i]!
+        let r: number
+        let g: number
+        let b: number
         if (reg === Reg.fixed) {
-          a[i * 3] = l.base[i * 3]! * s
-          a[i * 3 + 1] = l.base[i * 3 + 1]! * s
-          a[i * 3 + 2] = l.base[i * 3 + 2]! * s
+          r = l.base[i * 3]!
+          g = l.base[i * 3 + 1]!
+          b = l.base[i * 3 + 2]!
         } else {
           const c = pal[reg]!
-          a[i * 3] = c.r * s
-          a[i * 3 + 1] = c.g * s
-          a[i * 3 + 2] = c.b * s
+          r = c.r
+          g = c.g
+          b = c.b
         }
+        a[i * 3] = r * s
+        a[i * 3 + 1] = g * s
+        a[i * 3 + 2] = b * s
       }
       l.attr.needsUpdate = true
     }
+  }
+
+  /**
+   * A point on the body's surface, in bind-pose body space.
+   *
+   * `theta` turns around the body's axis from the direction the blow came from,
+   * so a wound can be laid out as an arc across the man rather than as a set of
+   * offsets that walk off him. Anything wide has to be built this way: a claw
+   * rake spans a third of the way round the ribs, and if its far end is placed
+   * on the tangent plane instead of the surface it ends up hanging seven
+   * centimetres out in the air beside him.
+   *
+   * `bulge` pushes the point out past the skin, which is how a straight capsule
+   * covers a curved arc. A chord across an arc sags inward and would leave the
+   * middle of a rake unpainted; lifting both ends by 1/cos(half the arc) puts
+   * the sag back on the surface, and the ends finish slightly proud, which only
+   * narrows the mark where a claw is leaving the body anyway.
+   */
+  private surfaceAt(
+    theta: number, y: number,
+    nx: number, nz: number, ax: number, az: number,
+    bulge: number, out: THREE.Vector3,
+  ) {
+    const c = Math.cos(theta)
+    const s = Math.sin(theta)
+    const dx = nx * c + ax * s
+    const dz = nz * c + az * s
+    const r = sectionR(y, dx, dz) * bulge
+    out.set(dx * r, y, dz * r)
   }
 
   /** Everything back to the bind pose. */
@@ -2373,6 +2463,10 @@ export class Human {
     for (let i = 0; i < this.bones.length; i++) {
       this.bones[i]!.position.copy(this.rest[i]!)
       this.bones[i]!.rotation.set(0, 0, 0)
+      // The skirt bone is the only one that is ever scaled, and these slots are
+      // recycled — leave it out and the second man to wear this body walks off
+      // with the drape of the corpse it was last used for.
+      this.bones[i]!.scale.set(1, 1, 1)
     }
   }
 
@@ -2413,15 +2507,22 @@ export class Human {
     this.cSkin.setHex(this.rng.pick(SKIN))
     this.cShirt.setHex(kind === 'hunter' ? this.rng.pick(HUNTER_SHIRT) : this.rng.pick(SHIRT))
     this.cTrouser.setHex(this.rng.pick(TROUSER))
+    clearWounds(this.wounds)
+    this.runs.length = 0
+    this.runNext = 0
+    this.skinMat.roughness = 0.86
+    this.clothMat.roughness = 1
+    for (const m of this.mats) {
+      m.transparent = false
+      m.opacity = 1
+      m.depthWrite = true
+    }
     this.paint()
     // Put on whatever this kind wears. Only a bare-chested slot has anything to
     // switch — the shawl for a villager, a jerkin for a hunter.
     for (const l of this.layers) if (l.alt) l.mesh.geometry.setIndex(l.alt[kind])
     this.skinMat.emissive.setHex(0x000000)
     this.clothMat.emissive.setHex(0x000000)
-    this.wounds.visible = false
-    this.woundMat.color.setHex(0x4a0509)
-    this.wounds.scale.setScalar(1)
 
     this.setRifleVisible(kind === 'hunter')
     this.setKit(kind === 'hunter')
@@ -2476,6 +2577,7 @@ export class Human {
   private setKit(on: boolean) {
     if (on && !this.kitBody) {
       const gear = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.72 })
+      this.mats.push(gear)
 
       // Bandolier: over the left shoulder to the right hip, with the return
       // strap round the back so it doesn't read as a stripe painted on.
@@ -2539,7 +2641,7 @@ export class Human {
 
   // --------------------------------------------------------------- damage
   /** Returns true if this hit killed them. */
-  hurt(amount: number, from: THREE.Vector3): boolean {
+  hurt(amount: number, from: THREE.Vector3, blow: BlowKind = 'claw', at?: THREE.Vector3): boolean {
     if (!this.alive) return false
     this.health -= amount
     this.hurtFlash = 1
@@ -2554,8 +2656,13 @@ export class Human {
     const l = Math.hypot(dx, dz) || 1
     const wx = dx / l
     const wz = dz / l
-    const c = Math.cos(-this.yaw)
-    const s = Math.sin(-this.yaw)
+    // Body-local is the *inverse* of the group's yaw, and this used to build the
+    // forward rotation instead: sin came out with the wrong sign, so fallZ was
+    // negated and every body toppled toward whatever had just hit it. Front and
+    // back are the one axis a viewer can read on a falling man, so the whole
+    // topple was playing backwards.
+    const c = Math.cos(this.yaw)
+    const s = Math.sin(this.yaw)
     this.fallX = wx * c - wz * s
     this.fallZ = wx * s + wz * c
     // Whipped away from the impact hard enough to see, then damped out.
@@ -2567,12 +2674,11 @@ export class Human {
     this.vel.x += wx * shove
     this.vel.z += wz * shove
 
-    // Torn open, and it stays torn: the wound layer surfaces on first blood and
-    // spreads as they bleed out, so a half-dead villager looks half-dead.
-    this.showWounds()
+    // Torn open, and it stays torn.
+    this.openWound(blow, at)
 
     if (this.health <= 0) {
-      this.die()
+      this.die(amount)
       return true
     }
     if (this.kind === 'villager') this.state = 'flee'
@@ -2580,34 +2686,248 @@ export class Human {
   }
 
   /**
-   * Reveal and grow the wound layer, and soak the clothing. Everything is
-   * driven off the health fraction so it is monotonic — the damage only ever
-   * gets worse, which is what makes it read as accumulated rather than flashing.
+   * Cut the shape of the blow into the body, wherever the blow landed.
+   *
+   * This replaced five red ellipsoids parented to the chest bone. Those never
+   * had a chance: an ellipsoid centred just inside a surface is a sphere
+   * sticking *out* of it, they scaled up from the bone's origin as the damage
+   * grew so they climbed further off the ribs the worse things got, and being
+   * in the same place on every body meant a man shot in the back grew a red
+   * bubble on his front. It read exactly as what it was — beads glued on.
+   *
+   * A wound has no geometry of its own now. It is a handful of capsules handed
+   * to the shader the body is already drawn with — see wounds.ts — so it
+   * follows the silhouette because it is evaluated *on* the silhouette, it
+   * skins along with the surface it is on, it cannot z-fight or float, and it
+   * adds no draw call.
+   *
+   * Each kind of blow leaves its own signature. That is the part a player reads
+   * without knowing they are reading it — a bite is not a smaller claw.
+   *
+   * All of it is laid out in bind-pose body space rather than world space, and
+   * that is not a convenience. The girth and height scales on `body` are ±10%
+   * per villager, so a mark placed in world metres lands a centimetre or two
+   * off on a broad man and a couple more on a tall one — which is nothing on a
+   * hand-sized rake and everything on a bite, where the jaw has to find a
+   * five-centimetre throat. Working in the frame the vertices live in means the
+   * numbers below can be read straight off TORSO, and they are.
    */
-  private showWounds() {
+  private openWound(blow: BlowKind, at?: THREE.Vector3) {
+    // Local direction to whatever did it. fallX/fallZ point *away* from it.
+    const nx = -this.fallX
+    const nz = -this.fallZ
+    // Across the body, on the ground plane: the axis a swipe travels along and
+    // a jaw closes across.
+    const ax = -nz
+    const az = nx
+
+    // How high up the body it landed, in the body's own units. A tiger's paw
+    // arrives wherever the swing was aimed; its jaws go for the throat, which
+    // is why a bite is floored well above where the swipe that missed it was.
+    let hy = clamp(at ? (at.y - this.pos.y) / this.body.scale.y : 1.28, 0.5, 1.66)
+    if (blow === 'bite') hy = clamp(hy, 1.34, 1.56)
+    // Out to the surface facing the blow, on the section that is actually there
+    // at that height. A constant here cannot work: the ribs are 16 cm from the
+    // spine across and 11 cm through, and the throat is 5 — work at the chest
+    // radius and a bite lands in mid-air beside the neck, work at the throat
+    // radius and a rake is buried inside the ribcage.
+    const r = sectionR(hy, nx, nz)
+    const cx = nx * r
+    const cz = nz * r
+
+    if (blow === 'claw') {
+      // Three or four rakes, parallel, running diagonally across the body —
+      // claws arrive as a set and they arrive at an angle. One capsule each,
+      // which is the shape a drawn claw makes and the reason for capsules at
+      // all: a rake is a line, and a line is two points and a radius.
+      const rakes = 3 + (this.rng.chance(0.45) ? 1 : 0)
+      // Between the claws of one paw. Measured along the skin, not in angle —
+      // 4 cm is 4 cm whether it lands on a chest or a forearm.
+      const gap = 0.043
+      // Which way the paw was travelling. Both are equally likely and the
+      // difference is obvious once there are two bodies next to each other.
+      const lift = this.rng.chance(0.5) ? 1 : -1
+      // Off the horizontal. A swipe that lands dead level reads as a printed
+      // barcode; a tiger's arrives on the diagonal and drags as the man turns.
+      const phi = lift * this.rng.range(0.5, 1.0)
+      const cp = Math.cos(phi)
+      const sp = Math.sin(phi)
+      for (let k = 0; k < rakes; k++) {
+        const off = (k - (rakes - 1) / 2) * gap + this.rng.range(-0.005, 0.005)
+        // Uneven, because the outer claws of a paw never travel as far as the
+        // middle ones and four identical strokes read as a stamp.
+        const len = this.rng.range(0.17, 0.29)
+        // Perpendicular offset for this claw, then half the stroke either way.
+        const s0 = -cp * len * 0.5 - sp * off
+        const u0 = -sp * len * 0.5 + cp * off
+        const s1 = cp * len * 0.5 - sp * off
+        const u1 = sp * len * 0.5 + cp * off
+        // Arc length to angle. Half the arc sets how far the chord sags, and
+        // therefore how far out both ends have to sit to put it back.
+        const half = Math.abs(s1 - s0) * 0.5 / r
+        const bulge = 1 / Math.max(0.6, Math.cos(half))
+        this.surfaceAt(s0 / r, hy + u0, nx, nz, ax, az, bulge, WOUND_AT)
+        this.surfaceAt(s1 / r, hy + u1, nx, nz, ax, az, bulge, RUN_AT)
+        cutWound(
+          this.wounds,
+          WOUND_AT.x, WOUND_AT.y, WOUND_AT.z,
+          RUN_AT.x, RUN_AT.y, RUN_AT.z,
+          this.rng.range(0.009, 0.014), 1,
+        )
+        // Blood leaves from the low end, whichever end that is.
+        this.mark(u0 < u1 ? WOUND_AT : RUN_AT)
+      }
+    } else {
+      // Two arcs, upper and lower jaw, closed on the throat. The noise on the
+      // capsule edge does the punctures for free: at this radius it breaks the
+      // arc into a row of deep bites with shallow ground between them, which is
+      // what a set of canines leaves and what drawing four separate holes at
+      // this scale would cost four more slots to say.
+      // The gape between the jaws, and how far round the head is turned. Both
+      // vary, because two bites that land in the same place on the same body
+      // should not stack into one symmetrical brand.
+      const gape = this.rng.range(0.045, 0.075)
+      const tilt = this.rng.range(-0.25, 0.25)
+      for (const jaw of [-1, 1]) {
+        // The upper jaw reaches further round than the lower one — that is how
+        // a skull is built, and it is the reason a bite mark is two arcs of
+        // different length rather than a pair of brackets.
+        const arc = jaw > 0 ? 0.92 : 0.7
+        const bulge = 1 / Math.cos(arc * 0.5)
+        const y = hy + jaw * gape
+        this.surfaceAt(tilt - arc * 0.5, y - 0.008, nx, nz, ax, az, bulge, WOUND_AT)
+        this.surfaceAt(tilt + arc * 0.5, y + 0.008, nx, nz, ax, az, bulge, RUN_AT)
+        cutWound(
+          this.wounds,
+          WOUND_AT.x, WOUND_AT.y, WOUND_AT.z,
+          RUN_AT.x, RUN_AT.y, RUN_AT.z,
+          0.021, 1,
+        )
+      }
+      // And the mess the jaw makes around what it closed on. Pulled in most of
+      // the way to the axis and sized off the section, so it scales itself: on
+      // a throat it swallows the whole neck, which is what a jaw closing round
+      // one does, and on a chest the same sphere is still a hand's width short
+      // of coming out of the back.
+      const cr = sectionR(hy, nx, nz)
+      cutWound(
+        this.wounds,
+        nx * cr * 0.3, hy, nz * cr * 0.3,
+        nx * cr * 0.3, hy, nz * cr * 0.3,
+        cr * 0.95 + 0.04, 0.36,
+      )
+      WOUND_AT.set(nx * cr, hy - 0.05, nz * cr)
+      this.mark(WOUND_AT)
+    }
+
+    // Short, because it just happened. It grows on its own from here.
+    this.bleedRun(0.09)
+
+    // A light overall soak on top, so a man who has taken a lot is dressed in a
+    // darker shirt than one who has taken a little. Deliberately weak — the
+    // wounds carry the story now, and dyeing the whole garment on top of them
+    // just flattens the contrast that makes them read.
     const gone = clamp(1 - this.health / this.maxHealth, 0, 1)
-    this.wounds.visible = true
-    // Starts as a couple of gashes, ends as most of the torso.
-    this.wounds.scale.setScalar(0.45 + gone * 0.75)
-    this.woundMat.color.setHex(0x4a0509).lerp(WET_BLOOD, gone * 0.6)
-    // Blood wicks through the cloth from the wound outward.
-    this.cShirt.lerp(SOAKED, gone * 0.35)
-    this.cSkin.lerp(SOAKED, gone * 0.18)
+    this.cShirt.lerp(SOAKED, gone * 0.12)
+    this.cSkin.lerp(SOAKED, gone * 0.06)
+    // Blood is wet, and wet is the one property that separates it from a brown
+    // patch. Nothing here can vary roughness per vertex, but a badly cut man is
+    // mostly blood by area, so pulling the whole surface toward a sheen is
+    // close enough and costs a single float.
+    this.skinMat.roughness = 0.86 - gone * 0.24
+    this.clothMat.roughness = 1 - gone * 0.22
     this.paint()
-    this.woundPos.set(this.pos.x, this.pos.y + 1.3, this.pos.z)
+
+    // Hand the spray back the place it should be leaving from. The blood the
+    // game throws has to come off the opening, not out of the middle of the man
+    // — it is the same point, and it is the difference between an arterial jet
+    // and a red cloud with a villager standing in it.
+    this.body.updateWorldMatrix(true, false)
+    this.lastCut.set(cx, hy, cz)
+    this.woundPos.copy(this.body.localToWorld(SOAK_AT.set(cx, hy, cz)))
   }
 
-  private die() {
+  /**
+   * Register a place blood is leaving from, in bind-pose body space.
+   *
+   * Only a blow leaves one. If the run-down streaks registered as sources too,
+   * each pass would seed the next one further down and the body would be solid
+   * red inside a couple of seconds.
+   */
+  private mark(p: THREE.Vector3) {
+    const slot = startRun(this.wounds, p.x, p.y, p.z, this.rng.range(0.012, 0.019))
+    this.runs[this.runNext] = { x: p.x, y: p.y, z: p.z, slot, len: 0 }
+    this.runNext = (this.runNext + 1) % RUN_SLOTS
+  }
+
+  /**
+   * Let what has already been spilt run downhill.
+   *
+   * Blood that appears all at once and then holds still is paint. Calling this
+   * again as they bleed out is what turns a set of cuts into a body that is
+   * still losing blood: each pass drags the bottom of every run a little
+   * further down, so the streaks lengthen over the seconds after the hit rather
+   * than arriving finished.
+   */
+  private bleedRun(reach = 0.16) {
+    for (const run of this.runs) {
+      if (!run || reach <= run.len) continue
+      run.len = reach
+      const y = run.y - reach
+      // Follow the body in. A man is wider at the chest than at the waist, so a
+      // run that drops straight down in a straight line is off his surface
+      // inside a hand's length and hanging in front of his belt. Closing it
+      // toward the axis by however much the section has closed keeps it on him
+      // — and because both radii are measured along the same direction, the
+      // arbitrary length of that direction cancels out of the ratio.
+      const k = sectionR(y, run.x, run.z) / Math.max(1e-4, sectionR(run.y, run.x, run.z))
+      extendRun(this.wounds, run.slot, run.x * k, y, run.z * k, 0.46)
+    }
+  }
+
+  private die(amount: number) {
     this.alive = false
     this.state = 'dead'
     this.deathTimer = 0
     this.vel.set(0, 0, 0)
     this.health = 0
-    this.showWounds()
     // Keep pumping for a couple of seconds. The game turns each pulse into a
     // spray, which is what an opened throat looks like and one burst does not.
     this.bleedTimer = HUMAN.bleedDuration
     this.bleedNext = 0
+    this.poolNext = 0.5
+    this.poolCount = 0
+    this.poolMax = 4
+
+    // The blow that killed him is not the blow that grazed him, and up to here
+    // nothing has said so — `openWound` cuts the same three rakes whether the
+    // man walks away from them or not, so a corpse was arriving on the ground
+    // carrying a flesh wound. Flood the area round what landed last with one
+    // wide capsule, shallow enough that it can only ever reach the staining end
+    // of the ramp, and start the runs long instead of letting them crawl out of
+    // him over the next two seconds. A man who is already dead is already
+    // emptying; the streaks should be there when he lands, not catch him up.
+    const c = this.lastCut
+    cutWound(this.wounds, c.x, c.y, c.z, c.x * 0.9, c.y - 0.09, c.z * 0.9, 0.105, 0.34)
+    this.mark(c)
+    this.bleedRun(0.26)
+    this.cShirt.lerp(SOAKED, 0.2)
+    this.cSkin.lerp(SOAKED, 0.1)
+    this.paint()
+
+    // How they go down. A man whose heart stops folds where he stands; a man
+    // hit by three hundred kilos of tiger leaves the ground. Everything about
+    // the fall reads off this one number, so the two look nothing alike.
+    this.deathForce = clamp((amount - 30) / 90, 0, 1)
+    // The twist on the way down. Small most of the time — a fall is not a
+    // gymnastic event — but occasionally enough to land them on a shoulder,
+    // and biased by which way they were struck.
+    this.deathRoll = this.fallX * this.rng.range(0.3, 0.9)
+      + (this.rng.chance(0.25) ? this.rng.range(-1.1, 1.1) : 0)
+    // One seed per joint, drawn once. Two corpses with the same seed would be
+    // the same corpse, and this pool is only twenty slots deep.
+    this.jitter = []
+    for (let i = 0; i < 18; i++) this.jitter.push(this.rng.range(-1, 1))
     this.setRifleVisible(false)
   }
 
@@ -2620,6 +2940,35 @@ export class Human {
   /** Consume the corpse. It collapses further and stops being worth anything. */
   feed() {
     this.fed = true
+    // A fed-on body has been opened up, not tidily killed. Tear the torso from
+    // several directions at once with something much blunter than a claw — a
+    // carcass is not a set of neat lines, it is a hole — and then let all of it
+    // run. The difference between a corpse and a carcass is that a carcass is
+    // mostly blood.
+    for (let i = 0; i < 4; i++) {
+      const a = this.rng.range(0, Math.PI * 2)
+      const y0 = this.rng.range(1.0, 1.42)
+      const y1 = y0 + this.rng.range(-0.12, 0.12)
+      const dx = Math.cos(a)
+      const dz = Math.sin(a)
+      const r0 = sectionR(y0, dx, dz) * 0.86
+      const r1 = sectionR(y1, dx, dz) * 0.86
+      cutWound(
+        this.wounds,
+        dx * r0, y0, dz * r0,
+        dx * r1, y1, dz * r1,
+        this.rng.range(0.055, 0.085), 1,
+      )
+      WOUND_AT.set(dx * r0, Math.min(y0, y1), dz * r0)
+      this.mark(WOUND_AT)
+    }
+    // Straight to full length. The tiger has been at this for a while; nothing
+    // about it should look like it started a moment ago.
+    this.bleedRun(0.42)
+    // And it goes on emptying onto the ground under it, further and wider than
+    // a clean kill ever does.
+    this.poolMax = 8
+    this.poolNext = 0
     // Torn apart: sinks flatter and stops registering on the radar.
     this.deathTimer = Math.max(this.deathTimer, HUMAN.corpseLife * 0.72)
   }
@@ -2652,10 +3001,26 @@ export class Human {
     this.pendingShot = null
     this.pendingShout = false
     this.bleedPulse = false
-    this.hurtFlash = Math.max(0, this.hurtFlash - dt * 3)
-    const flash = this.hurtFlash * 0.7
-    this.clothMat.emissive.setRGB(flash, 0, 0)
-    this.skinMat.emissive.setRGB(flash * 0.6, 0, 0)
+    this.poolPulse = false
+    // The hit tell used to be an emissive of 0.7 red over the whole body for a
+    // third of a second, which lit a man from the inside: at night he was the
+    // brightest object in the village, and by day he flushed scarlet head to
+    // foot including his hat. Nothing about a man being clawed makes him glow.
+    //
+    // What is left has to be judged against these men rather than in the
+    // abstract, because they are *dark*: dark skin, dark cloth, an albedo of
+    // about 0.03 linear, which under village light leaves about 0.04 coming off
+    // them. An emissive is added to that, so 0.13 is not a tint on a body, it is
+    // three times the body, and every man who took a claw went uniformly the
+    // colour of the glow from his hat to his sandals — which is most of what
+    // "he goes weird and red when you hit him" was. Half of what he already
+    // reflects, gone in a tenth of a second, is a flicker; anything more is a
+    // repaint. The actual read comes from the wound that just opened and the
+    // spray off it.
+    this.hurtFlash = Math.max(0, this.hurtFlash - dt * 6)
+    const flash = this.hurtFlash * this.hurtFlash * 0.022
+    this.clothMat.emissive.setRGB(flash, flash * 0.22, flash * 0.16)
+    this.skinMat.emissive.setRGB(flash * 0.7, flash * 0.16, flash * 0.1)
     this.leanX = damp(this.leanX, 0, 7, dt)
     this.leanZ = damp(this.leanZ, 0, 7, dt)
 
@@ -3200,50 +3565,232 @@ export class Human {
       }
     }
 
-    // Topple away from whatever hit them, over the first half-second, with a
-    // bounce at the bottom rather than settling dead flat — a body dropping on
-    // its face and a body flung onto its back are different deaths, and always
-    // playing the first one was most of why kills felt weightless.
-    const fall = clamp(this.deathTimer / 0.55, 0, 1)
-    const eased = fall * fall * (3 - 2 * fall)
-    const settle = fall >= 1 ? 0 : Math.sin(fall * TAU) * 0.09 * (1 - fall)
-    const tip = (Math.PI / 2) * 0.96 * (eased + settle)
-    this.body.rotation.x = -this.fallZ * tip
-    this.body.rotation.z = this.fallX * tip
-    this.body.position.y = -eased * 0.12
+    const t = this.deathTimer
+    const force = this.deathForce
 
-    // Go slack. A corpse is not a mannequin laid down: the spine curls, the
-    // knees stay half bent under it, an arm ends up across the chest and the
-    // head lolls off the neck. Damped toward the target, so it drops into the
-    // shape over the same half-second the body takes to fall.
-    const l = 6
-    this.spine.rotation.x = damp(this.spine.rotation.x, 0.22, l, dt)
-    this.chest.rotation.x = damp(this.chest.rotation.x, 0.14, l, dt)
-    this.chest.rotation.y = damp(this.chest.rotation.y, this.fallX * 0.2, l, dt)
-    this.neck.rotation.x = damp(this.neck.rotation.x, -0.3, l, dt)
-    this.head.rotation.z = damp(this.head.rotation.z, this.fallX * 0.6, 4, dt)
-    this.head.rotation.y = damp(this.head.rotation.y, -this.fallX * 0.4, 4, dt)
-    this.hips.rotation.set(0, 0, 0)
+    // Blood keeps arriving after the fall — the streaks lengthen for as long as
+    // there is pressure behind them, which is what stops the wounds reading as
+    // a texture that was already on him when he died.
+    if (this.bleedTimer > 0 && this.bleedPulse) {
+      this.bleedRun(0.1 + (1 - this.bleedTimer / HUMAN.bleedDuration) * 0.34)
+    }
 
-    const slack: [Leg, number, number][] = [
-      [this.legs[0]!, 0.3, 0.18],
-      [this.legs[1]!, -0.12, -0.3],
-    ]
-    for (const [leg, hip, splay] of slack) {
+    // ---- the fall.
+    //
+    // Two things happen and they do not happen together. First the legs stop
+    // holding him up, which drops the whole body a third of a metre straight
+    // down; then it goes over. Playing only the second — which is what a single
+    // topple curve does — is a felled tree, and a felled tree is stiff no matter
+    // how well its landing is timed. The gap between the two is small, about a
+    // tenth of a second, and it is the entire difference.
+    //
+    // How much of each depends on what killed him. `force` 0 is a man who
+    // simply stopped: the legs go, he sags, and he arrives folded more or less
+    // where he stood. `force` 1 is a pounce: no buckle worth seeing, he is off
+    // the ground and turned over before the legs are relevant at all.
+    const buckle = smooth01(t / (0.24 - force * 0.14))
+    const delay = 0.11 * (1 - force)
+    const fall = clamp((t - delay) / (0.62 - force * 0.24), 0, 1)
+    const eased = smooth01(fall)
+
+    // The impact, and what is left of it. A body that reaches the ground and
+    // stops on the exact frame it arrives has no weight; one that overshoots
+    // and rocks back through a couple of quickly-dying cycles does.
+    const after = Math.max(0, t - (delay + (0.62 - force * 0.24)))
+    const bounce = Math.exp(-after * 7) * Math.sin(after * 21) * (0.05 + force * 0.07)
+
+    // Not quite flat. A body has a chest and a hip on it, so it comes to rest
+    // canted a few degrees off the ground rather than pressed against it, and a
+    // crumpled one keeps more of that than a flung one.
+    const tip = (Math.PI / 2) * (0.88 + force * 0.1) * eased + bounce
+
+    // Topple about the horizontal axis that carries the spine over toward the
+    // fall direction, rather than by adding an x and a z Euler term. The Euler
+    // pair is exact on the two cardinal directions and wrong everywhere between
+    // them — two 90-degree terms compose to about 120 degrees on the diagonal,
+    // so a body knocked at 45 degrees rolled a third of a turn past the ground
+    // and came to rest face down having gone through itself. It also cannot
+    // express the twist about the spine at all.
+    TOPPLE_AXIS.set(this.fallZ, 0, -this.fallX).normalize()
+    Q_TOPPLE.setFromAxisAngle(TOPPLE_AXIS, tip)
+    Q_ROLL.setFromAxisAngle(UP, this.deathRoll * eased)
+    this.body.quaternion.copy(Q_TOPPLE).multiply(Q_ROLL)
+
+    // Height of the body's root, which sits between the feet.
+    //
+    // Standing, dropping it drops the hips. Flat, it is the line the spine lies
+    // along, so it has to come back *up* to half a torso or the body is buried
+    // to its ribs in the dirt — which is what the old constant -0.12 did, and
+    // why every corpse in the game was sunk to the shoulder blades with its
+    // arms underground. Blended by the same curve as the fall, so the drop
+    // hands over to the lift as the one stops meaning anything and the other
+    // starts.
+    const sag = -0.34 * buckle * (1 - force * 0.45)
+    this.body.position.y = sag + (LIE_HEIGHT - sag) * eased
+
+    // ---- going slack.
+    //
+    // A corpse is not a mannequin laid down: the spine curls, the knees stay
+    // half bent under it, an arm ends up across the chest and the head lolls
+    // off the neck. Every angle carries a per-death offset on top, because the
+    // pool is twenty bodies and the player will see all twenty — a shared slack
+    // pose is the single loudest tell that these are the same few models, and
+    // it is louder than any amount of variation in their faces.
+    const j = this.jitter
+    const l = 5.5
+
+    // Which way is up, in the body's own frame.
+    //
+    // Everything below this line depends on it, and getting it wrong is what
+    // made the first pass of this look so wrong. A limb joint has two axes and
+    // they are not interchangeable once the body is horizontal: one of them
+    // swings the limb around *on* the ground, and the other lifts it off the
+    // ground or drives it through it. Which is which depends on whether the man
+    // landed on his back, his face or his side, so a slack pose authored blind
+    // — the same hip flexion for everybody — has to be wrong most of the time,
+    // and it was wrong all of the time, because it flexed both hips and every
+    // corpse ended up holding both legs in the air like a dead beetle.
+    //
+    // The body topples about (fallZ, 0, -fallX) *after* a twist about its own
+    // spine, and those two compose into a pair of numbers that between them say
+    // where the sky is: one across his chest, one across his shoulders. Reading
+    // fallZ alone — which is what the first pass did — ignores the twist and so
+    // calls a man lying on his face supine as soon as he rolls a quarter turn.
+    // They are the two halves of a unit vector, so a body is flat exactly to
+    // the extent that it is not on its side.
+    const roll = this.deathRoll * eased
+    const cr = Math.cos(roll)
+    const sr = Math.sin(roll)
+    const face = this.fallX * sr + this.fallZ * cr // +1 flat on his back, -1 face down
+    const tilt = this.fallZ * sr - this.fallX * cr // which shoulder ended up underneath
+    const side = 1 - Math.abs(face) // 0 flat, 1 edge-on
+
+    // A spine can only curl into the space beside it, so a man flat on his back
+    // has nowhere to put a curl and one lying on his side has all of it. Doing
+    // this unconditionally is what used to lift a supine corpse's shoulders off
+    // the ground as though he were halfway through a sit-up.
+    const curl = (0.12 + (1 - force) * 0.26) * (0.35 + side * 0.65)
+    this.spine.rotation.x = damp(this.spine.rotation.x, curl + j[0]! * 0.1, l, dt)
+    // Sideways, the spine does not curl so much as give up: it sags downhill,
+    // toward whichever shoulder is taking the weight.
+    this.spine.rotation.z = damp(this.spine.rotation.z, -tilt * 0.14 + j[1]! * 0.12, l, dt)
+    this.chest.rotation.x = damp(this.chest.rotation.x, curl * 0.5 + j[2]! * 0.1, l, dt)
+    this.chest.rotation.y = damp(this.chest.rotation.y, this.fallX * 0.2 + j[3]! * 0.18, l, dt)
+    // The head is the tell. It is the heaviest thing on the end of the softest
+    // joint, so it keeps moving after everything else has stopped — which is
+    // why it damps slower than the rest and carries the widest jitter. Which
+    // way it lolls is the same question as everywhere else: a chin drops toward
+    // the chest on a man lying on his back, and lifts clear of the dirt on one
+    // lying on his face.
+    this.neck.rotation.x = damp(this.neck.rotation.x, face * 0.24 + j[4]! * 0.2, 3.5, dt)
+    this.head.rotation.z = damp(this.head.rotation.z, -tilt * 0.5 + j[5]! * 0.4, 3, dt)
+    this.head.rotation.y = damp(this.head.rotation.y, -this.fallX * 0.4 + j[6]! * 0.45, 3, dt)
+    this.hips.rotation.x = damp(this.hips.rotation.x, j[7]! * 0.1, l, dt)
+    this.hips.rotation.y = damp(this.hips.rotation.y, this.deathRoll * -0.18, l, dt)
+    this.hips.rotation.z = 0
+
+    // Drape the dhoti. It is bound to a bone of its own for exactly this: cloth
+    // that keeps a 47 cm hem circle while its wearer is face-down on the dirt is
+    // a lampshade, and no amount of work on the pose underneath survives being
+    // seen through one. The squash goes on whichever body axis is pointing at
+    // the sky — front-to-back for a man on his back or his face, across for one
+    // on his side — and what it takes out of that axis it gives back to the
+    // other, because fabric collapsing under its own weight spreads, it does not
+    // shrink. Damped rather than set, so it settles as he does.
+    const flat = Math.abs(face)
+    const sq = this.skirt.scale
+    sq.x = damp(sq.x, 1 - 0.34 * side + 0.16 * flat, 3.5, dt)
+    sq.z = damp(sq.z, 1 - 0.34 * flat + 0.16 * side, 3.5, dt)
+
+    // One leg drawn up under him, the other straight out. Both flat is a
+    // shop-window dummy and both drawn up is the beetle again; one of each is
+    // what a body that stopped holding itself together actually does, and it is
+    // asymmetric, which is most of why it reads as a person.
+    //
+    // The knee is the joint that has to be reasoned about rather than dialled
+    // in, because it is a one-way hinge and which way that is relative to the
+    // sky flips with the facing. So rather than dial an angle in and hope, the
+    // pose says where the ankle has to *finish* and the knee is solved for it.
+    // Lying flat, the ankle sits `face * shin * (sin hip + sin (hip - fold))`
+    // above the hip, and inverting that is the whole of it: on his back the hip
+    // lifts the knee and the knee folds the foot back down onto the dirt, which
+    // is the propped leg everybody has seen; on his face the hip has nowhere to
+    // go and the fold lifts the heel instead; on his side both joints swing
+    // flat across the ground and can do as they like, so the solve fades out
+    // and a free pose fades in. Folding by a fixed amount regardless is what
+    // stood a corpse's shin vertically in the air with daylight under the leg.
+    const drawn = j[8]! > 0 ? 0 : 1
+    const supine = Math.max(0, face)
+    const prone = Math.max(0, -face)
+    // Divide by this rather than by `face`: it is the same thing while he is
+    // anywhere near flat and it stays finite when he is on his side, where the
+    // height of a knee has stopped depending on the hip at all.
+    const lean = face / Math.max(flat, 0.34)
+    for (let i = 0; i < 2; i++) {
+      const leg = this.legs[i]!
+      const jj = j[8 + i]!
+      const out = i === 0 ? 1 : -1
+      const heavy = i === drawn
+      // Hip flexion, only as much of it as the ground will take.
+      const hip =
+        supine * (heavy ? 0.85 + Math.abs(jj) * 0.3 : 0) +
+        side * (heavy ? 0.55 + Math.abs(jj) * 0.35 : 0.14) -
+        face * 0.12 +
+        jj * 0.05
+      // A limb is thinner than a chest, and the body lies at the height that
+      // suits the chest, so a leg left on that line hovers a couple of inches
+      // up with a shadow gap under it — every ankle wants pressing below the
+      // hip, not level with it.
+      const heel = prone * (heavy ? 0.12 + Math.abs(jj) * 0.1 : 0) - 0.07
+      const solved = hip - Math.asin(clamp(heel / (lean * SHIN) - Math.sin(hip), -1, 1))
+      // A knee does not go backwards, however much the arithmetic would like it
+      // to; past straight it just locks, which is what a dead one does anyway.
+      const fold = Math.max(0, solved * flat + (heavy ? 1.05 + Math.abs(jj) * 0.4 : 0.24) * (1 - flat))
+      // Splay slides the leg sideways across the dirt while he is flat, and
+      // straight down through it once he is on his side, so it goes away as the
+      // body rolls over.
+      const splay = out * (heavy ? 0.26 : 0.05) * (0.4 + flat * 0.6) + jj * 0.16
       leg.thigh.rotation.x = damp(leg.thigh.rotation.x, hip, l, dt)
       leg.thigh.rotation.z = damp(leg.thigh.rotation.z, splay, 5, dt)
-      leg.shin.rotation.x = damp(leg.shin.rotation.x, -0.55 - Math.abs(hip), l, dt)
-      leg.foot.rotation.x = damp(leg.foot.rotation.x, -0.35, l, dt)
-      leg.toe.rotation.x = damp(leg.toe.rotation.x, 0, l, dt)
+      leg.shin.rotation.x = damp(leg.shin.rotation.x, -fold, l, dt)
+      // Ankles go slack, and a slack ankle points and rolls out from under
+      // itself. This is the one that reads from across the village: a corpse
+      // with its feet still square to the shin is standing up lying down.
+      leg.foot.rotation.x = damp(leg.foot.rotation.x, -0.8 + jj * 0.18, l, dt)
+      leg.foot.rotation.z = damp(leg.foot.rotation.z, out * 0.4, l, dt)
+      leg.toe.rotation.x = damp(leg.toe.rotation.x, 0.1 + jj * 0.12, l, dt)
     }
+
+    // Arms, on the same rule. Thrown bodies land with them out wide; a man who
+    // folded takes them down with him and ends up on top of one.
+    //
+    // The shoulder's z spreads the arm out sideways, which is the ground-plane
+    // axis only while he is flat: on his side it points at the sky, and a spread
+    // authored regardless is what had a man lying on his shoulder holding the
+    // other arm straight up in the air. So it scales away with the roll, and
+    // what replaces it is both arms draping toward whichever shoulder ended up
+    // underneath, because that is downhill for both of them.
+    //
+    // The elbow is an elbow: it goes one way, and that way is up off a man's
+    // chest and down through a man's chest, so it gets the bend only when there
+    // is somewhere for the hand to end up. On his back that is folded across
+    // him; on his face it is nowhere, and a corpse lying with its arms straight
+    // out is right anyway. The old flat 1.1 radians gave the whole thing away
+    // worst of all — it stood the forearm straight up off a supine body like a
+    // man asking a question.
+    const flung = 0.35 + force * 0.75
     const arms: [Limb, number, number, number][] = [
-      [this.arms[0]!, 0.45, 0.85, 0.6],
-      [this.arms[1]!, 0.9, -1.05, 1.1],
+      [this.arms[0]!, 0.95, supine * 0.62 + side * 0.5 + prone * 0.1, j[10]!],
+      [this.arms[1]!, -1.15, supine * 0.34 + side * 0.42 + prone * 0.08, j[11]!],
     ]
-    for (const [arm, x, z, fore] of arms) {
-      arm.upper.rotation.x = damp(arm.upper.rotation.x, x, 5, dt)
-      arm.upper.rotation.z = damp(arm.upper.rotation.z, z, 5, dt)
-      arm.fore.rotation.x = damp(arm.fore.rotation.x, fore, 5, dt)
+    for (const [arm, z, fore, jj] of arms) {
+      const swing = -face * (0.1 + Math.abs(jj) * 0.22) + side * (0.3 + jj * 0.5)
+      arm.upper.rotation.x = damp(arm.upper.rotation.x, swing, 4.5, dt)
+      const spread = z * flung * flat - tilt * (0.45 + Math.abs(jj) * 0.2)
+      arm.upper.rotation.z = damp(arm.upper.rotation.z, spread + jj * 0.3, 4.5, dt)
+      arm.fore.rotation.x = damp(arm.fore.rotation.x, fore + Math.abs(jj) * 0.45, 4.5, dt)
+      // A dead hand is not a fist and it is not a flat plate. It half closes.
+      arm.hand.rotation.x = damp(arm.hand.rotation.x, -0.3 + jj * 0.35, 4, dt)
     }
 
     // Lie *on* the ground, not standing upright through a slope. Two height
@@ -3251,13 +3798,41 @@ export class Human {
     const gx = terrainHeight(this.pos.x + 0.6, this.pos.z) - terrainHeight(this.pos.x - 0.6, this.pos.z)
     const gz = terrainHeight(this.pos.x, this.pos.z + 0.6) - terrainHeight(this.pos.x, this.pos.z - 0.6)
     this.group.rotation.set(clamp(gz / 1.2, -0.5, 0.5) * eased, this.yaw, -clamp(gx / 1.2, -0.5, 0.5) * eased, 'YXZ')
+    this.group.position.copy(this.pos)
 
-    if (this.deathTimer > HUMAN.corpseLife) {
-      const sink = (this.deathTimer - HUMAN.corpseLife) / 2
-      this.group.position.y = this.pos.y - sink * 2.2
-      if (sink >= 1) this.group.visible = false
-    } else {
-      this.group.position.copy(this.pos)
+    // ---- what pools under it. Stamped from where the torso actually came to
+    // rest rather than from where the feet were: the body travels most of its
+    // own length going down, so a pool at `pos` is a pool beside the corpse.
+    // It arrives late and grows, because that is how long a body takes to make
+    // one and watching it spread is worth more than having it there on frame 1.
+    if (this.poolCount < this.poolMax) {
+      this.poolNext -= dt
+      if (this.poolNext <= 0 && eased > 0.7) {
+        this.poolNext = 1.7
+        this.poolCount++
+        this.chest.getWorldPosition(this.poolPos)
+        this.poolScale = 0.5 + this.poolCount * 0.42
+        this.poolPulse = true
+      }
+    }
+
+    // ---- and finally, out of the world.
+    //
+    // This used to drive the body 2.2 m straight down, and at any range you
+    // could actually see it that is a lift descending, not a corpse decaying.
+    // Fading it out over the same couple of seconds while it settles a few
+    // centimetres into the dirt reads as the ground taking it back.
+    if (t > HUMAN.corpseLife) {
+      const gone = clamp((t - HUMAN.corpseLife) / 2, 0, 1)
+      this.group.position.y = this.pos.y - gone * 0.18
+      for (const m of this.mats) {
+        if (!m.transparent) {
+          m.transparent = true
+          m.depthWrite = false
+        }
+        m.opacity = 1 - gone
+      }
+      if (gone >= 1) this.group.visible = false
     }
   }
 
@@ -3272,6 +3847,63 @@ const SLUNG_POS = new THREE.Vector3(0.05, 1.14, 0.19)
 const SLUNG_ROT = new THREE.Euler(1.2, 0.62, 0)
 const handAt = new THREE.Vector3()
 const slungPos = new THREE.Vector3()
+
+/**
+ * How high the body's root rides once it is flat.
+ *
+ * The root is between the feet, so on a body lying down it is the line the
+ * spine runs along — and a torso is about 23 cm through. Half of that is how
+ * far the spine has to be off the soil for the back to be resting on it rather
+ * than inside it. A little under half, in fact, since shoulder and hip take
+ * most of the weight and the ground gives.
+ */
+const LIE_HEIGHT = 0.115
+
+/** Knee to ankle, from the rig. The corpse pose solves the knee against it. */
+const SHIN = 0.42
+
+const SOAK_AT = new THREE.Vector3()
+const WOUND_AT = new THREE.Vector3()
+const RUN_AT = new THREE.Vector3()
+
+/**
+ * How far the body's surface is from its vertical axis at height `y`, looking
+ * along the horizontal unit direction (dx, dz). Bind pose, body units.
+ *
+ * The torso is the sweep in TORSO, so its rings answer this exactly: pick the
+ * pair either side of `y`, lerp the half-width and half-depth, and solve the
+ * ellipse for the radius in that direction. Above and below the sweep the body
+ * is not a sweep at all, so those get the two numbers that matter — a throat is
+ * thin and a skull is not — rather than an extrapolation off the end of a table
+ * that would give a neck the width of a ribcage.
+ */
+function sectionR(y: number, dx: number, dz: number): number {
+  let a: number
+  let b: number
+  const top = TORSO[TORSO.length - 1]!
+  if (y >= top[0]) {
+    // Neck to crown. Narrow through the throat, opening out into the head, and
+    // the crossover is the jaw.
+    a = b = y < 1.5 ? 0.052 : Math.min(0.098, 0.052 + (y - 1.5) * 0.6)
+  } else if (y <= TORSO[0]![0]) {
+    // A thigh, near enough — below the sweep there is no single trunk left.
+    a = b = 0.085
+  } else {
+    let i = 1
+    while (i < TORSO.length - 1 && TORSO[i]![0] < y) i++
+    const lo = TORSO[i - 1]!
+    const hi = TORSO[i]!
+    const t = (y - lo[0]) / (hi[0] - lo[0])
+    a = lo[1] + (hi[1] - lo[1]) * t
+    b = lo[2] + (hi[2] - lo[2]) * t
+  }
+  // The ellipse x²/a² + z²/b² = 1 along (dx, dz).
+  const q = (dx * dx) / (a * a) + (dz * dz) / (b * b)
+  return q > 0 ? 1 / Math.sqrt(q) : a
+}
+const TOPPLE_AXIS = new THREE.Vector3()
+const Q_TOPPLE = new THREE.Quaternion()
+const Q_ROLL = new THREE.Quaternion()
 
 /**
  * Bake a colour into a geometry's vertices, for the rigid props — rifle, kit,

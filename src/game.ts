@@ -371,8 +371,7 @@ export class Game {
       this.tiger.heal(HUMAN.feedHeal)
       this.tiger.addRage(HUMAN.feedRage)
       this.score += HUMAN.feedScore
-      this.particles.gore(nearest.chestPos, 14)
-      this.world.addBloodDecal(nearest.pos.x, nearest.pos.z, 1.8)
+      this.particles.gore(nearest.woundPos, 14)
       this.tiger.shake(0.2)
       // A swallow, not a kill. This is the moment the health lands, and it has
       // to read as *feeding finished* rather than as *something just died*.
@@ -438,15 +437,27 @@ export class Game {
       if (Math.acos(clamp(dot, -1, 1)) > atk.arc + 0.35) continue
 
       hitAny = true
-      const hitPoint = h.chestPos
       const dir = new THREE.Vector3(dx, dy, dz).normalize()
+      // Where on the body it actually landed, rather than the middle of the
+      // chest every time. Follow the swing out to the target and take the
+      // height it arrives at: a claw thrown from a crouch opens a belly and one
+      // thrown at full height opens a shoulder. A bite goes for the throat, so
+      // it is allowed further up than a paw is.
+      const landY = clamp(
+        eye.y + atk.dir.y * dist,
+        h.pos.y + 0.6,
+        h.pos.y + (atk.kind === 'bite' ? 1.62 : 1.46),
+      )
+      const hitPoint = new THREE.Vector3(h.pos.x, landY, h.pos.z)
       // Killing bite from behind an unaware target is an instant execution.
       const behind = this.isBehind(h, eye)
       const stealth = behind && !h.alerted && atk.kind === 'bite'
       const damage = stealth ? 9999 : atk.damage
 
-      const killed = h.hurt(damage, eye)
-      this.particles.blood(hitPoint, dir, killed ? 34 : 16, killed ? 1.4 : 0.8)
+      const killed = h.hurt(damage, eye, atk.kind === 'bite' ? 'bite' : 'claw', hitPoint)
+      // Spray from the wound the body just decided on, not from the axis point
+      // we handed it — otherwise the blood leaves from inside the man.
+      this.particles.blood(h.woundPos, dir, killed ? 34 : 16, killed ? 1.4 : 0.8)
       if (killed) {
         killedAny = true
         this.onKill(h, stealth ? 'Silent kill' : atk.kind === 'bite' ? 'Throat torn' : 'Mauled')
@@ -494,9 +505,9 @@ export class Game {
       if (Math.abs(h.pos.y + 1 - this.tiger.pos.y) > 2.4) continue
 
       const dir = new THREE.Vector3(this.tiger.vel.x, 0.4, this.tiger.vel.z).normalize()
-      h.hurt(9999, this.tiger.pos)
-      this.particles.blood(h.chestPos, dir, 40, 1.6)
-      this.particles.gore(h.chestPos, 16)
+      h.hurt(9999, this.tiger.pos, 'bite')
+      this.particles.blood(h.woundPos, dir, 40, 1.6)
+      this.particles.gore(h.woundPos, 16)
       this.onKill(h, 'POUNCE TAKEDOWN')
       this.tiger.shake(0.55)
       this.tiger.heal(8)
@@ -518,8 +529,12 @@ export class Game {
     this.addScore(cfg.score, label)
     this.tiger.addRage(cfg.rage)
 
-    this.particles.gore(h.chestPos, h.kind === 'hunter' ? 20 : 14)
-    this.world.addBloodDecal(h.pos.x, h.pos.z, h.kind === 'hunter' ? 1.2 : 1)
+    this.particles.gore(h.woundPos, h.kind === 'hunter' ? 20 : 14)
+    // No decal here. A body travels most of its own length going down, so a
+    // pool stamped where the feet were lands beside the corpse rather than
+    // under it — and it lands instantly, which is a pool that was already
+    // there. The corpse asks for its own now, from where its chest ends up and
+    // over the seconds it takes to make one. See Human.poolPulse.
     audio.biteKill(this.placeOf(h.pos))
     audio.scream(this.placeOf(h.pos), h.kind === 'hunter' ? 0.8 : 1.1)
 
@@ -649,10 +664,11 @@ export class Game {
       h.update(dt, this.tiger.pos, vis, noise, this.world, this.waveScale)
 
       // A body keeps emptying itself out for a couple of seconds after it
-      // drops, and the pool under it spreads while it does.
-      if (h.bleedPulse) {
-        this.particles.blood(h.woundPos, SPURT_UP, 12, 0.7)
-        this.world.addBloodDecal(h.pos.x, h.pos.z, 0.7 + this.rng.next() * 0.5)
+      // drops. The spurt comes off the wound; the pool under it is stamped on
+      // the corpse's own schedule, from wherever its chest actually settled.
+      if (h.bleedPulse) this.particles.blood(h.woundPos, SPURT_UP, 12, 0.7)
+      if (h.poolPulse) {
+        this.world.addBloodDecal(h.poolPos.x, h.poolPos.z, h.poolScale)
       }
 
       if (!h.alive) continue
