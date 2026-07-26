@@ -453,16 +453,19 @@ export const SKY = {
    * coordinate before scaling by `cloudScale`, so a cloud feature travels
    * `cloudDrift / cloudScale` plane units per second per axis. The visible sky
    * between 45 degrees of elevation and the haze line spans 2.7 of those units,
-   * which makes this the honest number to tune against: 4.2e-4 walks a cloud
-   * down that whole arc in twelve seconds.
+   * which makes this the honest number to tune against: this walks a cloud
+   * down that whole arc in about half a minute.
    *
-   * Two earlier passes at this were both too slow to read as weather — 2.2e-5
-   * took five minutes and 1.4e-4 still took thirty-five, and at that rate you
-   * can stand and stare and be unable to say whether the sky is moving. Real
-   * cumulus genuinely are that slow; a sky the player only glances at cannot
-   * afford to be.
+   * This has been overshot in both directions. 2.2e-5 took five minutes, which
+   * is roughly what real cumulus do and reads as a painted backdrop. 4.2e-4
+   * crossed in twelve seconds, which is weather you notice — and noticing it is
+   * the problem, because a sky that visibly streams past pulls the eye up out
+   * of a game played at ground level. The useful test isn't "can I see it
+   * move", it's "does it move while I'm not looking at it": glance up twice a
+   * minute and the sky should have changed, without ever having been the thing
+   * that made you glance.
    */
-  cloudDrift: 0.00042,
+  cloudDrift: 0.00016,
   /**
    * Moonlit cloud. The stock shader multiplies cloud colour by the sun's
    * intensity term, which is zero once the sun is down — so at night the clouds
