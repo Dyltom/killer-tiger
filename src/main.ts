@@ -10,7 +10,7 @@ import { PostFX } from './render/postfx'
 import { Sky } from './render/sky'
 import { Hud } from './ui/hud'
 import { initMaterials, loadingManager } from './world/materials'
-import { World } from './world/world'
+import { terrainHeight, World } from './world/world'
 
 // Must run before the first material is compiled — it rewrites the shader
 // chunks every fog-enabled material is assembled from.
@@ -172,7 +172,7 @@ function beginHunt() {
  */
 Object.assign(window, {
   __kt: {
-    game, world, input, camera, renderer, scene, sky, postfx, quality, audio, THREE,
+    game, world, input, camera, renderer, scene, sky, postfx, quality, audio, THREE, terrainHeight,
     step: (frames = 1, dt = 1 / 60) => { for (let i = 0; i < frames; i++) frame(dt) },
     hold: (code: string) => dispatchEvent(new KeyboardEvent('keydown', { code })),
     release: (code: string) => dispatchEvent(new KeyboardEvent('keyup', { code })),
@@ -209,9 +209,43 @@ addEventListener('visibilitychange', () => {
   else audio.resume()
 })
 
+// -------------------------------------------------------------- fps meter
+/**
+ * The frame-rate readout.
+ *
+ * Deliberately not `quality.fps`: that average is only fed while the game is
+ * playing, because it is what decides the tier and a menu frame is not a
+ * gameplay frame. The readout wants the opposite — it should keep reading in
+ * the menu, where the world is still being drawn behind the card and where
+ * comparing that number against the in-game one is how you find out what the
+ * hunt itself actually costs.
+ *
+ * Default on. The point of it is play-testing.
+ */
+const FPS_KEY = 'killer-tiger:fps'
+let showFps = true
+try {
+  showFps = localStorage.getItem(FPS_KEY) !== '0'
+} catch {
+  /* private browsing — the readout just always starts on */
+}
+/** Exponentially smoothed frame time, ms. Seeded at 60 Hz. */
+let frameMs = 16.7
+let fpsClock = 0
+hud.showFps(showFps)
+
 addEventListener('keydown', (e) => {
   if (e.code === 'KeyR' && game.state === 'dead') beginHunt()
   if (e.code === 'KeyM') audio.setMuted(!audio.muted)
+  if (e.code === 'KeyF') {
+    showFps = !showFps
+    hud.showFps(showFps)
+    try {
+      localStorage.setItem(FPS_KEY, showFps ? '1' : '0')
+    } catch {
+      /* nothing to do; the toggle still works for this session */
+    }
+  }
   if (e.code === 'Escape' && game.state === 'paused') {
     // ESC out of pause goes back to the menu.
     showOnly(menu)
@@ -229,6 +263,7 @@ timer.connect(document)
 /** One simulation + render step. Split out so tests can drive it directly. */
 function frame(dt: number) {
   audio.tickMusic()
+  updateFps(dt)
   if (game.state === 'playing') quality.sample(dt)
   const controlling = (input.locked || NOLOCK) && game.state === 'playing'
   game.darkness = sky.day.darkness
@@ -247,6 +282,29 @@ function frame(dt: number) {
   const frenzy = Math.min(1, game.tiger.frenzy / 1.0)
   const hurt = 1 - Math.min(1, game.tiger.health / (TIGER.maxHealth * 0.45))
   postfx.render(dt, frenzy, game.state === 'playing' ? hurt : 0, sky.day.darkness)
+}
+
+/**
+ * Ten frames of smoothing, refreshed on screen five times a second.
+ *
+ * Both numbers are about being readable rather than about being precise: a
+ * per-frame figure is a blur, and a per-second one hides the half-second the
+ * frame rate fell over. The resolution is worth carrying because the tier and
+ * the render scale are what the quality manager changes underneath you, and a
+ * frame rate that recovered because the game quietly dropped to 78% of the
+ * pixels is not the same news as one that recovered on its own.
+ */
+function updateFps(dt: number) {
+  frameMs += (dt * 1000 - frameMs) * 0.1
+  fpsClock += dt
+  if (!showFps || fpsClock < 0.2) return
+  fpsClock = 0
+  const w = Math.round(innerWidth * renderer.getPixelRatio())
+  const h = Math.round(innerHeight * renderer.getPixelRatio())
+  hud.setFps(
+    `${(1000 / frameMs).toFixed(0)} fps  ${frameMs.toFixed(1)} ms\n` +
+      `${quality.preset.name}  ${Math.round(quality.renderScale * 100)}%  ${w}x${h}`,
+  )
 }
 
 function animate(timestamp: number) {

@@ -275,6 +275,14 @@
         color: rgba(244, 234, 217, 0.45); font-weight: 700;
       }
 
+      /* Outside #hud on purpose: the frame rate is as worth watching in the
+         menu, where nothing is being drawn but the world, as it is mid-hunt. */
+      #fps { position: fixed; right: 10px; top: 8px; z-index: 25; pointer-events: none;
+        font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; text-align: right;
+        color: rgba(255, 226, 178, 0.82); text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9);
+        white-space: pre; }
+      #fps.hidden { display: none; }
+
       #loading { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
         background: var(--ink); z-index: 20; font-family: 'Bebas Neue', sans-serif;
         font-size: 28px; letter-spacing: 0.3em; color: var(--amber); }
@@ -376,6 +384,8 @@
       <button class="cta display" id="retry-btn">Hunt again</button>
       <div class="fine">Press R to restart instantly</div>
     </div>
+
+    <div id="fps"></div>
 
     <div id="loading">STALKING&hellip;</div>
 

@@ -29,6 +29,72 @@ export const WORLD = {
   campfires: 5,
 }
 
+/**
+ * Huts you can walk into, and the people who run into them.
+ *
+ * The huts used to be solid: a wall cylinder, a dark plane painted where a door
+ * would be, and one collider the size of the whole building. That made the
+ * village a set of obstacles rather than a set of places, and it put a hard
+ * ceiling on the hunt — a villager who reached a hut was simply gone.
+ *
+ * Now the wall is a real shell with a real hole in it, the collider is hollow,
+ * and a frightened villager will make for the nearest doorway and cower in the
+ * dark at the back. Which means the tiger has to go in after them.
+ *
+ * The two numbers that everything else is built around are `doorWidth` and
+ * `wall`. `doorWidth` has to clear `TIGER.radius` twice over with room to steer:
+ * collision treats the door jambs as solid, so the usable gap is
+ * `doorWidth - 2 * TIGER.radius`, and much under half a metre of that and you
+ * spend the approach scraping the frame instead of hunting.
+ */
+export const HUT = {
+  /** Clear opening, in metres. See the note above on why it is this wide. */
+  doorWidth: 2.15,
+  doorHeight: 2.05,
+  /** Wall thickness. Reads in the doorway reveal, which is where it is seen. */
+  wall: 0.22,
+  /** How far outside / inside the wall the approach and entry waypoints sit. */
+  approach: 2.2,
+  entry: 0.9,
+  /**
+   * How much of the sky's ambient the inside of a hut receives.
+   *
+   * Image-based lighting is not occluded — the environment map has no idea
+   * there is a roof — so without this an interior is lit exactly as brightly as
+   * the clearing outside and reads as a courtyard. Cutting it to a third is what
+   * makes stepping through the door feel like stepping into shade.
+   */
+  interiorLight: 0.34,
+  /**
+   * Most the ground may rise and fall under a hut's footprint, in metres.
+   *
+   * The floor is drawn off the shared height field rather than as a flat slab,
+   * because everything that walks on it is placed by that same function. That
+   * is invisible outdoors and glaring indoors: half a metre of relief across a
+   * six-metre room is a mound of dirt in the middle of the floor. So sites are
+   * chosen for flatness instead of the floor being made to lie.
+   */
+  maxRelief: 0.22,
+
+  /** Villagers only. How far a fleeing villager will look for a door. */
+  seekRange: 34,
+  /** They will not run into a hut the tiger is already this close to. */
+  tigerClear: 12,
+  /** Odds a fleeing villager makes for a hut rather than a campfire. */
+  hideChance: 0.62,
+  /** People per hut. More than this and the doorway becomes a scrum. */
+  capacityRound: 3,
+  capacitySquare: 2,
+  /** Speed they cross the floor at once inside — no room to sprint. */
+  insideSpeed: 2.6,
+  /** Tiger this far inside the walls and whoever is hiding breaks and bolts. */
+  flushRadius: 1.6,
+  /** How long the bolt lasts once they are back outside. */
+  flushPanic: 3.4,
+  /** Killing someone who thought they were safe is worth more than killing them in the open. */
+  hiddenKillBonus: 1.5,
+}
+
 export const TIGER = {
   /**
    * Eye height of a big cat on all fours, not of a man. A Bengal tiger stands

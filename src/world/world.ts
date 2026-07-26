@@ -17,7 +17,7 @@ import { surface, terrainMaterial } from './materials'
 import { terrainHeight, terrainNormal, TERRAIN_SIZE } from './terrain'
 import { textures } from './textures'
 import { Lamps } from './lamps'
-import { buildVillage, type NightGlow } from './village'
+import { buildVillage, type Hut, type NightGlow } from './village'
 import { updateWind } from './wind'
 
 interface ColliderBase {
@@ -31,6 +31,16 @@ interface ColliderBase {
    * field there was one of the largest single costs in the simulation.
    */
   gy?: number
+  /**
+   * A shell rather than a lump: there is a room inside it and a door in one
+   * wall. `resolve` keeps you on whichever side of the wall you are already on
+   * and lets you through the opening; `losBlocked` lets sight through the same
+   * opening, so someone cowering at the back wall can watch the doorway fill.
+   *
+   * `rot` is the building's yaw and the door always faces its local +z, which
+   * is the one convention the geometry, the collision and the AI all share.
+   */
+  hollow?: { wall: number; doorW: number; rot: number }
 }
 export interface CircleCollider extends ColliderBase {
   kind: 'circle'
@@ -167,6 +177,8 @@ export class World {
   readonly campfires: THREE.Vector3[] = []
   /** Good open spots to drop pickups. */
   readonly spawnPoints: THREE.Vector3[] = []
+  /** Every dwelling you can walk into, with the waypoints for doing so. */
+  readonly huts: Hut[] = []
 
   /** The fixed pool of practical lights and the fires/doorways it is dealt to. */
   private lamps = new Lamps(this.group)
@@ -193,6 +205,7 @@ export class World {
         lamps: this.lamps.anchors,
         nightGlows: this.nightGlows,
         flames: this.flames,
+        huts: this.huts,
       }),
     )
     // Allocate the pool now that every fire and doorway has registered. It is
@@ -203,6 +216,7 @@ export class World {
       rng: this.rng,
       height: terrainHeight,
       clearOf: (x: number, z: number, pad: number) => this.clearOf(x, z, pad),
+      insideHut: (x: number, z: number, pad: number) => this.insideHut(x, z, pad),
       colliders: this.colliders,
     }
     this.fields.push(...buildTrees(flora))
@@ -560,6 +574,33 @@ export class World {
     return true
   }
 
+  /**
+   * Is this point under somebody's roof?
+   *
+   * Ground cover is scattered by the hundred thousand and cannot afford a
+   * collider sweep per tuft, but it can afford twenty-two rectangles: this is
+   * the test that keeps a field of grass from growing through the floor of
+   * every house now that you can get in and look at it.
+   */
+  insideHut(x: number, z: number, pad = 0): boolean {
+    for (const h of this.huts) {
+      const dx = x - h.x
+      const dz = z - h.z
+      if (dx * dx + dz * dz > 64) continue
+      const lx = dx * h.dz + dz * -h.dx
+      const lz = dx * h.dx + dz * h.dz
+      if (h.kind === 'round') {
+        if (Math.hypot(lx, lz) < h.r + pad) return true
+      } else if (Math.abs(lx) < h.hw + pad && Math.abs(lz) < h.hd + pad) return true
+    }
+    return false
+  }
+
+  /** New run: everybody is out of the huts again. See `Hut.occupants`. */
+  resetHuts() {
+    for (const h of this.huts) h.occupants = 0
+  }
+
   /** Is this position inside tall grass (concealment)? */
   inGrass(x: number, z: number): boolean {
     for (const g of this.grassPatches) {
@@ -583,7 +624,51 @@ export class World {
       // matter, and the grid only hands back what shares a cell with that disc.
       this.grid.near(x, z, radius + 4, (c) => {
         if (feetY > c.gy! + c.h) return // pounced clean over it
-        if (c.kind === 'circle') {
+        if (c.hollow) {
+          const cos = Math.cos(-c.hollow.rot)
+          const sin = Math.sin(-c.hollow.rot)
+          const lx = (x - c.x) * cos - (z - c.z) * sin
+          const lz = (x - c.x) * sin + (z - c.z) * cos
+          // The doorway is a corridor along local +z as wide as the opening
+          // less the body squeezing through it. Inside that corridor there is
+          // simply nothing to hit, which is what makes walking in work.
+          if (lz > 0 && Math.abs(lx) < c.hollow.doorW / 2 - radius) return
+          const t = c.hollow.wall
+          let nlx = lx
+          let nlz = lz
+          if (c.kind === 'circle') {
+            const d = Math.hypot(lx, lz)
+            if (d < 1e-5) return
+            // Which side of the wall's midline you are already on decides which
+            // way you get pushed. Nothing here teleports you through it.
+            const lim = d < c.r - t / 2 ? c.r - t - radius : c.r + radius
+            const inside = d < c.r - t / 2
+            if ((inside && d > lim) || (!inside && d < lim)) {
+              nlx = (lx / d) * lim
+              nlz = (lz / d) * lim
+            } else return
+          } else {
+            const inside = Math.abs(lx) < c.hw - t / 2 && Math.abs(lz) < c.hd - t / 2
+            if (inside) {
+              const ix = c.hw - t - radius
+              const iz = c.hd - t - radius
+              if (Math.abs(lx) <= ix && Math.abs(lz) <= iz) return
+              nlx = Math.max(-ix, Math.min(ix, lx))
+              nlz = Math.max(-iz, Math.min(iz, lz))
+            } else {
+              const ox = c.hw + radius - Math.abs(lx)
+              const oz = c.hd + radius - Math.abs(lz)
+              if (ox <= 0 || oz <= 0) return
+              if (ox < oz) nlx += Math.sign(lx || 1) * ox
+              else nlz += Math.sign(lz || 1) * oz
+            }
+          }
+          const c2 = Math.cos(c.hollow.rot)
+          const s2 = Math.sin(c.hollow.rot)
+          x = c.x + nlx * c2 - nlz * s2
+          z = c.z + nlx * s2 + nlz * c2
+          moved = hit = true
+        } else if (c.kind === 'circle') {
           const dx = x - c.x
           const dz = z - c.z
           const d = Math.hypot(dx, dz)
@@ -638,6 +723,50 @@ export class World {
     return this.grid.along(ax, az, bx, bz, (c) => {
       if (c.h < 1.2) return false // low things don't block sight
       const r = c.kind === 'circle' ? c.r : Math.hypot(c.hw, c.hd) * 0.8
+
+      if (c.hollow) {
+        // A hut with a door in it. Two people in the same room can see each
+        // other, and the doorway is a window on the world for whoever is
+        // inside: the villager at the back wall watches the opening fill, and
+        // the hunter standing in it can shoot out.
+        //
+        // This runs before the closest-approach gate below, deliberately. That
+        // gate drops any collider whose centre is behind the start of the
+        // segment, which is exactly where the hut is when you are standing in
+        // it looking at its back wall — so an interior wall would never block
+        // anything at all.
+        const cos = Math.cos(-c.hollow.rot)
+        const sin = Math.sin(-c.hollow.rot)
+        const w = c.hollow.wall
+        const local = (x: number, z: number) => {
+          const lx = (x - c.x) * cos - (z - c.z) * sin
+          const lz = (x - c.x) * sin + (z - c.z) * cos
+          const inside =
+            c.kind === 'circle' ? Math.hypot(lx, lz) < c.r - w : Math.abs(lx) < c.hw - w && Math.abs(lz) < c.hd - w
+          return { inside, lx, lz }
+        }
+        const A = local(ax, az)
+        const B = local(bx, bz)
+        if (A.inside && B.inside) return false
+        if (!A.inside && !B.inside) {
+          // Both outside. Nothing passes in one door and out another — there is
+          // only the one — so this is the ordinary "does the line touch it" test.
+          const t = (c.x - ax) * ux + (c.z - az) * uz
+          if (t < 0 || t > len) return false
+          return Math.hypot(ax + ux * t - c.x, az + uz * t - c.z) < r
+        }
+        // One end in, one out: the only way through the shell is the opening.
+        const plane =
+          c.kind === 'circle'
+            ? Math.sqrt(Math.max(0, c.r * c.r - (c.hollow.doorW * c.hollow.doorW) / 4))
+            : c.hd - w / 2
+        const span = B.lz - A.lz
+        if (Math.abs(span) < 1e-5) return true
+        const s = (plane - A.lz) / span
+        if (s < 0 || s > 1) return true
+        return Math.abs(A.lx + (B.lx - A.lx) * s) > c.hollow.doorW / 2
+      }
+
       // Closest approach of the segment to the collider centre.
       const t = (c.x - ax) * ux + (c.z - az) * uz
       if (t < 0 || t > len) return false

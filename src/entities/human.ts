@@ -26,10 +26,11 @@
  */
 import * as THREE from 'three'
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
-import { HUMAN } from '../config'
+import { HUMAN, HUT } from '../config'
 import { clamp, damp, Rng } from '../engine/rng'
 import { textures } from '../world/textures'
 import { terrainHeight, World } from '../world/world'
+import type { Hut } from '../world/village'
 import {
   addWoundShading, clearWounds, createWoundSet, cutWound, extendRun, RUN_SLOTS, startRun,
 } from './wounds'
@@ -38,7 +39,7 @@ export type HumanKind = 'villager' | 'hunter'
 /** What a pool slot was built wearing. Baked once; see buildRig. */
 export type Dress = 'shirt' | 'vest' | 'bare'
 export type Lower = 'trouser' | 'dhoti' | 'shorts'
-export type HumanState = 'wander' | 'suspicious' | 'flee' | 'hunt' | 'panic' | 'dead'
+export type HumanState = 'wander' | 'suspicious' | 'flee' | 'hide' | 'hunt' | 'panic' | 'dead'
 
 /**
  * What opened the wound. Claws rake and jaws puncture, and the two leave marks
@@ -1341,6 +1342,32 @@ export class Human {
   fearTimer = 0
   staggerTimer = 0
 
+  /**
+   * The hut this one has claimed, and how far through using it they are.
+   *
+   * Stages, in order: 0 walking to the door from outside, 1 stepping through
+   * it, 2 crossing the floor to the dark at the back, 3 cowering there facing
+   * the only way in, 4 bolting back out. Holding a hut also holds a slot in its
+   * `occupants` count, so it has to be given back on death and on respawn as
+   * well as on the way out — a leaked slot is a hut nobody can ever use again.
+   */
+  private hideHut: Hut | null = null
+  private hideStage = 0
+  /** Stops the door search running every frame, and every flush every second. */
+  private hideCooldown = 0
+  /**
+   * How long they will keep trying to reach the door before giving up on it.
+   *
+   * These men path by walking at the thing they want and being pushed out of
+   * whatever they walk into, which is enough for open ground and not enough for
+   * a doorway on the far side of somebody else's hut. Without a deadline, one
+   * villager wedged against a wall holds a slot in that hut for the rest of the
+   * round and stands there while the tiger eats him.
+   */
+  private hideTimeout = 0
+  /** Rolled once per life. Some people run for a door; some just run. */
+  private willHide = false
+
   private target = new THREE.Vector3()
   private repathTimer = 0
   private fireTimer = 0
@@ -1432,6 +1459,21 @@ export class Human {
   pendingShot: ShotEvent | null = null
   pendingShout = false
   screamed = false
+  /**
+   * Behind a wall and thinking it is enough. The game reads this the instant
+   * before a kill lands, because "dragged out of a hut" is worth saying and
+   * worth more points than the same kill in the open.
+   */
+  get hiding() {
+    const h = this.hideHut
+    if (!h || this.state !== 'hide' || this.hideStage < 2) return false
+    // Includes the ones who have already broken and are running for the door:
+    // being flushed happens at `HUT.flushRadius`, which is further out than a
+    // paw reaches, so every kill indoors is a kill on someone mid-bolt. What
+    // decides it is whether they are still between the walls.
+    const lz = (this.pos.x - h.x) * h.dx + (this.pos.z - h.z) * h.dz
+    return lz < (h.kind === 'round' ? h.r : h.hd)
+  }
   /** Set for one frame each time the corpse pumps out another gout of blood. */
   bleedPulse = false
   /** Where the last wound was opened, in world space. */
@@ -2493,6 +2535,11 @@ export class Human {
     this.deathTimer = 0
     this.hurtFlash = 0
     this.screamed = false
+    this.releaseHut()
+    this.hideStage = 0
+    this.hideCooldown = 0
+    this.hideTimeout = 0
+    this.willHide = kind === 'villager' && this.rng.chance(HUT.hideChance)
     this.repathTimer = 0
     this.fireTimer = this.rng.range(0.4, 1.6)
     this.aimTimer = 0
@@ -2896,6 +2943,9 @@ export class Human {
 
   private die(amount: number) {
     this.alive = false
+    // Give the hut back before the state changes, or the slot is held by a
+    // corpse until the pool recycles it.
+    this.releaseHut()
     this.state = 'dead'
     this.deathTimer = 0
     this.vel.set(0, 0, 0)
@@ -3095,11 +3145,27 @@ export class Human {
     const cfg = this.cfg
     const dist = Math.hypot(tigerPos.x - this.pos.x, tigerPos.z - this.pos.z)
     this.repathTimer -= dt
+    this.hideCooldown -= dt
+    this.hideTimeout -= dt
 
-    if (this.fearTimer > 0) this.state = 'panic'
+    // Holding a hut outranks everything else. A roar is meant to scatter people
+    // in the open; it is not meant to empty the huts, because emptying the huts
+    // is what the tiger has to walk through a door to do.
+    if (this.hideHut) this.state = 'hide'
+    else if (this.fearTimer > 0) this.state = 'panic'
     else if (this.alerted) this.state = this.kind === 'hunter' ? 'hunt' : 'flee'
     else if (this.awareness > 0.35) this.state = 'suspicious'
     else if (this.state !== 'wander') this.state = 'wander'
+
+    // Anyone already running and inclined to hide picks a door as soon as there
+    // is one worth picking. Failing to find one is the expensive case, so it is
+    // the one on a cooldown.
+    if (
+      this.willHide && !this.hideHut && this.hideCooldown <= 0 &&
+      (this.state === 'flee' || this.state === 'panic')
+    ) {
+      if (this.claimHut(world, tigerPos)) this.state = 'hide'
+    }
 
     switch (this.state) {
       case 'wander': {
@@ -3141,6 +3207,64 @@ export class Human {
         this.moveToward(this.target, HUMAN.villager.fleeSpeed, dt)
         // Look back over the shoulder at what's chasing them.
         if (dist < 14) this.faceAwayFrom(tigerPos, dt, 7)
+        break
+      }
+
+      case 'hide': {
+        const hut = this.hideHut!
+
+        // Never got there. Stop holding a door open for someone who cannot
+        // reach it and go back to running like everybody else.
+        if (this.hideStage < 2 && this.hideTimeout <= 0) {
+          this.releaseHut()
+          this.hideCooldown = 5
+          this.state = this.fearTimer > 0 ? 'panic' : 'flee'
+          break
+        }
+
+        // Flushed. Being cornered in a room with a tiger is worse than the open
+        // ground they gave up to get here, and they work that out all at once.
+        if (this.hideStage >= 2 && this.hideStage < 4) {
+          const tdx = tigerPos.x - this.pos.x
+          const tdz = tigerPos.z - this.pos.z
+          if (tdx * tdx + tdz * tdz < HUT.flushRadius * HUT.flushRadius) {
+            this.hideStage = 4
+            this.fearTimer = Math.max(this.fearTimer, HUT.flushPanic)
+            this.pendingShout = true
+          }
+        }
+
+        // ...or the thing they were running from has gone, and they come out on
+        // their own. Without this the village fills its huts once and the rest
+        // of the round is played in an empty clearing.
+        if (this.hideStage === 3 && !this.alerted && this.fearTimer <= 0 && dist > 24) {
+          this.hideStage = 4
+        }
+
+        const way = this.hideStage <= 0 ? hut.out : this.hideStage >= 4 ? hut.out : this.hideStage === 1 ? hut.in : hut.hide
+        const d = Math.hypot(way.x - this.pos.x, way.z - this.pos.z)
+
+        if (this.hideStage === 3) {
+          // Pressed into the dark at the back, watching the doorway, because
+          // the doorway is the only thing that can happen to them now.
+          this.vel.x = damp(this.vel.x, 0, 8, dt)
+          this.vel.z = damp(this.vel.z, 0, 8, dt)
+          this.faceToward(hut.out, dt, 4)
+        } else {
+          // No sprinting indoors: there is nowhere to sprint to, and a man at
+          // full flee speed crosses one of these rooms in half a second.
+          const indoors = this.hideStage >= 2
+          this.moveToward(way, indoors ? HUT.insideSpeed : HUMAN.villager.fleeSpeed, dt)
+        }
+
+        if (this.hideStage < 3 && d < 0.55) this.hideStage++
+        else if (this.hideStage === 4 && d < 0.9) {
+          this.releaseHut()
+          // Long enough that they run somewhere rather than straight back in.
+          this.hideCooldown = HUT.flushPanic
+          this.state = this.fearTimer > 0 ? 'panic' : 'wander'
+          this.repathTimer = 0
+        }
         break
       }
 
@@ -3191,6 +3315,46 @@ export class Human {
       default:
         break
     }
+  }
+
+  /**
+   * Pick a door and take a slot behind it.
+   *
+   * The score is the walk to the doorstep plus a penalty for doors near the
+   * tiger, so that a hut twenty metres off in clear air beats one ten metres
+   * away that means running past the thing chasing you. Huts the tiger is
+   * already standing on are out entirely — running into a room with a tiger in
+   * it is not hiding, it is queueing.
+   */
+  private claimHut(world: World, tigerPos: THREE.Vector3): boolean {
+    this.hideCooldown = 0.6
+    let best: Hut | null = null
+    let bestScore = Infinity
+    for (const h of world.huts) {
+      if (h.occupants >= h.capacity) continue
+      const d = Math.hypot(h.out.x - this.pos.x, h.out.z - this.pos.z)
+      if (d > HUT.seekRange) continue
+      if (Math.hypot(h.x - tigerPos.x, h.z - tigerPos.z) < HUT.tigerClear) continue
+      const doorFromTiger = Math.hypot(h.out.x - tigerPos.x, h.out.z - tigerPos.z)
+      const score = d + Math.max(0, 26 - doorFromTiger) * 1.5
+      if (score < bestScore) {
+        bestScore = score
+        best = h
+      }
+    }
+    if (!best) return false
+    best.occupants++
+    this.hideHut = best
+    this.hideStage = 0
+    this.hideTimeout = 4 + bestScore / HUMAN.villager.fleeSpeed
+    return true
+  }
+
+  /** Give the slot back. Safe to call on someone who never had one. */
+  private releaseHut() {
+    if (!this.hideHut) return
+    this.hideHut.occupants = Math.max(0, this.hideHut.occupants - 1)
+    this.hideHut = null
   }
 
   private fire(tigerPos: THREE.Vector3, dist: number, waveScale: number) {

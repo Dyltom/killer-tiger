@@ -33,6 +33,7 @@ is generated in code. See [Assets](#assets).
 | Right click | Killing bite — short range, huge damage, heals you |
 | `R` | Roar — panics everything nearby and staggers them |
 | `Q` | Blood frenzy — spend a full rage bar for double damage and speed |
+| `F` | Frame-rate readout (on by default) |
 | `Esc` | Pause · `M` mute |
 
 Add `?nolock` to the URL to play without pointer lock (mouse-look is disabled).
@@ -49,6 +50,14 @@ while they're still unaware and it's an instant, silent execution.
 **Noise cascades.** Once a human is certain of you they shout, and everyone
 inside the shout radius is alerted. Villagers scatter toward campfires; hunters
 close to their firing stand-off, shoulder a rifle, and shoot.
+
+**The huts are real rooms.** Every hut in the village is a hollow shell with a
+doorway you can walk through, and about six villagers in ten will run for one
+rather than for the firelight. They pick a door away from you, cross the floor,
+and press into the dark at the back facing the only way in — where you cannot see
+them and they cannot see you, because line of sight goes through the doorway and
+nothing else. Follow them in and they break and bolt past you; catch one between
+the walls and the kill is worth half again as much.
 
 **Chain kills.** Each kill inside the combo window raises your multiplier, up to
 5×. Break the chain and it resets. This is where the score actually comes from.
@@ -131,6 +140,12 @@ The systems were built with obvious seams to pull on:
 - **New pickup** — add an entry to `PICKUP_TYPES` in `entities/pickup.ts` with a
   model builder, then handle its id in `Game.collect`. Timed buffs just need a
   `BUFFS` entry.
+- **New building** — `roundHut` and `squareHut` in `world/village.ts` return a
+  `HutBuild`; the collider gets a `hollow` descriptor and the AI gets three
+  waypoints. The one convention to keep is that a door faces hut-local `+z`, so
+  its world bearing is `(sin rot, cos rot)` and nothing downstream needs a second
+  angle. Note that the collider frame is the transpose of three's, so yaws handed
+  to `world.resolve` are negated.
 - **New ability** — follow the roar: a cooldown on `Tiger`, a key check in
   `Game.updateActions`, and an effect loop over `humans`.
 - **Day/night** — `SKY.sunElevation` and `SKY.sunAzimuth` in `config.ts` drive the
@@ -169,6 +184,10 @@ In development, `window.__kt` exposes `game`, `world`, `camera`, `scene`, and:
 - `hold(code)` / `release(code)` — synthesise key input
 - `click(button)` — synthesise a mouse click
 - `look(dx, dy)` — feed mouse-look deltas
+- `terrainHeight(x, z)` — the shared height field, for probing placement
+
+`scripts/cam.sh` screenshots from an arbitrary camera rather than from behind the
+tiger, which is the only way to judge anything you have to stand inside.
 
 `scripts/drive.sh` uses these to run and screenshot the game headlessly, which is
 how the visuals and every system above were verified.

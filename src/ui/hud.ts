@@ -38,6 +38,7 @@ export class Hud {
   private pulse = $('pulse')
   private devour = $('devour')
   private devourFill = $('devour-fill')
+  private fpsEl = $('fps')
   private radar = $<HTMLCanvasElement>('radar')
   private radarCtx = this.radar.getContext('2d')!
 
@@ -47,6 +48,16 @@ export class Hud {
 
   show() { this.hud.classList.remove('hidden') }
   hide() { this.hud.classList.add('hidden') }
+
+  /**
+   * The frame-rate readout.
+   *
+   * It lives outside `#hud` and is shown and hidden on its own, because the
+   * cost of a frame is worth reading in the menu — where the world is still
+   * being drawn behind the overlay — as much as it is mid-hunt.
+   */
+  setFps(text: string) { this.fpsEl.textContent = text }
+  showFps(on: boolean) { this.fpsEl.classList.toggle('hidden', !on) }
 
   setScore(score: number) {
     // Roll the number up so kills feel like they pay out.

@@ -32,6 +32,13 @@ export interface FloraContext {
   height: (x: number, z: number) => number
   /** Is this spot far enough from everything already placed? */
   clearOf: (x: number, z: number, pad: number) => boolean
+  /**
+   * Is this spot under a roof? Ground cover is scattered in the hundreds of
+   * thousands and skips `clearOf` entirely because it cannot pay for it; the
+   * huts are hollow now, so it has to pay for this much at least or every
+   * floor in the village comes up through the swept earth in tufts.
+   */
+  insideHut: (x: number, z: number, pad: number) => boolean
   colliders: Collider[]
 }
 
@@ -403,6 +410,9 @@ export function buildGrass(ctx: FloraContext): GrassResult {
       const r = Math.sqrt(rng.next()) * pr
       const x = px + Math.cos(a) * r
       const z = pz + Math.sin(a) * r
+      // A patch may lap against a hut; the blades that fall indoors are dropped
+      // rather than the whole patch moved, so the cover still runs up to the wall.
+      if (ctx.insideHut(x, z, 0.7)) continue
       const s = rng.range(0.8, 1.15)
       // Dry-season savanna: olive and straw, never lime. Hues below ~0.12 come
       // out fluorescent yellow once the low sun rakes across them.
@@ -435,6 +445,7 @@ export function buildGrass(ctx: FloraContext): GrassResult {
   const cover = new ChunkedScatter(COVER_CELL)
   for (let c = 0; c < WORLD.groundCover; c++) {
     const d = rng.inDisc(WORLD.bounds - 2)
+    if (ctx.insideHut(d.x, d.z, 0.5)) continue
     const s = rng.range(0.85, 1.65)
     // Desaturated and pulled toward the ground's own hue: high-contrast tufts
     // on pale dirt read as scattered props rather than a continuous sward.

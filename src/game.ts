@@ -3,7 +3,7 @@
  * Rendering and the DOM live elsewhere; this file is the simulation.
  */
 import * as THREE from 'three'
-import { BUFFS, COMBO, HUMAN, PICKUP, STORAGE_KEY, STORY, TIGER, WAVE, WORLD } from './config'
+import { BUFFS, COMBO, HUMAN, HUT, PICKUP, STORAGE_KEY, STORY, TIGER, WAVE, WORLD } from './config'
 import { audio, type Place } from './engine/audio'
 import type { Input } from './engine/input'
 import { clamp, Rng } from './engine/rng'
@@ -112,6 +112,9 @@ export class Game {
 
   // ------------------------------------------------------------ lifecycle
   start() {
+    // Everybody is out of the huts again. The counts live on the world, which
+    // outlives a round.
+    this.world.resetHuts()
     this.score = 0
     this.kills = 0
     this.wave = 1
@@ -454,13 +457,23 @@ export class Game {
       const stealth = behind && !h.alerted && atk.kind === 'bite'
       const damage = stealth ? 9999 : atk.damage
 
+      // Read before the blow lands: dying clears the hut, and by the time
+      // `hurt` returns there is no way left to tell where he thought he was.
+      const cornered = h.hiding
       const killed = h.hurt(damage, eye, atk.kind === 'bite' ? 'bite' : 'claw', hitPoint)
       // Spray from the wound the body just decided on, not from the axis point
       // we handed it — otherwise the blood leaves from inside the man.
       this.particles.blood(h.woundPos, dir, killed ? 34 : 16, killed ? 1.4 : 0.8)
       if (killed) {
         killedAny = true
-        this.onKill(h, stealth ? 'Silent kill' : atk.kind === 'bite' ? 'Throat torn' : 'Mauled')
+        this.onKill(
+          h,
+          cornered ? 'Dragged from the hut'
+            : stealth ? 'Silent kill'
+            : atk.kind === 'bite' ? 'Throat torn'
+            : 'Mauled',
+          cornered ? HUT.hiddenKillBonus : 1,
+        )
         if (atk.kind === 'bite') this.tiger.heal(TIGER.biteHeal)
       } else {
         audio.clawHit(this.placeOf(h.pos))
@@ -518,7 +531,7 @@ export class Game {
     }
   }
 
-  private onKill(h: Human, label: string) {
+  private onKill(h: Human, label: string, bonus = 1) {
     this.kills++
     this.waveKills++
     this.chain++
@@ -526,7 +539,7 @@ export class Game {
     if (this.chain > 1) audio.comboTick(this.chain)
 
     const cfg = h.kind === 'hunter' ? HUMAN.hunter : HUMAN.villager
-    this.addScore(cfg.score, label)
+    this.addScore(cfg.score * bonus, label)
     this.tiger.addRage(cfg.rage)
 
     this.particles.gore(h.woundPos, h.kind === 'hunter' ? 20 : 14)
