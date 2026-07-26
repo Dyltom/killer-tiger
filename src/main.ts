@@ -257,6 +257,50 @@ function animate(timestamp: number) {
 }
 
 /**
+ * Compile the program for everything in the scene, including what is currently
+ * hidden.
+ *
+ * A warm frame only warms what that frame drew, and three's `compile()` walks
+ * the scene with `traverseVisible`, so both of them skip exactly the things
+ * that are pooled-and-hidden at boot: all 52 humans, every pickup, every blood
+ * decal. Which means the first villager of wave one compiled the skinned human
+ * program, the first kill compiled the decal program, and the first pickup
+ * compiled its own — three separate hundred-millisecond stalls, each landing on
+ * the single frame the player most wanted to be smooth, and each looking for
+ * all the world like a performance problem in the thing that had just spawned.
+ *
+ * So show everything for as long as it takes to compile, then put it back. The
+ * loading screen is still up over the canvas, so there is nothing to see.
+ *
+ * The shadow pass needs its own pass over the same set, because `compile()` only
+ * builds the program a material draws itself with — the depth material the
+ * shadow map substitutes in is compiled lazily by the shadow renderer, and a
+ * skinned depth program is its own variant. Measured, that was the last six
+ * programs, and it cost the frame a villager first stepped into the sun.
+ *
+ * That warming pass has to go through the post chain rather than straight to
+ * the canvas. A program's cache key includes the output colour space of the
+ * target it is drawn into, and every real frame is drawn into a linear render
+ * target while the canvas is sRGB — so warming with a plain `render()` compiles
+ * a whole set of variants the game will never use and leaves the ones it does
+ * still cold. That is a warm-up that costs load time and buys nothing, which is
+ * worse than not doing it.
+ */
+function warmShaderCache() {
+  const hidden: THREE.Object3D[] = []
+  scene.traverse((o) => {
+    if (!o.visible) {
+      hidden.push(o)
+      o.visible = true
+    }
+  })
+  renderer.compile(scene, camera)
+  renderer.shadowMap.needsUpdate = true
+  postfx.render(0, 0, 0)
+  for (const o of hidden) o.visible = false
+}
+
+/**
  * Hold the menu back until the PBR sets are decoded, then warm the shader cache
  * with one real frame. Compiling the terrain and foliage programs mid-hunt is a
  * visible multi-hundred-millisecond stall.
@@ -265,9 +309,11 @@ let started = false
 function begin() {
   if (started) return
   started = true
-  // The warm frame has to fill the shadow map too — nothing has run the loop
-  // yet, so without this the first rendered frame samples a map that does not
-  // exist.
+  warmShaderCache()
+  // Then a second frame with only what the menu should actually show. The warm
+  // pass left the shadow map holding 52 hidden humans stacked at the origin,
+  // and this is what replaces it — nothing has run the loop yet, so without a
+  // real render here the first frame samples a map that is wrong or missing.
   renderer.shadowMap.needsUpdate = true
   postfx.render(0, 0, 0)
   loading.remove()

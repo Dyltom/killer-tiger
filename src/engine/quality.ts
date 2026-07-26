@@ -13,8 +13,11 @@
  *     and climbing back needs twice as long *and* a comfortable margin, so the
  *     hysteresis band is wide enough that the steady state is one tier, not a
  *     cycle between two; and
- *   - the first second after any change is ignored, because reallocating a
- *     shadow map or a render target costs a frame or two by itself.
+ *   - for a second after any change no further change is allowed, because
+ *     reallocating a shadow map or a render target costs a frame or two by
+ *     itself, and those frames must not be read as evidence that the change was
+ *     not enough. The averages keep updating through that window — it is the
+ *     decision that waits, not the measurement.
  *
  * There are two levers here, not one, because the frame is fill-bound and the
  * ladder is too coarse to steer it. Measured on the scene at 1920x1200, the
@@ -109,17 +112,73 @@ export const PRESETS: QualityPreset[] = [
  */
 const SCALE_STEPS = [1, 0.92, 0.84, 0.76, 0.68, 0.6]
 
-/** 60 fps target with a little headroom before we call a frame late. */
-const BUDGET_MS = 17.5
-/** Only climb when there is room for the next tier's extra cost. */
-const COMFORT_MS = 12.0
+/**
+ * Both thresholds are multiples of the display's refresh period, not absolute
+ * milliseconds, because requestAnimationFrame is paced by vsync and that makes
+ * an absolute budget meaningless.
+ *
+ * The old numbers were a 17.5 ms budget and a 12.0 ms comfort line. On a 60 Hz
+ * panel a frame that hits vsync perfectly measures 16.7 ms, so `fast` could
+ * never once get under 12 — the branch that gives resolution back was
+ * unreachable and the scale was a one-way ratchet. Every transient hitch took
+ * pixels off permanently, and the game got blurrier the longer it ran. On a
+ * 120 Hz panel the same constants worked fine, which is exactly the kind of
+ * bug that survives being tested on the wrong machine.
+ *
+ * With vsync the frame time quantises: you either hit the refresh period or you
+ * miss it and land on a multiple. So the useful question is not "how many
+ * milliseconds" but "are we hitting it" — comfortable is a little above one
+ * period, late is most of the way to two. Nothing lands between 1.10 and 1.35
+ * on a machine that is either locked or missing, which is what makes the band
+ * stable rather than a place to oscillate in.
+ */
+const BUDGET = 1.35
+const COMFORT = 1.10
+/**
+ * What one refresh period is, in ms, learned from the fastest frames seen.
+ *
+ * Clamped to the range of real display rates. Without the ceiling a machine
+ * that never once hit 60 would decide its refresh period was 40 ms and set
+ * itself a 54 ms budget, and adaptive quality would switch itself off on
+ * precisely the hardware that needs it.
+ */
+const REFRESH_MIN = 6.9
+const REFRESH_MAX = 17.0
 const DROP_AFTER = 1.2
 const RAISE_AFTER = 4.0
+/**
+ * Backoff on the climb, and the ceiling it backs off to.
+ *
+ * A tier that has already been tried and failed is evidence, and a scaler that
+ * ignores it oscillates forever: hold 60 for four seconds, climb, fail inside
+ * one, drop, hold for four, climb again — a five-second cycle of the shadows
+ * and the resolution visibly changing, on a machine that was running perfectly.
+ * That loop was latent before and only masked by the fact that the climb was
+ * unreachable at all; unblocking one without the other would have traded a
+ * ratchet for a pump.
+ *
+ * So each demotion triples the wait before the next attempt — 4 s, 12 s, 36 s,
+ * then the cap. Two failures in and it is effectively done trying, which is the
+ * correct conclusion to draw about a machine that has now failed the same tier
+ * twice. It never decays: nothing about the hardware improved.
+ */
+const RAISE_BACKOFF = 3
+const RAISE_MAX = 90
 const SETTLE = 1.0
 /** Resolution changes are cheap to undo, so they get a much shorter cooldown. */
 const SCALE_SETTLE = 0.35
+/**
+ * A step down needs the fast average over budget for this long.
+ *
+ * Not zero, which is what it used to be. `fast` has a 0.25 smoothing factor, so
+ * a single 40 ms hitch lifts it from 16 to 22 on its own — over budget from one
+ * frame — and each step's cooldown then skipped the samples that would have let
+ * it fall back, so one spike walked the resolution all the way to the floor.
+ * Twelve frames of sustained lateness is still inside a fifth of a second.
+ */
+const SCALE_DROP_AFTER = 0.2
 /** Give resolution back more slowly than it is taken, or the two levers ring. */
-const SCALE_RAISE_AFTER = 2.0
+const SCALE_RAISE_AFTER = 1.2
 
 export class Quality {
   /** Start one below the top: most machines settle here, and climbing is cheap. */
@@ -128,10 +187,26 @@ export class Quality {
   private fast = 16
   private over = 0
   private under = 0
+  private scaleOver = 0
   private scaleUnder = 0
   private step = 0
   private settle = SETTLE
   private frames = 0
+  /** How long a comfortable stretch has to be before the next climb; grows. */
+  private raiseAfter = RAISE_AFTER
+  /**
+   * Running estimate of the display's refresh period, in ms.
+   *
+   * A minimum with a slow upward leak. The minimum is what finds the period —
+   * under vsync the floor of the frame time *is* the period, and no amount of
+   * load pushes a frame below it. The leak is what stops a single freakishly
+   * short frame (a dropped-then-doubled pair, a timer rounding down) from
+   * pinning the estimate at 8 ms on a 60 Hz panel forever and holding the
+   * budget at an impossible 11.
+   *
+   * Seeded at 60 Hz, which is what it will converge to on most machines anyway.
+   */
+  private refresh = 16.7
 
   onChange: ((p: QualityPreset) => void) | null = null
 
@@ -164,12 +239,14 @@ export class Quality {
   private set(tier: number) {
     const next = Math.max(0, Math.min(PRESETS.length - 1, tier))
     if (next === this.tier) return
+    if (next < this.tier) this.raiseAfter = Math.min(this.raiseAfter * RAISE_BACKOFF, RAISE_MAX)
     this.tier = next
     this.over = 0
     this.under = 0
     // The new tier is a different frame cost, so whatever the resolution had
     // been trimmed to was an answer to a question nobody is asking any more.
     this.step = 0
+    this.scaleOver = 0
     this.scaleUnder = 0
     this.settle = SETTLE
     this.onChange?.(this.preset)
@@ -179,6 +256,7 @@ export class Quality {
   private setStep(step: number): boolean {
     if (step < 0 || step >= SCALE_STEPS.length || step === this.step) return false
     this.step = step
+    this.scaleOver = 0
     this.scaleUnder = 0
     this.settle = SCALE_SETTLE
     this.onChange?.(this.preset)
@@ -202,38 +280,67 @@ export class Quality {
     // compilation for every material in the scene.
     if (this.frames++ < 30) return
 
+    // The fastest frame anyone manages is the refresh period, near enough:
+    // vsync will not let a frame finish early, so the floor of the frame time
+    // distribution is the panel and not the workload.
+    //
+    // Tracked as an asymmetric average rather than a plain minimum, because a
+    // plain minimum is one bad sample away from being wrong for the rest of the
+    // session — a single 8 ms delta on a 60 Hz panel would set an 11 ms budget
+    // that the display makes it physically impossible to meet, and the scaler
+    // would strip the game to the floor chasing it. Pulling down ten times
+    // faster than up still finds a real 120 Hz panel inside a quarter second,
+    // while an occasional short frame among honest ones only drags the estimate
+    // to where the two rates balance, which is still above the true period.
+    //
+    // `target` is clamped before it is used in either direction: a machine that
+    // never once renders a frame in under 17 ms has a slow game, not a 22 Hz
+    // display, and must not be allowed to talk itself into a 60 ms budget.
+    const target = Math.min(ms, REFRESH_MAX)
+    this.refresh += (target - this.refresh) * (target < this.refresh ? 0.10 : 0.02)
+    this.refresh = Math.max(REFRESH_MIN, this.refresh)
+    const budget = this.refresh * BUDGET
+    const comfort = this.refresh * COMFORT
+
+    // Keep measuring through the cooldown; only the *decisions* wait. This used
+    // to return here, which meant the spike that triggered a change was still
+    // sitting in `fast`, undiluted, when the cooldown lifted — so it fired the
+    // next step immediately, and the one after that, all from one hitch.
+    this.avg += (ms - this.avg) * 0.06
+    this.fast += (ms - this.fast) * 0.25
     if (this.settle > 0) {
       this.settle -= dt
       return
     }
 
-    this.avg += (ms - this.avg) * 0.06
-    this.fast += (ms - this.fast) * 0.25
-
     // Resolution first, in both directions. A late frame gets pixels taken off
     // it within a few frames of going late; a comfortable one gets them back
     // before the tier is allowed to climb and put god rays on top.
-    if (this.fast > BUDGET_MS) {
-      if (this.setStep(this.step + 1)) return
+    if (this.fast > budget) {
+      this.scaleOver += dt
+      this.scaleUnder = 0
+      if (this.scaleOver > SCALE_DROP_AFTER && this.setStep(this.step + 1)) return
       // Out of steps: the slow ladder below is the only thing left.
-    } else if (this.fast < COMFORT_MS && this.step > 0) {
+    } else if (this.fast < comfort && this.step > 0) {
       this.scaleUnder += dt
+      this.scaleOver = 0
       if (this.scaleUnder > SCALE_RAISE_AFTER && this.setStep(this.step - 1)) return
     } else {
+      this.scaleOver = 0
       this.scaleUnder = 0
     }
 
-    if (this.avg > BUDGET_MS) {
+    if (this.avg > budget) {
       this.over += dt
       this.under = 0
       if (this.over > DROP_AFTER) this.set(this.tier - 1)
-    } else if (this.avg < COMFORT_MS && this.step === 0) {
+    } else if (this.avg < comfort && this.step === 0) {
       // Only climb from full resolution. Climbing a tier while the frame is
       // still being propped up by a resolution cut is how you get a game that
       // trades sharpness for god rays behind the player's back.
       this.under += dt
       this.over = 0
-      if (this.under > RAISE_AFTER) this.set(this.tier + 1)
+      if (this.under > this.raiseAfter) this.set(this.tier + 1)
     } else {
       this.over = 0
       this.under = 0
