@@ -162,6 +162,21 @@ export class Sky {
   private shadowExtent = 34
   /** How far up-sun the light sits from the box centre, derived by fitShadow(). */
   private shadowDist = 100
+  /** Frames between shadow-map redraws; see QualityPreset.shadowInterval. */
+  private shadowInterval = 1
+  private shadowAge = 0
+
+  /**
+   * True on the frames the shadow map has to be re-rendered. main.ts drives
+   * `renderer.shadowMap.needsUpdate` off this; the renderer's own per-frame
+   * update is switched off.
+   *
+   * It has to be a flag rather than something Sky does to the renderer itself,
+   * because the frustum move below and the redraw are two halves of the same
+   * decision: skip the redraw without skipping the move and every shadow in the
+   * frame slides off whatever is casting it.
+   */
+  shadowDirty = true
 
   private installLights() {
     const s = this.sun
@@ -208,7 +223,7 @@ export class Sky {
    * map has to be disposed by hand or the driver keeps both alive; three then
    * reallocates at the new size on the next shadow render.
    */
-  setShadowQuality(size: number, extent: number) {
+  setShadowQuality(size: number, extent: number, interval = 1) {
     const s = this.sun
     if (s.shadow.mapSize.x !== size) {
       s.shadow.mapSize.set(size, size)
@@ -216,6 +231,10 @@ export class Sky {
       s.shadow.map = null
     }
     this.fitShadow(extent)
+    this.shadowInterval = Math.max(1, interval)
+    // The map that is up there was drawn for the old extent, and after a resize
+    // there is no map at all. Either way the next frame owes a redraw.
+    this.shadowAge = this.shadowInterval
   }
 
   // -------------------------------------------------------------------- IBL
@@ -348,23 +367,31 @@ export class Sky {
     // along their own edges as you walk. Snapping means walking slides the map
     // by whole texels, so an edge that is not moving in world space does not
     // move in the map either.
-    const c = shadowCentre.set(viewer.x, 0, viewer.z)
-    const f = this.sunDir
-    // The same basis Object3D.lookAt() builds for the shadow camera: +Y up,
-    // z pointing from the target back toward the light. Straight overhead the
-    // cross product degenerates, so fall back to an arbitrary horizontal.
-    if (Math.abs(f.y) > 0.999) lightRight.set(1, 0, 0)
-    else lightRight.set(0, 1, 0).cross(f).normalize()
-    lightUp.crossVectors(f, lightRight)
-    const texel = (2 * this.shadowExtent) / this.sun.shadow.mapSize.x
-    const u = Math.round(c.dot(lightRight) / texel) * texel
-    const v = Math.round(c.dot(lightUp) / texel) * texel
-    const w = c.dot(f)
-    c.copy(lightRight).multiplyScalar(u).addScaledVector(lightUp, v).addScaledVector(f, w)
+    //
+    // Both of those happen on redraw frames only. Between them the light, its
+    // target and its map are all held exactly as they were, which is what makes
+    // a skipped frame free rather than wrong.
+    this.shadowDirty = ++this.shadowAge >= this.shadowInterval
+    if (this.shadowDirty) {
+      this.shadowAge = 0
+      const c = shadowCentre.set(viewer.x, 0, viewer.z)
+      const f = this.sunDir
+      // The same basis Object3D.lookAt() builds for the shadow camera: +Y up,
+      // z pointing from the target back toward the light. Straight overhead the
+      // cross product degenerates, so fall back to an arbitrary horizontal.
+      if (Math.abs(f.y) > 0.999) lightRight.set(1, 0, 0)
+      else lightRight.set(0, 1, 0).cross(f).normalize()
+      lightUp.crossVectors(f, lightRight)
+      const texel = (2 * this.shadowExtent) / this.sun.shadow.mapSize.x
+      const u = Math.round(c.dot(lightRight) / texel) * texel
+      const v = Math.round(c.dot(lightUp) / texel) * texel
+      const w = c.dot(f)
+      c.copy(lightRight).multiplyScalar(u).addScaledVector(lightUp, v).addScaledVector(f, w)
 
-    this.sun.target.position.copy(c)
-    this.sun.target.updateMatrixWorld()
-    this.sun.position.copy(f).multiplyScalar(this.shadowDist).add(c)
+      this.sun.target.position.copy(c)
+      this.sun.target.updateMatrixWorld()
+      this.sun.position.copy(f).multiplyScalar(this.shadowDist).add(c)
+    }
 
     // A PMREM bake is several milliseconds, so it happens on sun *movement*.
     // Over a full cycle that is about thirty bakes rather than forty thousand.

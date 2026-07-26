@@ -50,7 +50,7 @@ const renderer = new THREE.WebGLRenderer({
   // and the default framebuffer only ever receives the last fullscreen blit, so
   // asking for a multisampled back buffer buys nothing and costs the bandwidth
   // of writing four samples per pixel and resolving them. Antialiasing is the
-  // SMAA pass's job — see render/postfx.ts.
+  // final FXAA pass's job — see render/postfx.ts.
   antialias: false,
   powerPreference: 'high-performance',
 })
@@ -58,6 +58,10 @@ renderer.setSize(innerWidth, innerHeight)
 // Provisional; the quality manager takes this over below and keeps adjusting it.
 renderer.setPixelRatio(Math.min(devicePixelRatio, 1.5))
 renderer.shadowMap.enabled = true
+// The sun's map is redrawn on a cadence the quality tier picks rather than once
+// per frame — see QualityPreset.shadowInterval. Sky decides which frames those
+// are, because it also owns the frustum that has to stay put on the others.
+renderer.shadowMap.autoUpdate = false
 // PCFSoftShadowMap is deprecated as of three r18x: the renderer swaps it for
 // PCFShadowMap on the first frame and warns about it on the console. Ask for
 // what we actually get. PCF is a five-tap Vogel disk of `shadow.radius` texels,
@@ -99,10 +103,13 @@ const postfx = new PostFX(renderer, scene, camera, sky.sunDir)
 
 // ------------------------------------------------------------- quality
 quality.onChange = (p) => {
-  renderer.setPixelRatio(Math.min(devicePixelRatio, p.pixelRatio))
+  // The tier caps the pixel ratio; `renderScale` is the fine adjustment the
+  // quality manager makes between tiers to hold the frame rate. Both, or the
+  // fast lever does nothing.
+  renderer.setPixelRatio(Math.min(devicePixelRatio, p.pixelRatio) * quality.renderScale)
   postfx.setSize(innerWidth, innerHeight)
   postfx.setQuality(p)
-  sky.setShadowQuality(p.shadowMapSize, p.shadowExtent)
+  sky.setShadowQuality(p.shadowMapSize, p.shadowExtent, p.shadowInterval)
   world.setFoliageDistance(p.foliageDistance)
 }
 quality.apply()
@@ -212,7 +219,12 @@ addEventListener('keydown', (e) => {
 })
 
 // ------------------------------------------------------------------- loop
-const clock = new THREE.Clock()
+// Timer rather than Clock: Clock is deprecated as of r185 and warns on the
+// console, and connecting this one to the document hands the alt-tab case to
+// the Page Visibility API — a hidden tab reports a zero delta instead of the
+// several seconds it was away.
+const timer = new THREE.Timer()
+timer.connect(document)
 
 /** One simulation + render step. Split out so tests can drive it directly. */
 function frame(dt: number) {
@@ -227,6 +239,7 @@ function frame(dt: number) {
   // an alt-tab reads as a bug, not as a cycle.
   if (game.state === 'playing' && !FREEZE_TIME) sky.update(dt, game.tiger.pos)
   else sky.update(0, game.tiger.pos)
+  renderer.shadowMap.needsUpdate = sky.shadowDirty
   renderer.toneMappingExposure = POST.exposure * sky.day.state.exposure
 
   // Frenzy ramps the grade up and back down over its last second rather than
@@ -236,9 +249,11 @@ function frame(dt: number) {
   postfx.render(dt, frenzy, game.state === 'playing' ? hurt : 0, sky.day.darkness)
 }
 
-function animate() {
-  // Clamp dt so an alt-tab doesn't teleport the tiger across the map.
-  frame(Math.min(clock.getDelta(), 1 / 20))
+function animate(timestamp: number) {
+  timer.update(timestamp)
+  // Still clamped: the visibility handler covers alt-tab, but a long GC pause or
+  // a shader compile can hand us a delta big enough to teleport the tiger.
+  frame(Math.min(timer.getDelta(), 1 / 20))
 }
 
 /**
@@ -250,6 +265,10 @@ let started = false
 function begin() {
   if (started) return
   started = true
+  // The warm frame has to fill the shadow map too — nothing has run the loop
+  // yet, so without this the first rendered frame samples a map that does not
+  // exist.
+  renderer.shadowMap.needsUpdate = true
   postfx.render(0, 0, 0)
   loading.remove()
   showOnly(menu)
