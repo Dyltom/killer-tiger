@@ -29,6 +29,7 @@ import { clone as cloneSkinned } from 'three/examples/jsm/utils/SkeletonUtils.js
 import { clamp } from '../engine/rng'
 import { loadingManager } from '../world/materials'
 import { applyLayers, applyLayerShadow, mergeLayered } from './layered'
+import { applyPose, registerPose } from './pose'
 
 /** Villager bodies, picked round-robin by slot so a crowd is not one man. */
 export const VILLAGERS = ['villager_a', 'villager_b', 'villager_elder', 'villager_woman'] as const
@@ -521,9 +522,6 @@ export function makeBody(name: string): Body | null {
     // that chains onto whatever it finds, and the diffuse sample has to be
     // underneath the blood rather than over it.
     applyLayers(mat, m.geometry)
-    // Not cloned with the material, because nothing in it varies per body. See
-    // `layerDepth`: this is what lets the alpha-tested hair live in the merge.
-    applyLayerShadow(m)
     m.material = mat
     meshes.push(m)
     if (DETAIL.test(m.name)) detail.push(m)
@@ -538,6 +536,19 @@ export function makeBody(name: string): Body | null {
   // space from the source rebake.
   const shared = (meshes.find(m => m.name === BASEMESH) ?? meshes[0])?.skeleton
   if (shared) for (const m of meshes) if (m.skeleton !== shared) m.bind(shared, m.bindMatrix)
+
+  // The bone atlas has to come after the re-share above, or it would hand rows
+  // to skeletons that are about to be thrown away. A body it turns down keeps
+  // three's own per-skeleton texture and renders exactly as it did — which is
+  // also what makes the shadow material a two-way choice: shared between clones
+  // when there is no row to carry, one per body when there is.
+  const row = shared ? registerPose(shared, root) : null
+  for (const m of meshes) {
+    applyLayerShadow(m, row !== null)
+    if (row === null) continue
+    applyPose(m.material as THREE.Material, row)
+    if (m.customDepthMaterial) applyPose(m.customDepthMaterial, row)
+  }
 
   const bone = (n: string) => bones.get(n)!
   const arm = (s: 'Left' | 'Right') => ({

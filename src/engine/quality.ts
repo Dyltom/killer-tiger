@@ -106,7 +106,10 @@ export const PRESETS: QualityPreset[] = [
   // against: 34 m covers the whole 30 m engagement range plus the huts behind it.
   { name: 'High',   pixelRatio: 1.5,  shadowMapSize: 2048, shadowExtent: 34, shadowInterval: 2, godrays: true,  bloom: true,  smaa: true,  foliageDistance: 1.0,  lightPool: 7 },
   // 21 mm/texel *and* 44 m of reach — 4096 is the only tier that can buy both.
-  { name: 'Ultra',  pixelRatio: 2.0,  shadowMapSize: 4096, shadowExtent: 44, shadowInterval: 1, godrays: true,  bloom: true,  smaa: true,  foliageDistance: 1.25, lightPool: 10 },
+  // Redrawing that map is 3.26 ms, and every-other-frame is 1.6 ms of it back
+  // for no visible difference: the sun barely moves in 16 ms and the villagers
+  // it shadows move less than a shadow texel. Ultra was the odd one out at 1.
+  { name: 'Ultra',  pixelRatio: 2.0,  shadowMapSize: 4096, shadowExtent: 44, shadowInterval: 2, godrays: true,  bloom: true,  smaa: true,  foliageDistance: 1.25, lightPool: 10 },
 ]
 
 /**

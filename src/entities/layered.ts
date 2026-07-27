@@ -71,10 +71,13 @@ interface Layered {
   /**
    * The shadow material for this geometry, or null if nothing in it discards.
    *
-   * One per geometry rather than per body, and deliberately: unlike the colour
-   * material it holds nothing that varies between two men wearing the same
-   * clothes, so every clone of a character can point at this one object and
-   * three has no uniform block to re-upload between their shadow draws.
+   * One per geometry rather than per body: nothing in it varies between two men
+   * wearing the same clothes. Bodies that carry a bone-atlas row do need one
+   * each — see `applyLayerShadow` — and that turns out to cost nothing, which
+   * is worth recording next to the header's five-millisecond figure for shared
+   * materials. That was 240 materials on one program; at 80 the effect is gone
+   * entirely (eighty distinct, eighty shared and one shared all measure the
+   * same), so this is a tidiness rather than a saving.
    */
   readonly depth: THREE.MeshDepthMaterial | null
 }
@@ -472,10 +475,16 @@ export function applyLayers(mat: THREE.MeshStandardMaterial, geom: THREE.BufferG
  * Point a merged mesh's shadow at `layerDepth`. A no-op on anything that was
  * not merged, or merged out of parts none of which discard.
  *
- * Unlike `applyLayers` this is per-mesh rather than per-material, and what it
- * hands over is shared by every clone rather than cloned with them.
+ * Unlike `applyLayers` this is per-mesh rather than per-material, and by
+ * default what it hands over is shared by every clone rather than cloned with
+ * them. `own` builds a fresh one instead, for a body that has something of its
+ * own to put in it — pose.ts needs a per-body uniform in the shadow shader, and
+ * a shared material can only carry one body's value. Built rather than cloned
+ * because `Material.copy` does not carry `onBeforeCompile`, which is where all
+ * of `layerDepth` lives.
  */
-export function applyLayerShadow(mesh: THREE.Mesh) {
-  const depth = registry.get(mesh.geometry)?.depth
-  if (depth) mesh.customDepthMaterial = depth
+export function applyLayerShadow(mesh: THREE.Mesh, own = false) {
+  const info = registry.get(mesh.geometry)
+  if (!info?.depth) return
+  mesh.customDepthMaterial = own ? layerDepth(info.tex) : info.depth
 }

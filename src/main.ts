@@ -4,6 +4,7 @@ import { CAMERA, POST, TIGER } from './config'
 import { audio } from './engine/audio'
 import { Input } from './engine/input'
 import { Quality } from './engine/quality'
+import { attachPose } from './entities/pose'
 import { Game } from './game'
 import { installAtmosphericFog, makeFog } from './render/atmosphere'
 import { installLightCulling } from './render/lightcull'
@@ -76,6 +77,9 @@ app.appendChild(renderer.domElement)
 
 const scene = new THREE.Scene()
 scene.fog = makeFog()
+// The cast's bone matrices are uploaded from here, once for the whole crowd
+// instead of once per villager. See entities/pose.ts.
+attachPose(scene)
 
 const camera = new THREE.PerspectiveCamera(CAMERA.fov, innerWidth / innerHeight, CAMERA.near, CAMERA.far)
 camera.rotation.order = 'YXZ'
