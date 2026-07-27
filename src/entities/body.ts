@@ -28,6 +28,7 @@ import { MeshoptDecoder } from 'three/examples/jsm/libs/meshopt_decoder.module.j
 import { clone as cloneSkinned } from 'three/examples/jsm/utils/SkeletonUtils.js'
 import { clamp } from '../engine/rng'
 import { loadingManager } from '../world/materials'
+import { applyLayers, mergeLayered } from './layered'
 
 /** Villager bodies, picked round-robin by slot so a crowd is not one man. */
 export const VILLAGERS = ['villager_a', 'villager_b', 'villager_elder', 'villager_woman'] as const
@@ -78,11 +79,10 @@ export interface Body {
 /**
  * Meshes that stop being worth a draw call once the body is a few metres away.
  *
- * The eyes and the eyebrows are 172 and 192 triangles, which is nothing, and
- * two of the six draw calls a character costs, which is not. Draw call
- * submission is the dominant term in this frame — measured at about 5.6 µs
- * each in Safari, against 0.7 ms per million triangles — so those two meshes
- * are a third of the crowd's cost for two per cent of its geometry.
+ * The eyes and the eyebrows are 172 and 192 triangles, which is nothing, and —
+ * merged together by `collapse` below — one of the three draw calls a character
+ * costs, which is not. Draw call submission is the dominant term in this frame,
+ * measured at about 19 µs each in Safari against 0.7 ms per million triangles.
  *
  * Fifteen metres because that is comfortably past the range at which an eye is
  * more than one pixel: the head is about 22 cm, so at 15 m it spans roughly 30
@@ -93,11 +93,13 @@ export interface Body {
  * It is a silhouette, and a villager who goes bald at fifteen metres is the
  * kind of pop that is far more visible than the thing it saves.
  */
-const DETAIL = /eyebrow|low-poly/i
+const DETAIL = /eyebrow|low-poly|^HumanDetail$/
 const DETAIL_RANGE = 15
 
 /** MakeHuman's name for the basemesh. Garments are `Human<garment>`. */
 const BASEMESH = 'Human'
+/** What `collapse` calls the merged eyes-and-brows. Matched by DETAIL above. */
+const DETAILMESH = 'HumanDetail'
 
 const scenes = new Map<string, THREE.Group>()
 let clips: THREE.AnimationClip[] = []
@@ -151,14 +153,77 @@ function rebase(base: THREE.Skeleton, other: THREE.Skeleton): THREE.Matrix4 | nu
       if (Math.abs(probe.elements[e]! - d.elements[e]!) > BIND_EPS) return null
     }
   }
+  return scaleAndShift(d) ? d : null
+}
 
-  const e = d.elements
+/**
+ * True if `m` is a positive uniform scale and a translation, and nothing else.
+ *
+ * Both matrices this file derives are that by construction — they come out of a
+ * quantizer, which cannot turn or shear anything — and checking rather than
+ * assuming is what lets both callers leave the normals alone. Anything with a
+ * rotation in it is some other phenomenon and gets refused rather than handled
+ * on a guess.
+ */
+function scaleAndShift(m: THREE.Matrix4): boolean {
+  const e = m.elements
   const s = e[0]!
-  if (!(s > 0)) return null
+  if (!(s > 0)) return false
   // Column-major: 0/5/10 are the diagonal, 1/2/4/6/8/9 the rest of the 3x3.
-  if (Math.abs(e[5]! - s) > BIND_EPS || Math.abs(e[10]! - s) > BIND_EPS) return null
-  for (const off of [1, 2, 4, 6, 8, 9]) if (Math.abs(e[off]!) > BIND_EPS) return null
-  return d
+  if (Math.abs(e[5]! - s) > BIND_EPS || Math.abs(e[10]! - s) > BIND_EPS) return false
+  for (const off of [1, 2, 4, 6, 8, 9]) if (Math.abs(e[off]!) > BIND_EPS) return false
+  return true
+}
+
+/**
+ * The transform that turns a submesh's stored coordinates into metres, or null
+ * if the asset does not admit one.
+ *
+ * gltfpack stores positions as int16 normalized into [-1, 1] — each submesh
+ * scaled to its own longest axis, so a shirt, a shoe and a body are all
+ * nominally the same size — and folds the dequantization into the skin's
+ * inverse bind matrices instead of into the vertices. Skinning therefore comes
+ * out in metres and everything renders correctly, while the `position`
+ * attribute itself holds numbers with no physical meaning.
+ *
+ * That is fatal for one thing in this game. The wound shader reads `position`
+ * directly, because bind-pose coordinates are what welds a cut to the skin it
+ * was opened on, and it is handed capsules in metres by human.ts — a rake
+ * across the chest at y = 1.28. The body's stored y runs -0.76 to 0.76. Every
+ * capsule the game has ever opened on the authored cast has been outside the
+ * mesh's own bounding box, so no villager has ever visibly bled. The
+ * procedural body this cast replaced stored metres and did not have the
+ * problem, which is why the shader was written to assume them.
+ *
+ * The map is recovered from the skeleton rather than guessed. In the bind pose
+ * skinning collapses to `Q = bindMatrixInverse * M_i * A_i * bindMatrix` for
+ * every bone i at once, so evaluating that on a freshly loaded glTF — where
+ * the nodes are still in their rest pose and no mixer has run — gives Q
+ * directly, and its agreement across all thirty-one bones is simultaneously
+ * the proof that rest and bind are the same pose here. Measured spread over
+ * the cast: 2e-7. Anything that disagrees by more returns null and keeps the
+ * coordinates it has.
+ */
+function dequantize(mesh: THREE.SkinnedMesh): THREE.Matrix4 | null {
+  const sk = mesh.skeleton
+  if (sk.bones.length === 0 || sk.bones.length !== sk.boneInverses.length) return null
+  const back = new THREE.Matrix4().copy(mesh.bindMatrix).invert()
+  const q = new THREE.Matrix4()
+  const probe = new THREE.Matrix4()
+  for (let i = 0; i < sk.bones.length; i++) {
+    probe.copy(back)
+      .multiply(sk.bones[i]!.matrixWorld)
+      .multiply(sk.boneInverses[i]!)
+      .multiply(mesh.bindMatrix)
+    if (i === 0) {
+      q.copy(probe)
+      continue
+    }
+    for (let e = 0; e < 16; e++) {
+      if (Math.abs(probe.elements[e]! - q.elements[e]!) > BIND_EPS) return null
+    }
+  }
+  return scaleAndShift(q) ? q : null
 }
 
 /**
@@ -180,9 +245,9 @@ function rebase(base: THREE.Skeleton, other: THREE.Skeleton): THREE.Matrix4 | nu
  * about 1 MB — and it is paid once per glb for every clone.
  *
  * Normals are deliberately untouched. `d` is a uniform scale plus a translation
- * (`rebase` refuses anything else), which leaves every normal exactly where it
- * was, and running them through the same round trip would only cost them a
- * requantization to int8 they have no reason to pay.
+ * — `scaleAndShift` refuses anything else, for both callers — which leaves every
+ * normal exactly where it was, and running them through the same round trip
+ * would only cost them a requantization to int8 they have no reason to pay.
  */
 function bakePositions(geom: THREE.BufferGeometry, d: THREE.Matrix4) {
   const src = geom.getAttribute('position')
@@ -215,9 +280,8 @@ function bakePositions(geom: THREE.BufferGeometry, d: THREE.Matrix4) {
  * therefore reading a different space per submesh — which is precisely what the
  * wound shader does. Afterwards every submesh's coordinates go through the one
  * map `sum_i w_i * M_i * A_base_i`, the body's own, so the frame that shader
- * reads is at least consistent across a character. Whether that is enough to
- * put wounds on clothing correctly has not been confirmed either way; it is a
- * precondition, not a fix, and the perf saving above is the reason this runs.
+ * reads is consistent across a character. It is still not metres, though;
+ * `remetre` runs next and finishes that half.
  *
  * Baking the difference into the vertices fixes both at once, because it is the
  * same difference. Run once per loaded glb, before anything is cloned: the
@@ -227,7 +291,8 @@ function bakePositions(geom: THREE.BufferGeometry, d: THREE.Matrix4) {
  * skeleton and is left alone. That is the correct outcome rather than a failure
  * — it renders exactly as it does today, and only forfeits the saving.
  */
-function unify(scene: THREE.Object3D) {
+/** The scene's skinned meshes, gathered by the node they hang off. */
+function byRig(scene: THREE.Object3D): Map<THREE.Object3D, THREE.SkinnedMesh[]> {
   const rigs = new Map<THREE.Object3D, THREE.SkinnedMesh[]>()
   scene.traverse(o => {
     const m = o as THREE.SkinnedMesh
@@ -236,8 +301,11 @@ function unify(scene: THREE.Object3D) {
     if (!list) rigs.set(m.parent, (list = []))
     list.push(m)
   })
+  return rigs
+}
 
-  for (const meshes of rigs.values()) {
+function unify(scene: THREE.Object3D) {
+  for (const meshes of byRig(scene).values()) {
     if (meshes.length < 2) continue
     // The body is the base, not merely the first one traversed: it is the space
     // the wound coordinates and every hard-coded height in the damage code are
@@ -251,6 +319,105 @@ function unify(scene: THREE.Object3D) {
       bakePositions(m.geometry, d)
       m.bind(base, m.bindMatrix)
     }
+  }
+}
+
+/**
+ * Move a character's vertices out of gltfpack's quantized frame and into
+ * metres, without moving the character.
+ *
+ * `dequantize` explains where the quantized frame comes from and why the wound
+ * shader cannot live with it. Undoing it is a two-sided edit, because the
+ * skeleton is currently carrying the correction: multiply every vertex by `Q`
+ * and divide it back out of the inverse binds, and skinning lands in exactly
+ * the same place while `position` finally means something.
+ *
+ * The divide is not `A_i * Q^-1` in general. Three skins as
+ * `bindMatrixInverse * sum_i w_i (M_i A_i) * bindMatrix * p`, so the `Q` that
+ * reaches the vertices is conjugated by the bind matrix and the compensation
+ * has to be conjugated the same way: `A_i' = A_i * (BM * Q^-1 * BM^-1)`. It
+ * reduces to `A_i * Q^-1` for the identity bind matrix these assets actually
+ * have, but writing the reduced form would be a trap for the first asset that
+ * does not.
+ *
+ * Correcting the inverse binds rather than splitting `bindMatrix` from
+ * `bindMatrixInverse` is what keeps those two each other's inverse, which three
+ * assumes in `getVertexPosition` and therefore in raycasting. The cost is that
+ * every mesh sharing the skeleton has to be baked together and has to agree
+ * about the bind matrix — checked, and the whole rig is skipped if it does not.
+ *
+ * Runs after `unify`, on the shared skeleton it produces, and before anything
+ * is cloned. A rig that fails any check keeps the coordinates it has and
+ * renders exactly as it does today.
+ */
+function remetre(scene: THREE.Object3D) {
+  // `dequantize` reads bone world matrices, and nothing has forced them yet.
+  scene.updateMatrixWorld(true)
+  const done = new Set<THREE.BufferGeometry>()
+  for (const meshes of byRig(scene).values()) {
+    const body = meshes.find(m => m.name === BASEMESH) ?? meshes[0]
+    if (!body) continue
+    const group = meshes.filter(m => m.skeleton === body.skeleton)
+    if (group.some(m => !m.bindMatrix.equals(body.bindMatrix))) continue
+    const q = dequantize(body)
+    if (!q) continue
+
+    const bind = body.bindMatrix
+    const k = new THREE.Matrix4()
+      .copy(bind)
+      .multiply(new THREE.Matrix4().copy(q).invert())
+      .multiply(new THREE.Matrix4().copy(bind).invert())
+    for (const m of group) {
+      if (done.has(m.geometry)) continue
+      done.add(m.geometry)
+      bakePositions(m.geometry, q)
+    }
+    for (const inverse of body.skeleton.boneInverses) inverse.multiply(k)
+  }
+}
+
+/**
+ * Fold each character's submeshes down into two meshes and two materials.
+ *
+ * See layered.ts for the mechanism and the measurements. The policy is here
+ * because it is about what these particular assets are, and it splits three
+ * ways:
+ *
+ * *The solid group* — the body and everything it is wearing that does not
+ * discard — becomes one mesh, and keeps the basemesh's name so that everything
+ * downstream which looks for `Human` still finds the body's skeleton and the
+ * body's coordinate space.
+ *
+ * *The eyes and the brows* become a second, because they alpha-test and want a
+ * threshold the body must not have, and because they are the pair that
+ * `setDetail` switches off at fifteen metres — merged, that is one draw call
+ * saved rather than two, and it stays a clean thing to hide.
+ *
+ * *The hair* is left alone. It is the one submesh that alpha-tests and is never
+ * culled, so folding it into either group would either put a discard on the
+ * whole body or make the detail mesh unhideable.
+ *
+ * The merged brows and eyes stop casting shadows, which is not free but is very
+ * nearly so. Three builds its shadow depth material from the colour material's
+ * `map`, and the merged one has none — its texture is an array the depth shader
+ * knows nothing about — so an alpha-tested brow would go into the shadow map as
+ * the full unclipped strip it is modelled on. Rather than teach the depth pass
+ * about layers for the sake of a 2 mm feature that is inside the head or flat
+ * against a brow ridge, and which is hidden entirely past fifteen metres, they
+ * are taken out of it.
+ */
+function collapse(scene: THREE.Object3D) {
+  for (const meshes of byRig(scene).values()) {
+    const detail = meshes.filter(m => DETAIL.test(m.name))
+    const solid = meshes.filter(
+      m => !DETAIL.test(m.name) && (m.material as THREE.Material).alphaTest === 0,
+    )
+    // Body first: `mergeLayered` takes its terms from the head of the list, and
+    // the body is the mesh whose space and skeleton the merge has to come out in.
+    solid.sort((a, b) => (a.name === BASEMESH ? -1 : b.name === BASEMESH ? 1 : 0))
+    mergeLayered(solid, BASEMESH)
+    const merged = mergeLayered(detail, DETAILMESH)
+    if (merged) merged.castShadow = false
   }
 }
 
@@ -274,8 +441,12 @@ const done = () => {
 for (const name of FILES) {
   loader.load(`models/${name}.glb`, gltf => {
     // Before anything is cloned: the clones share these vertex buffers, so the
-    // rebake is paid once per character rather than once per villager.
+    // rebake and the merge are paid once per character rather than once per
+    // villager. `collapse` needs `unify` to have run — it can only merge
+    // submeshes that already agree on a skeleton and a coordinate space.
     unify(gltf.scene)
+    remetre(gltf.scene)
+    collapse(gltf.scene)
     scenes.set(name, gltf.scene)
     done()
   }, undefined, err => {
@@ -321,7 +492,9 @@ export function makeBody(name: string): Body | null {
     if ((o as THREE.Bone).isBone) bones.set(o.name, o as THREE.Bone)
     const m = o as THREE.SkinnedMesh
     if (!m.isSkinnedMesh) return
-    m.castShadow = true
+    // Everything but the merged brows and eyes, which have no `map` for three
+    // to build a depth material's discard out of. See `collapse`.
+    m.castShadow = m.name !== DETAILMESH
     m.receiveShadow = true
     // Cull against a pose-independent sphere rather than not culling at all.
     //
@@ -340,6 +513,12 @@ export function makeBody(name: string): Body | null {
     m.boundingSphere = new THREE.Sphere(new THREE.Vector3(0, 0.9, 0), 2.2)
     m.frustumCulled = true
     const mat = (m.material as THREE.MeshStandardMaterial).clone()
+    // `Material.copy` does not carry `onBeforeCompile`, so a merged mesh's
+    // clone arrives knowing nothing about the texture array its vertices index
+    // into. Re-injected here, and before human.ts adds the wound shading —
+    // that chains onto whatever it finds, and the diffuse sample has to be
+    // underneath the blood rather than over it.
+    applyLayers(mat, m.geometry)
     m.material = mat
     meshes.push(m)
     if (DETAIL.test(m.name)) detail.push(m)
