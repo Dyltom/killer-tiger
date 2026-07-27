@@ -81,8 +81,10 @@ export interface Body {
  *
  * The eyes and the eyebrows are 172 and 192 triangles, which is nothing, and —
  * merged together by `collapse` below — one of the three draw calls a character
- * costs, which is not. Draw call submission is the dominant term in this frame,
- * measured at about 19 µs each in Safari against 0.7 ms per million triangles.
+ * costs, which is not: the triangles are free but the call is not. Hiding the
+ * forty merged bodies at wave twelve removed 37 calls and 0.41 ms of CPU, so
+ * roughly 11 µs a call, and that figure carries 550k triangles of skinning with
+ * it. The detail meshes carry almost none, so they are close to pure call cost.
  *
  * Fifteen metres because that is comfortably past the range at which an eye is
  * more than one pixel: the head is about 22 cm, so at 15 m it spans roughly 30
@@ -377,7 +379,8 @@ function remetre(scene: THREE.Object3D) {
 }
 
 /**
- * Fold each character's submeshes down into two meshes and two materials.
+ * Fold each character's submeshes into two merged meshes, plus the hair, which
+ * is left alone — three draw calls a character where there were six or seven.
  *
  * See layered.ts for the mechanism and the measurements. The policy is here
  * because it is about what these particular assets are, and it splits three

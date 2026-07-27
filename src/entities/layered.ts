@@ -33,11 +33,17 @@
  * mip independently, which makes the merge free of visual consequence rather
  * than a trade.
  *
- * Roughness and the alpha-test threshold differ per submesh too (skin 0.62,
- * a suit 0.86, boots 0.60), so they ride along as vertex attributes in the same
- * `vec3` as the layer index. Attributes rather than a uniform array on purpose:
- * a `uniform float[N]` would be one more block to re-upload per material, which
- * is the cost this file exists to remove.
+ * Roughness, the alpha-test threshold and the specular intensity differ per
+ * submesh too (skin 0.62/0.7, a suit 0.86/0.6, boots 0.60/0.9), so they ride
+ * along as vertex attributes in the same `vec4` as the layer index. Attributes
+ * rather than a uniform array on purpose: a `uniform float[N]` would be one more
+ * block to re-upload per material, which is the cost this file exists to remove.
+ *
+ * Specular intensity is here because leaving it out was a visible loss rather
+ * than a theoretical one. It arrives from `KHR_materials_specular` — which is
+ * also why the whole cast loads as `MeshPhysicalMaterial` — and the merge takes
+ * every uniform from the first mesh in the group. The eyes want 0.9 and the
+ * eyebrows 0.4, and the brows sort first, so the merged eyes came out matte.
  */
 import * as THREE from 'three'
 
@@ -128,6 +134,21 @@ function buildArray(maps: THREE.Texture[]): THREE.DataArrayTexture {
 }
 
 /**
+ * The three `KHR_materials_specular` properties, readable off a material that
+ * may not have them.
+ *
+ * `mergeable` accepts a plain `MeshStandardMaterial`, which carries none of
+ * these; the defaults are the values the physical shader falls back to when
+ * `USE_SPECULAR` is not defined, so a Standard group merges to the same picture
+ * it had before.
+ */
+const WHITE = new THREE.Color(1, 1, 1)
+type Spec = Partial<THREE.MeshPhysicalMaterial>
+const ior = (m: THREE.Material) => (m as Spec).ior ?? 1.5
+const tint = (m: THREE.Material) => (m as Spec).specularColor ?? WHITE
+const gloss = (m: THREE.Material) => (m as Spec).specularIntensity ?? 1
+
+/**
  * True if `m` can be folded in with the rest — same rig, same bind, and a
  * material that differs from its neighbours in nothing but its diffuse map.
  *
@@ -146,6 +167,10 @@ function mergeable(m: THREE.SkinnedMesh, first: THREE.SkinnedMesh): boolean {
   if (!m.scale.equals(first.scale)) return false
   if (mat.side !== ref.side || mat.transparent !== ref.transparent) return false
   if (mat.vertexColors || mat.metalness !== ref.metalness) return false
+  // Specular *intensity* is per-layer below; the tint and the IOR that go with
+  // it are not, so a group that disagreed on those would have to be refused.
+  // Nothing in the cast does — every material is a white tint at IOR 1.5.
+  if (ior(mat) !== ior(ref) || !tint(mat).equals(tint(ref))) return false
   if (mat.normalMap || mat.roughnessMap || mat.metalnessMap || mat.aoMap ||
       mat.alphaMap || mat.emissiveMap || mat.lightMap || mat.displacementMap) return false
   if (!mat.color.equals(ref.color)) return false
@@ -191,7 +216,7 @@ export function mergeLayered(
   const out = new THREE.BufferGeometry()
   const cursor = { v: 0, i: 0 }
   const index = new Uint32Array(indices)
-  const layer = new Float32Array(verts * 3)
+  const layer = new Float32Array(verts * 4)
   const dst = new Map<string, Float32Array>()
   for (const [attr, size] of ATTRS) dst.set(attr, new Float32Array(verts * size))
 
@@ -221,10 +246,11 @@ export function mergeLayered(
       }
     }
     for (let i = 0; i < n; i++) {
-      const o = (cursor.v + i) * 3
+      const o = (cursor.v + i) * 4
       layer[o] = li
       layer[o + 1] = mat.roughness
       layer[o + 2] = mat.alphaTest
+      layer[o + 3] = gloss(mat)
     }
 
     const idx = g.index
@@ -237,7 +263,7 @@ export function mergeLayered(
   for (const [attr, size] of ATTRS) {
     out.setAttribute(attr, new THREE.BufferAttribute(dst.get(attr)!, size))
   }
-  out.setAttribute('aLayer', new THREE.BufferAttribute(layer, 3))
+  out.setAttribute('aLayer', new THREE.BufferAttribute(layer, 4))
   out.setIndex(new THREE.BufferAttribute(index, 1))
 
   const mat = (first.material as THREE.MeshStandardMaterial).clone()
@@ -248,6 +274,10 @@ export function mergeLayered(
   // it — `soak` scales every material's roughness by the same factor as a man
   // bleeds out, and scaling one now covers the whole body.
   mat.roughness = 1
+  // Same treatment, same reason: the shader multiplies the uniform by the
+  // per-layer value, so one is the identity and anything driving the material as
+  // a whole still works.
+  if ('specularIntensity' in mat) (mat as THREE.MeshPhysicalMaterial).specularIntensity = 1
   // Kept only so three's shadow depth material gets the same discard the colour
   // pass does. The threshold that actually runs is the per-layer one, and the
   // lowest of them is the one that keeps the most.
@@ -297,8 +327,8 @@ export function applyLayers(mat: THREE.MeshStandardMaterial, geom: THREE.BufferG
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>', /* glsl */ `
         #include <common>
-        attribute vec3 aLayer;
-        flat varying vec3 vLayer;
+        attribute vec4 aLayer;
+        flat varying vec4 vLayer;
         varying vec2 vLayerUv;
       `)
       // `uv` is declared unconditionally by three's vertex prefix, so this does
@@ -315,7 +345,7 @@ export function applyLayers(mat: THREE.MeshStandardMaterial, geom: THREE.BufferG
         #include <common>
         precision highp sampler2DArray;
         uniform sampler2DArray tLayers;
-        flat varying vec3 vLayer;
+        flat varying vec4 vLayer;
         varying vec2 vLayerUv;
       `)
       // Replacing the include rather than appending to it: without a `map` there
@@ -329,6 +359,25 @@ export function applyLayers(mat: THREE.MeshStandardMaterial, geom: THREE.BufferG
         '#include <roughnessmap_fragment>',
         '#include <roughnessmap_fragment>\nroughnessFactor *= vLayer.y;',
       )
+      // Re-derived rather than patched into the chunk: `specularIntensityFactor`
+      // is local to it, and the two lines it feeds are wrapped in four nested
+      // ifdefs. These are those lines with the uniform swapped for the attribute,
+      // and `USE_SPECULAR` is exactly the condition under which the chunk ran
+      // them, so a merged group that arrived as plain Standard skips this and
+      // keeps three's fixed 0.04.
+      .replace('#include <lights_physical_fragment>', /* glsl */ `
+        #include <lights_physical_fragment>
+        #ifdef USE_SPECULAR
+          float layerSpec = specularIntensity * vLayer.w;
+          material.specularF90 = mix( layerSpec, 1.0, metalnessFactor );
+          material.specularColor = min(
+            pow2( ( material.ior - 1.0 ) / ( material.ior + 1.0 ) ) * specularColor,
+            vec3( 1.0 )
+          ) * layerSpec;
+          material.specularColorBlended =
+            mix( material.specularColor, diffuseColor.rgb, metalnessFactor );
+        #endif
+      `)
 
     if (info.cuts) {
       shader.fragmentShader = shader.fragmentShader.replace(
