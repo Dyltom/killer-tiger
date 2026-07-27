@@ -96,9 +96,163 @@ export interface Body {
 const DETAIL = /eyebrow|low-poly/i
 const DETAIL_RANGE = 15
 
+/** MakeHuman's name for the basemesh. Garments are `Human<garment>`. */
+const BASEMESH = 'Human'
+
 const scenes = new Map<string, THREE.Group>()
 let clips: THREE.AnimationClip[] = []
 let ready = false
+
+/**
+ * How far two inverse-bind matrices may drift and still count as the same.
+ *
+ * The matrices being compared are built from the same rest pose by the same
+ * exporter and stored as float32, so agreement is to about 1e-7 and the
+ * disagreement this guards against is structural — a submesh bound to a
+ * genuinely different pose, which would be off by whole centimetres.
+ */
+const BIND_EPS = 1e-4
+
+/**
+ * The one matrix by which `other` disagrees with `base` about the bind pose, or
+ * null if the disagreement is not a single scale-and-offset.
+ *
+ * Skinning sends a vertex to `sum_i w_i * M_i * A_i * p`, where `M_i` is bone
+ * i's world matrix and `A_i` its inverse bind. Rebinding a mesh from inverses
+ * `A` to inverses `B` therefore needs a `p'` with `B_i p' = A_i p` for every
+ * bone at once, which has the solution `p' = B_i^-1 A_i p` — useful only if
+ * `B_i^-1 A_i` is the *same* matrix for every i. Then it is a plain change of
+ * coordinates on the mesh and the skinning result is unchanged. Verified
+ * numerically against the loaded assets, not just argued: the skinned position
+ * of a sample vertex before and after comes out bit-identical.
+ *
+ * It is the same matrix here, and the reason is mundane. These glbs are meshopt
+ * -quantized, so every submesh's positions are stored as int16 normalized into
+ * [-1, 1] and the dequantization — a scale and an offset, nothing else — is
+ * folded into that submesh's inverse binds rather than applied to the vertices.
+ * A shirt therefore lives at 0.44x in a frame of its own. That is a constant per
+ * submesh by construction, which is exactly the condition. Checked per bone.
+ *
+ * Also checked: that the 3x3 really is a positive multiple of the identity.
+ * Dequantization cannot produce anything else, and it is what lets the caller
+ * leave the normals alone — a uniform scale does not turn a normal. Anything
+ * with a rotation or a shear in it is some other phenomenon and is refused
+ * rather than handled on a guess.
+ */
+function rebase(base: THREE.Skeleton, other: THREE.Skeleton): THREE.Matrix4 | null {
+  const inv = base.boneInverses
+  const own = other.boneInverses
+  if (inv.length !== own.length || inv.length === 0) return null
+  const d = new THREE.Matrix4().copy(inv[0]!).invert().multiply(own[0]!)
+  const probe = new THREE.Matrix4()
+  for (let i = 1; i < inv.length; i++) {
+    probe.copy(inv[i]!).invert().multiply(own[i]!)
+    for (let e = 0; e < 16; e++) {
+      if (Math.abs(probe.elements[e]! - d.elements[e]!) > BIND_EPS) return null
+    }
+  }
+
+  const e = d.elements
+  const s = e[0]!
+  if (!(s > 0)) return null
+  // Column-major: 0/5/10 are the diagonal, 1/2/4/6/8/9 the rest of the 3x3.
+  if (Math.abs(e[5]! - s) > BIND_EPS || Math.abs(e[10]! - s) > BIND_EPS) return null
+  for (const off of [1, 2, 4, 6, 8, 9]) if (Math.abs(e[off]!) > BIND_EPS) return null
+  return d
+}
+
+/**
+ * Rewrite a geometry's positions through `d`, as float.
+ *
+ * Not `BufferGeometry.applyMatrix4`, and the difference is the whole reason this
+ * function exists. That method writes the transformed values back through
+ * `BufferAttribute.setXYZ`, which for a *normalized integer* attribute
+ * re-quantizes — and clamps. These positions are int16 normalized into [-1, 1]
+ * and the dequantizing transform takes them well outside it (a shoe's vertices
+ * land near -2.2), so every one of them saturated at -1 and the character came
+ * apart into metre-long shards radiating from the origin. Silently, with no
+ * warning and no error: the geometry is still a valid mesh, just not that mesh.
+ *
+ * So the attribute is replaced with an un-quantized float32 one rather than
+ * written back in place. `fromBufferAttribute` reads through the normalization,
+ * so the values going in are the real ones. The cost is the point of
+ * quantization given back — roughly six bytes a vertex over the whole cast,
+ * about 1 MB — and it is paid once per glb for every clone.
+ *
+ * Normals are deliberately untouched. `d` is a uniform scale plus a translation
+ * (`rebase` refuses anything else), which leaves every normal exactly where it
+ * was, and running them through the same round trip would only cost them a
+ * requantization to int8 they have no reason to pay.
+ */
+function bakePositions(geom: THREE.BufferGeometry, d: THREE.Matrix4) {
+  const src = geom.getAttribute('position')
+  const out = new Float32Array(src.count * 3)
+  const v = new THREE.Vector3()
+  for (let i = 0; i < src.count; i++) {
+    v.fromBufferAttribute(src, i).applyMatrix4(d).toArray(out, i * 3)
+  }
+  geom.setAttribute('position', new THREE.BufferAttribute(out, 3))
+  geom.boundingBox = null
+  geom.boundingSphere = null
+}
+
+/**
+ * Put every one of a character's submeshes in the body's coordinate space and
+ * on the body's skeleton.
+ *
+ * Two things come out of the exporter per-submesh that should be per-character.
+ *
+ * *A skeleton each.* Six meshes means six `Skeleton` objects over the same
+ * thirty-one bones, and three updates a skeleton once per frame per object:
+ * thirty-one matrix multiplies and a bone-texture upload, six times over, for
+ * six identical answers. Across forty villagers that was 262 skeletons and 262
+ * texture uploads a frame.
+ *
+ * *A coordinate space each.* Only the body mesh is stored in the frame the rest
+ * of the game calls body space; a shirt is at 0.44x and a pair of boots at
+ * 0.32x, each with its own origin, and the inverse binds undo it during
+ * skinning. Anything that reads the untransformed `position` attribute is
+ * therefore reading a different space per submesh — which is precisely what the
+ * wound shader does. Afterwards every submesh's coordinates go through the one
+ * map `sum_i w_i * M_i * A_base_i`, the body's own, so the frame that shader
+ * reads is at least consistent across a character. Whether that is enough to
+ * put wounds on clothing correctly has not been confirmed either way; it is a
+ * precondition, not a fix, and the perf saving above is the reason this runs.
+ *
+ * Baking the difference into the vertices fixes both at once, because it is the
+ * same difference. Run once per loaded glb, before anything is cloned: the
+ * clones share these buffers, so the cost is paid once for the whole cast.
+ *
+ * A submesh whose disagreement is not a single scale-and-offset keeps its own
+ * skeleton and is left alone. That is the correct outcome rather than a failure
+ * — it renders exactly as it does today, and only forfeits the saving.
+ */
+function unify(scene: THREE.Object3D) {
+  const rigs = new Map<THREE.Object3D, THREE.SkinnedMesh[]>()
+  scene.traverse(o => {
+    const m = o as THREE.SkinnedMesh
+    if (!m.isSkinnedMesh || !m.parent) return
+    let list = rigs.get(m.parent)
+    if (!list) rigs.set(m.parent, (list = []))
+    list.push(m)
+  })
+
+  for (const meshes of rigs.values()) {
+    if (meshes.length < 2) continue
+    // The body is the base, not merely the first one traversed: it is the space
+    // the wound coordinates and every hard-coded height in the damage code are
+    // written in, so it is the one space that must come out unchanged. MakeHuman
+    // names the basemesh `Human` and every garment `Human<something>`.
+    const base = (meshes.find(m => m.name === BASEMESH) ?? meshes[0]!).skeleton
+    for (const m of meshes) {
+      if (m.skeleton === base) continue
+      const d = rebase(base, m.skeleton)
+      if (!d) continue
+      bakePositions(m.geometry, d)
+      m.bind(base, m.bindMatrix)
+    }
+  }
+}
 
 /**
  * Kick the load off at import time.
@@ -119,6 +273,9 @@ const done = () => {
 
 for (const name of FILES) {
   loader.load(`models/${name}.glb`, gltf => {
+    // Before anything is cloned: the clones share these vertex buffers, so the
+    // rebake is paid once per character rather than once per villager.
+    unify(gltf.scene)
     scenes.set(name, gltf.scene)
     done()
   }, undefined, err => {
@@ -188,6 +345,15 @@ export function makeBody(name: string): Body | null {
     if (DETAIL.test(m.name)) detail.push(m)
     materials.push(mat)
   })
+
+  // Re-share the skeleton on the clone. `unify` put the source's submeshes on
+  // one Skeleton, but SkeletonUtils.clone calls `skeleton.clone()` per skinned
+  // mesh regardless, so a freshly cloned body arrives holding six copies of it
+  // again. They are equivalent copies — same bones, same inverses — so the
+  // sharing is restored by assignment, and the geometry is already in the one
+  // space from the source rebake.
+  const shared = (meshes.find(m => m.name === BASEMESH) ?? meshes[0])?.skeleton
+  if (shared) for (const m of meshes) if (m.skeleton !== shared) m.bind(shared, m.bindMatrix)
 
   const bone = (n: string) => bones.get(n)!
   const arm = (s: 'Left' | 'Right') => ({
