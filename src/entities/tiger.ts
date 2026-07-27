@@ -1039,8 +1039,13 @@ export class Tiger {
   private airBlend = 0
   /** Seconds off the ground. Gates airBlend, so a lip in the dirt is not a leap. */
   private airTime = 0
-  /** Which half-stride last fired a footstep. */
-  private lastBeat = -1
+  /**
+   * Where each foot's stride clock was last frame, so a plant is the wrap the
+   * clock actually makes rather than a beat counted off the left foot. -1 while
+   * not striding.
+   */
+  private prevFootL = -1
+  private prevFootR = -1
   /** The bound, resolved once per frame and read by both the paws and the camera. */
   private bobY = 0
   private bobPitch = 0
@@ -1069,6 +1074,19 @@ export class Tiger {
   private camShake = 0
   private shakeTime = 0
   private recoilY = 0
+  /**
+   * The roar, 0..1 and parked at 1. A player action deserves a body: without
+   * this the roar was a sound effect over a perfectly still animal. The head
+   * tips back and the chest swells, both on the one quartic hump every other
+   * transient here uses, so it starts and ends at rest.
+   */
+  private roarT = 1
+  /**
+   * The collapse, 0 alive and rising to 1 dead. Damped rather than switched so
+   * the eye goes down like a body folding, not like a camera cut; see
+   * updateBound and updateCamera.
+   */
+  private deathFall = 0
   /** Counts down while a connecting blow holds the swipe still. */
   private hitStop = 0
   /** Kick along the look axis on contact — the arm stopping against a body. */
@@ -1098,6 +1116,8 @@ export class Tiger {
   private pawState: PawState = 'idle'
   private pawT = 0
   private nextPawIsLeft = true
+  /** An attack clicked while another was still playing; fired when it ends. */
+  private queuedAttack: AttackKind | null = null
   private eyeY = TIGER.eyeHeight
   private clawMat!: THREE.MeshStandardMaterial
 
@@ -1503,7 +1523,10 @@ export class Tiger {
     this.chest.rotation.x = Math.sin(w * 2 + 0.9) * 0.030 * amp
     // Ribs. Barely visible, and that is the point — a chest that does not move at
     // all while you stand still is the one thing here the eye checks for.
-    const b = 1 + Math.sin(this.breath) * 0.012 * (1 - amp * 0.6)
+    // The roar fills them: the same hump the camera pitch rides, so the swell
+    // and the thrown-back head are one motion.
+    const rh = this.roarT * (1 - this.roarT)
+    const b = 1 + Math.sin(this.breath) * 0.012 * (1 - amp * 0.6) + 16 * rh * rh * 0.04
     this.chest.scale.set(b, b, 1)
   }
 
@@ -1663,6 +1686,13 @@ export class Tiger {
     this.camShake = Math.min(1.4, this.camShake + amount)
   }
 
+  /** Throw the head back and swell the chest. The game decides when; see game.ts. */
+  roar() {
+    this.roarT = 0
+    // A breath of tremor, through the same layered-sine shake a hit uses.
+    this.shake(0.22)
+  }
+
   startFrenzy(): boolean {
     if (this.rage < TIGER.maxRage) return false
     this.rage = 0
@@ -1729,6 +1759,9 @@ export class Tiger {
     this.hitStop = Math.max(0, this.hitStop - dt)
     this.impact = damp(this.impact, 0, 11, dt)
     this.fovKick = damp(this.fovKick, 0, 8, dt)
+    this.roarT = Math.min(1, this.roarT + dt / 0.7)
+    // Rate 5, not the eye spring's 12: a body folds over about half a second.
+    this.deathFall = damp(this.deathFall, this.health <= 0 ? 1 : 0, 5, dt)
 
     // The landing spring. Critically damped, and integrated semi-implicitly so it
     // cannot gain energy at a long frame: velocity first, then position off the
@@ -1957,18 +1990,44 @@ export class Tiger {
       this.pairPhase = damp(this.pairPhase, 0.5 - bound * 0.34, 6, dt)
     }
 
-    // Footsteps fire on the plant, so the sound is on the frame the paw touches
-    // the ground. The old distance counter drifted out of step with the legs
-    // within a couple of strides of any change of pace.
+    // Footsteps fire on the plant — per foot, off each foot's own clock. A foot
+    // plants when its stride clock wraps (stride() puts the plant at c = 0), so
+    // this watches both clocks for the wrap rather than counting half-phase
+    // beats off the left foot alone. The beat counter was only right at
+    // pairPhase 0.5: in the bound, with the right foot 0.16 behind instead of
+    // half a stride, the second beat of every pair fired while both feet were
+    // in the air. The half-stride guard is what makes a wrap a wrap — pairPhase
+    // easing during the swing can move the right clock a few hundredths either
+    // way, and that must not read as a footfall.
     const striding = this.grounded && this.gaitAmp > 0.25
-    const beat = Math.floor(this.gaitPhase * 2)
-    if (striding && beat !== this.lastBeat && this.lastBeat >= 0) this.footstepEvent = true
-    this.lastBeat = striding ? beat : -1
+    const cL = this.gaitPhase - Math.floor(this.gaitPhase)
+    const rp = this.gaitPhase + this.pairPhase
+    const cR = rp - Math.floor(rp)
+    if (striding) {
+      if (this.prevFootL >= 0 && cL < this.prevFootL - 0.5) this.footstepEvent = true
+      if (this.prevFootR >= 0 && cR < this.prevFootR - 0.5) this.footstepEvent = true
+      this.prevFootL = cL
+      this.prevFootR = cR
+    } else {
+      this.prevFootL = this.prevFootR = -1
+    }
   }
 
   private updateActions(input: Input) {
-    if (input.clickedPrimary() && this.canClaw) this.startAttack('claw')
-    else if (input.clickedSecondary() && this.canBite) this.startAttack('bite')
+    // Queued rather than started, because a swing can only begin from the gait:
+    // every wind-up blends out of gaitPose, so an attack started while another
+    // was still playing teleported the paws from wherever that animation had
+    // them — a claw clicked mid-bite snapped both feet from the clamp at
+    // head height back onto the ground in one frame. The click is never
+    // dropped; it waits out the rest of the current swing, which is at most
+    // 0.42 s and usually far less.
+    if (input.clickedPrimary() && this.canClaw) this.queuedAttack = 'claw'
+    else if (input.clickedSecondary() && this.canBite) this.queuedAttack = 'bite'
+    if (this.queuedAttack !== null && this.pawState === 'idle') {
+      // The cooldown that admitted the click can only have run down since.
+      this.startAttack(this.queuedAttack)
+      this.queuedAttack = null
+    }
   }
 
   private updateViewmodel(dt: number) {
@@ -2079,7 +2138,16 @@ export class Tiger {
         poseP.lerp(keyP, e)
         poseR.lerp(keyR, e)
       } else if (t < 0.74) {
-        const e = smoothstep((t - 0.52) / 0.22)
+        // Carry-through, as an ease-out rather than a smoothstep. The drive is
+        // built to arrive at the contact at its fastest, and a smoothstep here
+        // starts from rest — so on a whiff, with no hit-stop to hide it, the
+        // paw stopped dead in mid-air at full extension, which reads as
+        // striking something that is not there. `1 - (1-u)^2` leaves the
+        // contact with a normalized slope of 2, the same slope u^2 arrives
+        // with, and still comes to rest at the end where the hand-back to the
+        // gait starts at rest.
+        const u = (t - 0.52) / 0.22
+        const e = 1 - (1 - u) * (1 - u)
         poseP.set(side * 0.10, ground + 1.20, -0.98)
         poseR.set(-0.75, side * 0.55, side * 0.62)
         keyP.set(-side * 0.40, ground + 0.66, -0.72)
@@ -2295,7 +2363,10 @@ export class Tiger {
     // exactly where gaitPhase wraps, so this stays continuous across the wrap.
     this.bobX = Math.sin(w * 0.5) * CAMERA.swayAmp * amp
     this.bobRoll = Math.sin(w * 0.5 + 1.2) * CAMERA.boundRoll * amp
-    this.eyeAbove = this.eyeY + this.bobY + this.recoilY - this.dip
+    // Dying folds the legs: the eye sinks toward shoulder-on-the-dirt height.
+    // deathFall is damped, so this is a slump, not a cut.
+    const fallen = this.deathFall * (this.eyeY - 0.22)
+    this.eyeAbove = this.eyeY + this.bobY + this.recoilY - this.dip - fallen
   }
 
   private updateCamera(dt: number) {
@@ -2326,10 +2397,14 @@ export class Tiger {
       this.eyeGround + this.eyeAbove + shakeY + lunge.y,
       this.pos.z + rz * lateral + lunge.z,
     )
+    // The roar: chin thrown up over the hump of the call, at rest at both ends.
+    const rh = this.roarT * (1 - this.roarT)
+    const roarPitch = 16 * rh * rh * 0.11
     this.camera.rotation.set(
-      this.pitch + bobPitch + shakeY * 0.4 - this.impact * 2.2,
+      this.pitch + bobPitch + shakeY * 0.4 - this.impact * 2.2 + roarPitch
+        - this.deathFall * 0.18,
       this.yaw,
-      bobX * 0.08 + bobRoll + shakeR,
+      bobX * 0.08 + bobRoll + shakeR + this.deathFall * 0.55,
       'YXZ',
     )
 
@@ -2366,6 +2441,9 @@ export class Tiger {
     this.clawMat.color.setHex(CLAW_CLEAN)
     this.clawMat.roughness = CLAW_ROUGH
     this.pawState = 'idle'
+    this.queuedAttack = null
+    this.roarT = 1
+    this.deathFall = 0
     this.gaitPhase = 0
     this.gaitAmp = 0
     this.gaitDuty = DUTY_MAX
@@ -2375,7 +2453,7 @@ export class Tiger {
     this.airTime = 0
     this.airBlend = 0
     this.gripBoost = 1
-    this.lastBeat = -1
+    this.prevFootL = this.prevFootR = -1
     this.bobY = this.bobPitch = this.bobX = this.bobRoll = 0
     this.recoilY = 0
     this.dip = this.dipVel = 0

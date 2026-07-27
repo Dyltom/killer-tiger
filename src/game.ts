@@ -582,6 +582,7 @@ export class Game {
   private roar() {
     if (!this.tiger.canRoar) return
     this.tiger.roarCd = TIGER.roarCooldown
+    this.tiger.roar()
     audio.roar()
     this.tiger.shake(0.5)
     this.particles.dust(this.tiger.pos, 26, 0.5)
