@@ -68,6 +68,15 @@ interface Layered {
   readonly tex: THREE.DataArrayTexture
   /** Whether any layer discards, and so whether the shader needs the branch. */
   readonly cuts: boolean
+  /**
+   * The shadow material for this geometry, or null if nothing in it discards.
+   *
+   * One per geometry rather than per body, and deliberately: unlike the colour
+   * material it holds nothing that varies between two men wearing the same
+   * clothes, so every clone of a character can point at this one object and
+   * three has no uniform block to re-upload between their shadow draws.
+   */
+  readonly depth: THREE.MeshDepthMaterial | null
 }
 
 /**
@@ -278,10 +287,12 @@ export function mergeLayered(
   // per-layer value, so one is the identity and anything driving the material as
   // a whole still works.
   if ('specularIntensity' in mat) (mat as THREE.MeshPhysicalMaterial).specularIntensity = 1
-  // Kept only so three's shadow depth material gets the same discard the colour
-  // pass does. The threshold that actually runs is the per-layer one, and the
-  // lowest of them is the one that keeps the most.
-  mat.alphaTest = cuts ? Math.min(...meshes.map(m => (m.material as THREE.Material).alphaTest)) : 0
+  // Zero because the threshold is per-layer, in `vLayer.z`, and the shadow pass
+  // reads that same attribute through `layerDepth` below rather than through
+  // three's derived depth material. A non-zero value here would only make three
+  // define `USE_ALPHATEST` on a colour shader whose alpha test has already been
+  // replaced.
+  mat.alphaTest = 0
 
   const merged = new THREE.SkinnedMesh(out, mat)
   merged.name = name
@@ -292,10 +303,74 @@ export function mergeLayered(
   merged.castShadow = first.castShadow
   merged.receiveShadow = first.receiveShadow
 
-  registry.set(out, { tex: buildArray(maps), cuts })
+  const tex = buildArray(maps)
+  registry.set(out, { tex, cuts, depth: cuts ? layerDepth(tex) : null })
   for (const m of meshes) parent.remove(m)
   parent.add(merged)
   return merged
+}
+
+/**
+ * The shadow-pass twin of the injection below: sample the array and discard.
+ *
+ * Without this a merged group cannot contain anything that alpha-tests. Three
+ * derives a depth material from the colour one and gives it that material's
+ * `map`, and a merged material has none — its texture is an array the depth
+ * shader knows nothing about — so a merged hairline would go into the shadow
+ * map as the full unclipped shell it is modelled on. That is what used to keep
+ * the hair out of the merge and cost a draw call and a material per villager.
+ *
+ * The colour material's own `alphaTest` is not consulted here for the same
+ * reason it is not consulted there: the threshold is per-layer, and the layer
+ * a fragment belongs to is the only thing that knows it.
+ *
+ * Checked by rendering a body with this material in place of its colour one and
+ * comparing silhouettes: eight angles round the head, not one pixel of
+ * difference either way. The hunter loses ten thousand pixels if the threshold
+ * is forced to 0.99, so the fetch and the UVs are live and not a discard that
+ * never fires, and swapping in a discard-everything depth material moves 3.5%
+ * of a lit frame, so this is the material the shadow pass actually reads.
+ *
+ * What was *not* observed is a visible defect from going without it. Letting
+ * three derive the depth material instead — the unclipped shell — changed no
+ * pixels at all at any camera tried, down to 0.8 m from the face. At a 2048 map
+ * with `SHADOW.radius` of PCF over it, a few millimetres of fringe do not
+ * survive. So the honest claim is that this is exactly right for free, not that
+ * it rescued a shadow anyone would have seen.
+ */
+function layerDepth(tex: THREE.DataArrayTexture): THREE.MeshDepthMaterial {
+  const depth = new THREE.MeshDepthMaterial({ depthPacking: THREE.RGBADepthPacking })
+  depth.onBeforeCompile = shader => {
+    shader.uniforms.tLayers = { value: tex }
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', /* glsl */ `
+        #include <common>
+        attribute vec4 aLayer;
+        flat varying vec4 vLayer;
+        varying vec2 vLayerUv;
+      `)
+      .replace('#include <begin_vertex>', /* glsl */ `
+        #include <begin_vertex>
+        vLayer = aLayer;
+        vLayerUv = uv;
+      `)
+    shader.fragmentShader = shader.fragmentShader
+      .replace('#include <common>', /* glsl */ `
+        #include <common>
+        precision highp sampler2DArray;
+        uniform sampler2DArray tLayers;
+        flat varying vec4 vLayer;
+        varying vec2 vLayerUv;
+      `)
+      // The `map_fragment` above this leaves `diffuseColor` at one, there being
+      // no map, so the alpha the test wants has to come from the array here.
+      .replace(
+        '#include <alphatest_fragment>',
+        'if ( texture( tLayers, vec3( vLayerUv, vLayer.x ) ).a < vLayer.z ) discard;',
+      )
+  }
+  depth.customProgramCacheKey = () => 'layers-depth'
+  return depth
 }
 
 /**
@@ -391,4 +466,16 @@ export function applyLayers(mat: THREE.MeshStandardMaterial, geom: THREE.BufferG
   // agree on every parameter three hashes and be handed each other's program.
   const prevKey = mat.customProgramCacheKey.bind(mat)
   mat.customProgramCacheKey = () => `${prevKey()}|layers`
+}
+
+/**
+ * Point a merged mesh's shadow at `layerDepth`. A no-op on anything that was
+ * not merged, or merged out of parts none of which discard.
+ *
+ * Unlike `applyLayers` this is per-mesh rather than per-material, and what it
+ * hands over is shared by every clone rather than cloned with them.
+ */
+export function applyLayerShadow(mesh: THREE.Mesh) {
+  const depth = registry.get(mesh.geometry)?.depth
+  if (depth) mesh.customDepthMaterial = depth
 }

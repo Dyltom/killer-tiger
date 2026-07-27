@@ -28,7 +28,7 @@ import { MeshoptDecoder } from 'three/examples/jsm/libs/meshopt_decoder.module.j
 import { clone as cloneSkinned } from 'three/examples/jsm/utils/SkeletonUtils.js'
 import { clamp } from '../engine/rng'
 import { loadingManager } from '../world/materials'
-import { applyLayers, mergeLayered } from './layered'
+import { applyLayers, applyLayerShadow, mergeLayered } from './layered'
 
 /** Villager bodies, picked round-robin by slot so a crowd is not one man. */
 export const VILLAGERS = ['villager_a', 'villager_b', 'villager_elder', 'villager_woman'] as const
@@ -379,46 +379,45 @@ function remetre(scene: THREE.Object3D) {
 }
 
 /**
- * Fold each character's submeshes into two merged meshes, plus the hair, which
- * is left alone — three draw calls a character where there were six or seven.
+ * Fold each character's submeshes into two merged meshes — two draw calls and
+ * two materials a character, where the export arrives with six or seven of each.
  *
  * See layered.ts for the mechanism and the measurements. The policy is here
- * because it is about what these particular assets are, and it splits three
- * ways:
+ * because it is about what these particular assets are, and it splits in two:
  *
- * *The solid group* — the body and everything it is wearing that does not
- * discard — becomes one mesh, and keeps the basemesh's name so that everything
- * downstream which looks for `Human` still finds the body's skeleton and the
- * body's coordinate space.
+ * *The body* — the skin, everything it is wearing, and the hair — becomes one
+ * mesh, and keeps the basemesh's name so that everything downstream which looks
+ * for `Human` still finds the body's skeleton and the body's coordinate space.
  *
- * *The eyes and the brows* become a second, because they alpha-test and want a
- * threshold the body must not have, and because they are the pair that
- * `setDetail` switches off at fifteen metres — merged, that is one draw call
- * saved rather than two, and it stays a clean thing to hide.
+ * *The eyes and the brows* become a second, because they are the pair that
+ * `setDetail` switches off at fifteen metres and so cannot be in with anything
+ * that has to stay. Merged, that is one draw call saved rather than two, and it
+ * stays a clean thing to hide.
  *
- * *The hair* is left alone. It is the one submesh that alpha-tests and is never
- * culled, so folding it into either group would either put a discard on the
- * whole body or make the detail mesh unhideable.
+ * The hair used to be a third, left out because it alpha-tests and the shadow
+ * pass could not follow it into the merge. `layerDepth` in layered.ts fixes
+ * that, and the hair moving into the body group is worth more than the call it
+ * saves. Measured over the same frozen frame at wave twelve, forty bodies with
+ * thirty of them on screen: 319 draw calls and 8.8 ms of CPU before, 287 and
+ * 6.4 ms after, for the same 1,174,478 triangles. The time to a GPU sync did
+ * not move, so the two milliseconds were being spent submitting rather than
+ * drawing — which matches the earlier ablation, where forty *shared* hair
+ * materials cost the same as no hair at all and forty distinct plain ones cost
+ * the same as the real thing. It is the per-material uniform upload.
  *
- * The merged brows and eyes stop casting shadows, which is not free but is very
- * nearly so. Three builds its shadow depth material from the colour material's
- * `map`, and the merged one has none — its texture is an array the depth shader
- * knows nothing about — so an alpha-tested brow would go into the shadow map as
- * the full unclipped strip it is modelled on. Rather than teach the depth pass
- * about layers for the sake of a 2 mm feature that is inside the head or flat
- * against a brow ridge, and which is hidden entirely past fifteen metres, they
- * are taken out of it.
+ * The merged brows and eyes still do not cast shadows. That is now a choice
+ * rather than a limitation — `layerDepth` could carry them — but 2 mm of hair
+ * that sits inside the head or flat against a brow ridge, and is hidden past
+ * fifteen metres anyway, does not earn forty more draws in the shadow pass.
  */
 function collapse(scene: THREE.Object3D) {
   for (const meshes of byRig(scene).values()) {
     const detail = meshes.filter(m => DETAIL.test(m.name))
-    const solid = meshes.filter(
-      m => !DETAIL.test(m.name) && (m.material as THREE.Material).alphaTest === 0,
-    )
+    const body = meshes.filter(m => !DETAIL.test(m.name))
     // Body first: `mergeLayered` takes its terms from the head of the list, and
     // the body is the mesh whose space and skeleton the merge has to come out in.
-    solid.sort((a, b) => (a.name === BASEMESH ? -1 : b.name === BASEMESH ? 1 : 0))
-    mergeLayered(solid, BASEMESH)
+    body.sort((a, b) => (a.name === BASEMESH ? -1 : b.name === BASEMESH ? 1 : 0))
+    mergeLayered(body, BASEMESH)
     const merged = mergeLayered(detail, DETAILMESH)
     if (merged) merged.castShadow = false
   }
@@ -522,6 +521,9 @@ export function makeBody(name: string): Body | null {
     // that chains onto whatever it finds, and the diffuse sample has to be
     // underneath the blood rather than over it.
     applyLayers(mat, m.geometry)
+    // Not cloned with the material, because nothing in it varies per body. See
+    // `layerDepth`: this is what lets the alpha-tested hair live in the merge.
+    applyLayerShadow(m)
     m.material = mat
     meshes.push(m)
     if (DETAIL.test(m.name)) detail.push(m)
