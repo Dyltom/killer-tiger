@@ -862,6 +862,10 @@ export class Human {
     this.pendingShout = false
     this.bleedPulse = false
     this.poolPulse = false
+    // Eyes and eyebrows are two of this body's six draw calls, and the camera
+    // rides the tiger, so the distance the AI already works in is the one that
+    // decides whether they are worth submitting. See DETAIL in body.ts.
+    this.avatar?.setDetail(this.group.position.distanceTo(tigerPos))
     // The hit tell used to be an emissive of 0.7 red over the whole body for a
     // third of a second, which lit a man from the inside: at night he was the
     // brightest object in the village, and by day he flushed scarlet head to

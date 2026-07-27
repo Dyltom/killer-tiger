@@ -127,9 +127,14 @@ the entire cast.
 `gltf-transform optimize` with simplification and meshopt. Together: 8.5 MB → 2.2 MB,
 and `villager_a` from 38,774 to 16,809 triangles with no visible difference.
 
-The frame is fill-bound at ~2.9 ms/megapixel, so none of this buys frame time —
-it buys download and VRAM. Don't reach for more aggressive simplification hoping
-for FPS.
+None of this buys frame time — it buys download and VRAM. Don't reach for more
+aggressive simplification hoping for FPS: the frame is bound on draw call
+submission (~14 µs a call, measured in-game), not on triangles. What *would* buy
+frame time here is fewer meshes per character. Each one is six draws — body, top,
+trousers, shoes, hair, eyes — and at wave twelve that is the largest single
+bucket of draw calls in the game. Merging the opaque three into one via a texture
+atlas is the open lever; the runtime already distance-culls the eyes and brows
+(see `DETAIL` in `src/entities/body.ts`).
 
 Loading the result needs the meshopt decoder:
 

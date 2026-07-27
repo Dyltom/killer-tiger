@@ -66,7 +66,35 @@ export interface Body {
   readonly mixer: THREE.AnimationMixer
   /** This body's height over the height the damage code assumes. */
   readonly scale: number
+  /**
+   * Show only the detail this body is close enough to be worth.
+   *
+   * `d` is metres from the camera. See DETAIL and the note above it — this is
+   * two draw calls a head, and at wave twelve there are forty heads.
+   */
+  setDetail(d: number): void
 }
+
+/**
+ * Meshes that stop being worth a draw call once the body is a few metres away.
+ *
+ * The eyes and the eyebrows are 172 and 192 triangles, which is nothing, and
+ * two of the six draw calls a character costs, which is not. Draw call
+ * submission is the dominant term in this frame — measured at about 5.6 µs
+ * each in Safari, against 0.7 ms per million triangles — so those two meshes
+ * are a third of the crowd's cost for two per cent of its geometry.
+ *
+ * Fifteen metres because that is comfortably past the range at which an eye is
+ * more than one pixel: the head is about 22 cm, so at 15 m it spans roughly 30
+ * px of a 1920-wide frame and an iris is under two. Everything the player is
+ * actually looking at while mauling somebody is inside 5 m and keeps its face.
+ *
+ * The hair is deliberately not on this list even though it is 5,352 triangles.
+ * It is a silhouette, and a villager who goes bald at fifteen metres is the
+ * kind of pop that is far more visible than the thing it saves.
+ */
+const DETAIL = /eyebrow|low-poly/i
+const DETAIL_RANGE = 15
 
 const scenes = new Map<string, THREE.Group>()
 let clips: THREE.AnimationClip[] = []
@@ -129,6 +157,7 @@ export function makeBody(name: string): Body | null {
   root.add(model)
 
   const meshes: THREE.SkinnedMesh[] = []
+  const detail: THREE.SkinnedMesh[] = []
   const materials: THREE.MeshStandardMaterial[] = []
   const bones = new Map<string, THREE.Bone>()
   model.traverse(o => {
@@ -137,12 +166,26 @@ export function makeBody(name: string): Body | null {
     if (!m.isSkinnedMesh) return
     m.castShadow = true
     m.receiveShadow = true
-    // Skinned bounds are the rest pose's, and a villager mid-stride reaches
-    // well outside them — without this three culls people who are on screen.
-    m.frustumCulled = false
+    // Cull against a pose-independent sphere rather than not culling at all.
+    //
+    // Left to itself three calls SkinnedMesh.computeBoundingSphere on the first
+    // frame a body is tested, which walks the vertices in whatever pose that
+    // frame happened to catch and then caches the answer forever. A sphere
+    // measured mid-stride and reused for a man who later sprints, falls and
+    // lies down culls him while he is on screen, which is why this used to be
+    // switched off entirely — and switching it off meant all forty villagers
+    // were submitted every frame no matter where the camera pointed.
+    //
+    // A fixed sphere has neither problem. 2.2 m about hip height covers every
+    // clip in the library including the collapse, where a body ends up lying
+    // its own length from the origin it is still parented to. Being generous
+    // costs only the odd character culled a frame late.
+    m.boundingSphere = new THREE.Sphere(new THREE.Vector3(0, 0.9, 0), 2.2)
+    m.frustumCulled = true
     const mat = (m.material as THREE.MeshStandardMaterial).clone()
     m.material = mat
     meshes.push(m)
+    if (DETAIL.test(m.name)) detail.push(m)
     materials.push(mat)
   })
 
@@ -164,6 +207,7 @@ export function makeBody(name: string): Body | null {
   // morph has finished with him.
   const box = new THREE.Box3().setFromObject(model)
 
+  let detailed = true
   return {
     root,
     rig,
@@ -171,6 +215,12 @@ export function makeBody(name: string): Body | null {
     materials,
     mixer: new THREE.AnimationMixer(model),
     scale: (box.max.y - box.min.y) / NOMINAL_HEIGHT,
+    setDetail(d: number) {
+      const on = d < DETAIL_RANGE
+      if (on === detailed) return
+      detailed = on
+      for (const m of detail) m.visible = on
+    },
   }
 }
 

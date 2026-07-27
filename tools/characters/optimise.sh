@@ -3,10 +3,16 @@
 #
 # Usage:  optimise.sh <src-dir> <dst-dir>
 #
-# The frame is fill-bound, so this is about download and VRAM, not triangle
-# throughput: five villagers at 1.7 MB apiece is 8.5 MB of glTF before the
-# player sees anything. What is left here is meshopt quantisation, which is where
-# most of that megabyte goes.
+# This is about download and VRAM, not triangle throughput: five villagers at
+# 1.7 MB apiece is 8.5 MB of glTF before the player sees anything. What is left
+# here is meshopt quantisation, which is where most of that megabyte goes.
+#
+# Triangles are not what the crowd costs. Measured in the game, the frame is
+# bound on draw call submission at about 14 us a call, and a character is six
+# separate meshes — body, top, trousers, shoes, hair, eyes — so forty villagers
+# are two hundred and forty submissions for 780k triangles the GPU eats without
+# noticing. The thing worth optimising in this pipeline is the *number of
+# meshes* per character, not the size of them.
 #
 # Deliberately off:
 #   --simplify         it welds. Hair and eyebrows are thin alpha-masked cards

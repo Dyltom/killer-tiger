@@ -19,26 +19,28 @@
  *     not enough. The averages keep updating through that window — it is the
  *     decision that waits, not the measurement.
  *
- * There are two levers here, not one, because the frame is fill-bound and the
- * ladder is too coarse to steer it. Measured on the scene at 1920x1200, the
- * cost is 2.9 ms per megapixel and it is spread thin — terrain 1.6 ms, the
- * light pool 1.6, the whole post chain 1.9, foliage 0.6, fog 0.6, shadows 0.7.
- * Nothing in there is a switch worth throwing on its own, and all of it scales
- * with the pixel count. So:
+ * There are two levers here, not one, because the ladder is too coarse to steer
+ * the frame on its own:
  *
  *   - `renderScale` is the fast lever: a fine step on the render resolution,
  *     moved on a quarter-second average and able to react inside three frames.
- *     It is what actually holds the frame rate.
  *   - the tier is the slow lever, and it only moves once the fast one has run
  *     out of room. Dropping a tier changes what the game *looks* like — fewer
  *     shadows, shorter foliage draw distance, no god rays — and that is not a
  *     thing to do to someone because one wave spawned.
  *
- * Those measurements are one scene on one machine, though, and the fast lever
- * is only the right lever while they hold. Where they do not, cutting pixels is
- * a cost with no benefit and the loop has no way to notice — so every cut is
- * checked against what it was supposed to save and put back if it did not. See
- * PROBE_PAYOFF.
+ * Which of those is the *right* lever depends on what the frame is bound on, and
+ * that is a property of the machine, not of the game. This file used to assert
+ * fill-boundedness — 2.9 ms per megapixel, spread thin across terrain, lights,
+ * post and fog — and on the machine it was written on that is now measurably
+ * false: the frame is bound on draw call submission at roughly 14 us a call, and
+ * at the resolution the scaler had already talked itself down to, fill was about
+ * a millisecond of a twenty-two millisecond frame. Cutting pixels there is a
+ * cost with no benefit.
+ *
+ * So the fast lever is a hypothesis rather than an assumption. Every cut is
+ * checked against what it was supposed to save and the whole series is handed
+ * back if it did not pay. See PROBE_PAYOFF.
  */
 
 export interface QualityPreset {
@@ -198,16 +200,24 @@ const SCALE_RAISE_AFTER = 1.2
  * frame uncomfortable was never the pixels. The player gets a permanently soft
  * picture as payment for no frame rate at all.
  *
- * Measured on this scene on one machine: about 6 ms per megapixel on top of
- * roughly 15 ms that does not move with resolution at all. Going from full to
- * the 0.6 floor deletes three quarters of the pixels and four fifths of the
- * frame survives it.
+ * Measured on this scene on one machine: about 2.4 ms per megapixel on top of
+ * roughly 5 ms that does not move with resolution at all — and the scene it was
+ * rendering when it decided to cut was 0.42 megapixels, so the lever had one
+ * millisecond of authority over a twenty-two millisecond frame.
  *
  * So each step down is now a hypothesis with a result. Cutting to `s` should
  * cost `s^2` of the pixels and, if the frame really is fill-bound, take a like
  * fraction off the frame time. Measure what it took instead, and if less than
  * this fraction of the prediction materialised, the pixels are not the problem:
- * put the step back and stop reaching for that lever.
+ * hand back every step taken on that premise and stop reaching for the lever.
+ *
+ * Handing back *every* step, not just the one on trial, is the part that was
+ * missing. A verdict of "pixels are not what is slow" is not a statement about
+ * the step being tested, it is a statement about the lever, and it condemns the
+ * steps already taken exactly as much. Undoing one at a time left the game
+ * parked at 84 per cent resolution with the lever switched off and no route
+ * home: climbing back needs a comfortable frame, and the thing keeping the
+ * frame uncomfortable was never the pixels.
  *
  * A third is deliberately generous. A perfectly fill-bound frame scores 1.0 and
  * anything with a real variable component clears 0.35 comfortably, so this only
@@ -222,6 +232,13 @@ const PROBE_PAYOFF = 0.35
  * tenth of the pre-step frame time this far in and would understate every
  * saving by that much — biasing the verdict toward "did not pay" on exactly the
  * slow machines that can least afford a wrong one.
+ *
+ * The same window is used on both sides of the step. `fast` is what *triggers* a
+ * cut, so by construction it is elevated at the moment the cut is made — often
+ * by the one hitch that caused it. Holding the after-mean up against that number
+ * scores the hitch passing as a saving the resolution bought, which is how a cut
+ * that achieved nothing gets a passing grade. Mean-before against mean-after is
+ * the only comparison the two sides can both be held to.
  */
 const PROBE_FRAMES = 8
 
@@ -264,6 +281,10 @@ export class Quality {
    * Seeded at 60 Hz, which is what it will converge to on most machines anyway.
    */
   private refresh = 16.7
+  /** The last PROBE_FRAMES settled frame times, as the probe's before-picture. */
+  private recent = new Float64Array(PROBE_FRAMES)
+  private recentAt = 0
+  private recentN = 0
 
   onChange: ((p: QualityPreset) => void) | null = null
 
@@ -324,10 +345,24 @@ export class Quality {
     // Only downward steps go on trial, and only the frame time the drop was
     // decided on is a fair thing to hold them to.
     this.probe = step > from
-      ? { from, ratio: SCALE_STEPS[step]! ** 2 / SCALE_STEPS[from]! ** 2, before: this.fast, sum: 0, n: 0 }
+      ? { from, ratio: SCALE_STEPS[step]! ** 2 / SCALE_STEPS[from]! ** 2, before: this.baseline(), sum: 0, n: 0 }
       : null
     this.onChange?.(this.preset)
     return true
+  }
+
+  /**
+   * Mean of the recent settled frames — what the frame cost before a step.
+   *
+   * Falls back to `fast` until the window has filled, which only happens in the
+   * first few frames after a cooldown; a probe struck that early is judged on
+   * the smoothed number, as it always was.
+   */
+  private baseline(): number {
+    if (this.recentN < PROBE_FRAMES) return this.fast
+    let sum = 0
+    for (let i = 0; i < PROBE_FRAMES; i++) sum += this.recent[i]!
+    return sum / PROBE_FRAMES
   }
 
   /** Feed one frame's delta, in seconds. */
@@ -380,6 +415,12 @@ export class Quality {
       return
     }
 
+    // Only settled frames go in the window: the frames spent reallocating a post
+    // chain are not a picture of what anything costs.
+    this.recent[this.recentAt] = ms
+    this.recentAt = (this.recentAt + 1) % PROBE_FRAMES
+    if (this.recentN < PROBE_FRAMES) this.recentN++
+
     // Did the last cut buy what it promised? Judged after the cooldown, so the
     // frames spent reallocating the post chain are not counted as the answer.
     if (this.probe) {
@@ -391,7 +432,8 @@ export class Quality {
       const delivered = p.before - p.sum / p.n
       if (delivered < predicted * PROBE_PAYOFF) {
         this.fillBound = false
-        this.setStep(p.from)
+        // Every step down was taken on the premise this one just disproved.
+        this.setStep(0)
         return
       }
     }

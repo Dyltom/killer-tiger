@@ -15,13 +15,24 @@
  * transforms are constant, so they can be baked into the vertices; the meshes
  * share a handful of materials, so what is left merges into one buffer each.
  *
+ * "Share a handful of materials" is true of the *looks* and not of the objects:
+ * 460 static meshes hold 281 material instances between them that come to 42
+ * distinct looks, because `surface()` clones its textures so each caller can set
+ * its own repeat. Batching on `material.uuid` therefore split forty-two ways
+ * into two hundred and eighty-one. The key is a value signature instead — see
+ * `signature` for what that has to include and why it is safe here.
+ *
  * Why per *cell* rather than one buffer per material: a single mesh spanning the
  * whole village can never be frustum-culled, so standing at one edge of it still
- * pays for the far side. A 40 m grid keeps the draw count near the material
- * count while leaving three's cull something to work with — and 40 m is chosen
- * against the fog, not the village: past `WORLD.fogFar` there is nothing to see
- * anyway, so cells only need to be small enough that a cell is either mostly in
- * frame or mostly out of it.
+ * pays for the far side. Cells only need to be small enough that a cell is
+ * either mostly in frame or mostly out of it.
+ *
+ * How small, measured rather than argued: at 40 m the village is 138 merged
+ * meshes of which 122 are drawn from a typical vantage, and the 16 that cull
+ * carry 4,700 triangles between them — a grid earning 0.4 per cent of the
+ * triangles for 91 extra draw calls. It collapses fully at 70 m, so that is the
+ * cell. This village is simply small against the fog; a bigger one would want
+ * the grid back, which is why the parameter stays.
  *
  * What must not be merged, and why it is opted out by hand rather than detected:
  * a merged mesh has no transform of its own and no material of its own, so
@@ -58,6 +69,71 @@ interface Batch {
   geos: THREE.BufferGeometry[]
 }
 
+/**
+ * Identity for a material that has an injected shader, so two of them are never
+ * treated as the same look.
+ *
+ * `addWind` and friends build a fresh closure per material, so comparing the
+ * function itself is exact: materials that went through the same injection call
+ * share it, materials that went through separate calls never do. That is
+ * deliberately stricter than comparing the tag — two wind materials with
+ * different amplitudes carry the same tag and must not be merged.
+ */
+const injected = new WeakMap<object, number>()
+let nextInjection = 0
+
+function shaderId(mat: THREE.Material): number {
+  if (mat.onBeforeCompile === THREE.Material.prototype.onBeforeCompile) return 0
+  let id = injected.get(mat.onBeforeCompile)
+  if (id === undefined) injected.set(mat.onBeforeCompile, (id = ++nextInjection))
+  return id
+}
+
+/**
+ * How a texture is sampled, rather than which Texture object does the sampling.
+ *
+ * `surface()` clones its maps so each material can set its own repeat, which
+ * means twenty bark materials that are pixel-for-pixel the same hold twenty
+ * distinct Texture uuids. The clones share a `source` — one GPU upload — so
+ * they really are interchangeable, and keying on the source is what lets them
+ * batch.
+ */
+function texKey(t: THREE.Texture | null | undefined): string {
+  if (!t) return '-'
+  return [
+    t.source?.uuid ?? t.uuid,
+    t.repeat.x, t.repeat.y, t.offset.x, t.offset.y, t.rotation, t.center.x, t.center.y,
+    t.wrapS, t.wrapT, t.colorSpace, t.flipY, t.channel, t.magFilter, t.minFilter,
+  ].join(',')
+}
+
+/**
+ * What the material *looks like*, for batching. Two meshes may only merge if
+ * every property three would send to the shader agrees, because the merged mesh
+ * keeps just one of the two materials.
+ *
+ * This is safe only because merging is already restricted to static geometry:
+ * anything whose material is written to at run time is `userData.dynamic` and
+ * never gets here. Deduplicating a material that something later mutates would
+ * silently detach the merged copy from that mutation.
+ */
+function signature(m: THREE.Material): string {
+  const s = m as THREE.MeshStandardMaterial
+  return [
+    m.type, shaderId(m), m.customProgramCacheKey(),
+    m.side, m.transparent, m.opacity, m.alphaTest, m.alphaToCoverage, m.blending,
+    m.depthTest, m.depthWrite, m.colorWrite, m.toneMapped, s.fog, m.visible,
+    m.polygonOffset, m.polygonOffsetFactor, m.polygonOffsetUnits, m.dithering, m.premultipliedAlpha,
+    s.color?.getHex(), s.emissive?.getHex(), s.emissiveIntensity, s.roughness, s.metalness,
+    s.flatShading, s.vertexColors, s.wireframe, s.envMapIntensity, s.aoMapIntensity,
+    s.displacementScale, s.displacementBias, s.normalMapType,
+    s.normalScale?.x, s.normalScale?.y,
+    texKey(s.map), texKey(s.normalMap), texKey(s.roughnessMap), texKey(s.metalnessMap),
+    texKey(s.aoMap), texKey(s.emissiveMap), texKey(s.alphaMap), texKey(s.bumpMap),
+    texKey(s.displacementMap), texKey(s.lightMap), texKey(s.envMap),
+  ].join('|')
+}
+
 export interface MergeStats {
   before: number
   after: number
@@ -77,6 +153,7 @@ export function mergeStatic(root: THREE.Object3D, cell = 40): MergeStats {
   const at = new THREE.Vector3()
 
   const batches = new Map<string, Batch>()
+  const sigs = new Map<THREE.Material, string>()
   const merged: THREE.Mesh[] = []
   let before = 0
 
@@ -109,7 +186,9 @@ export function mergeStatic(root: THREE.Object3D, cell = 40): MergeStats {
     const cx = Math.floor(at.x / cell)
     const cz = Math.floor(at.z / cell)
     // Shadow flags are baked per mesh, so they have to agree within a batch.
-    const key = `${m.material.uuid}|${m.castShadow ? 1 : 0}|${m.receiveShadow ? 1 : 0}|${cx},${cz}`
+    let sig = sigs.get(m.material)
+    if (sig === undefined) sigs.set(m.material, (sig = signature(m.material)))
+    const key = `${sig}|${m.castShadow ? 1 : 0}|${m.receiveShadow ? 1 : 0}|${cx},${cz}`
 
     let b = batches.get(key)
     if (!b) {

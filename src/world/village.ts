@@ -1288,6 +1288,6 @@ export function buildVillage(ctx: VillageContext): THREE.Group {
 
   // Nothing above this line has to know it is being batched, and nothing below
   // it can move: from here the village is geometry, not objects.
-  mergeStatic(root, 40)
+  mergeStatic(root, 70)
   return root
 }
