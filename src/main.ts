@@ -6,15 +6,17 @@ import { Input } from './engine/input'
 import { Quality } from './engine/quality'
 import { Game } from './game'
 import { installAtmosphericFog, makeFog } from './render/atmosphere'
+import { installLightCulling } from './render/lightcull'
 import { PostFX } from './render/postfx'
 import { Sky } from './render/sky'
 import { Hud } from './ui/hud'
 import { initMaterials, loadingManager } from './world/materials'
 import { terrainHeight, World } from './world/world'
 
-// Must run before the first material is compiled — it rewrites the shader
-// chunks every fog-enabled material is assembled from.
+// Both must run before the first material is compiled — they rewrite the shader
+// chunks every material is assembled from.
 installAtmosphericFog()
+installLightCulling()
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T
 
