@@ -33,6 +33,12 @@
  *     out of room. Dropping a tier changes what the game *looks* like — fewer
  *     shadows, shorter foliage draw distance, no god rays — and that is not a
  *     thing to do to someone because one wave spawned.
+ *
+ * Those measurements are one scene on one machine, though, and the fast lever
+ * is only the right lever while they hold. Where they do not, cutting pixels is
+ * a cost with no benefit and the loop has no way to notice — so every cut is
+ * checked against what it was supposed to save and put back if it did not. See
+ * PROBE_PAYOFF.
  */
 
 export interface QualityPreset {
@@ -180,6 +186,45 @@ const SCALE_DROP_AFTER = 0.2
 /** Give resolution back more slowly than it is taken, or the two levers ring. */
 const SCALE_RAISE_AFTER = 1.2
 
+/**
+ * How much of a resolution cut's *predicted* saving has to actually show up.
+ *
+ * Everything above assumes the frame is fill-bound, and where that holds the
+ * fast lever is the right lever. Where it does not, the assumption is not
+ * merely imprecise, it is unfalsifiable by the loop as written: fewer pixels
+ * does not shorten the frame, the frame stays over budget, so it cuts again,
+ * and it arrives at the floor having bought nothing. It cannot climb back out
+ * either, because climbing needs a comfortable frame and the thing keeping the
+ * frame uncomfortable was never the pixels. The player gets a permanently soft
+ * picture as payment for no frame rate at all.
+ *
+ * Measured on this scene on one machine: about 6 ms per megapixel on top of
+ * roughly 15 ms that does not move with resolution at all. Going from full to
+ * the 0.6 floor deletes three quarters of the pixels and four fifths of the
+ * frame survives it.
+ *
+ * So each step down is now a hypothesis with a result. Cutting to `s` should
+ * cost `s^2` of the pixels and, if the frame really is fill-bound, take a like
+ * fraction off the frame time. Measure what it took instead, and if less than
+ * this fraction of the prediction materialised, the pixels are not the problem:
+ * put the step back and stop reaching for that lever.
+ *
+ * A third is deliberately generous. A perfectly fill-bound frame scores 1.0 and
+ * anything with a real variable component clears 0.35 comfortably, so this only
+ * fires where the lever is close to useless — which is the only case where
+ * trading the player's sharpness for nothing is the wrong call.
+ */
+const PROBE_PAYOFF = 0.35
+/**
+ * Frames to average before judging a step.
+ *
+ * A plain mean of these rather than `fast`, whose 0.25 smoothing still holds a
+ * tenth of the pre-step frame time this far in and would understate every
+ * saving by that much — biasing the verdict toward "did not pay" on exactly the
+ * slow machines that can least afford a wrong one.
+ */
+const PROBE_FRAMES = 8
+
 export class Quality {
   /** Start one below the top: most machines settle here, and climbing is cheap. */
   tier = 2
@@ -192,6 +237,18 @@ export class Quality {
   private step = 0
   private settle = SETTLE
   private frames = 0
+  /** The step-down currently on trial, and the frame time it has to beat. */
+  private probe: { from: number; ratio: number; before: number; sum: number; n: number } | null = null
+  /**
+   * Whether cutting pixels is still believed to buy frame time.
+   *
+   * Cleared by a step that failed its probe, and only ever restored by a tier
+   * change — a different tier is a different frame, and the last one's verdict
+   * says nothing about it. Giving resolution *back* is never gated on this: the
+   * lever is only ever distrusted in the direction that costs the player
+   * something.
+   */
+  private fillBound = true
   /** How long a comfortable stretch has to be before the next climb; grows. */
   private raiseAfter = RAISE_AFTER
   /**
@@ -248,6 +305,8 @@ export class Quality {
     this.step = 0
     this.scaleOver = 0
     this.scaleUnder = 0
+    this.probe = null
+    this.fillBound = true
     this.settle = SETTLE
     this.onChange?.(this.preset)
   }
@@ -255,10 +314,18 @@ export class Quality {
   /** Move the resolution one step and re-apply; returns false at the end. */
   private setStep(step: number): boolean {
     if (step < 0 || step >= SCALE_STEPS.length || step === this.step) return false
+    // A step that has been shown not to pay is not a step.
+    if (step > this.step && !this.fillBound) return false
+    const from = this.step
     this.step = step
     this.scaleOver = 0
     this.scaleUnder = 0
     this.settle = SCALE_SETTLE
+    // Only downward steps go on trial, and only the frame time the drop was
+    // decided on is a fair thing to hold them to.
+    this.probe = step > from
+      ? { from, ratio: SCALE_STEPS[step]! ** 2 / SCALE_STEPS[from]! ** 2, before: this.fast, sum: 0, n: 0 }
+      : null
     this.onChange?.(this.preset)
     return true
   }
@@ -311,6 +378,22 @@ export class Quality {
     if (this.settle > 0) {
       this.settle -= dt
       return
+    }
+
+    // Did the last cut buy what it promised? Judged after the cooldown, so the
+    // frames spent reallocating the post chain are not counted as the answer.
+    if (this.probe) {
+      const p = this.probe
+      p.sum += ms
+      if (++p.n < PROBE_FRAMES) return
+      this.probe = null
+      const predicted = p.before * (1 - p.ratio)
+      const delivered = p.before - p.sum / p.n
+      if (delivered < predicted * PROBE_PAYOFF) {
+        this.fillBound = false
+        this.setStep(p.from)
+        return
+      }
     }
 
     // Resolution first, in both directions. A late frame gets pixels taken off

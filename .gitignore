@@ -6,3 +6,9 @@ dist/
 
 # Claude Code agent worktrees
 .claude/
+
+# Character build: fetched inputs and intermediates. The .glb files the game
+# actually loads are committed, under public/models.
+tools/characters/bvh/
+tools/characters/build/
+__pycache__/

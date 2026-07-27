@@ -1,0 +1,8 @@
+{
+  "name": "killer-tiger-characters",
+  "private": true,
+  "description": "Build-time only. Kept out of the game's package.json so the CLI's dependency tree never lands in a production install.",
+  "devDependencies": {
+    "@gltf-transform/cli": "^4.4.2"
+  }
+}

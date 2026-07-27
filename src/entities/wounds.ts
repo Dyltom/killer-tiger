@@ -82,6 +82,17 @@ export interface WoundSet {
   readonly uB: { value: THREE.Vector4[] }
   /** How far up the array the shader has to look. Zero on an unhurt body. */
   readonly uCount: { value: number }
+  /**
+   * The overall soak, 0..1 — the general darkening of a man who has been losing
+   * blood for a while, as opposed to any particular cut.
+   *
+   * It used to live in the vertex colours, which was the right home for it when
+   * the body's colour *was* its vertex colours. The authored bodies are
+   * textured, so there is nothing there to write into, and it comes through here
+   * instead. Broad, soft and low-contrast either way; the only thing that
+   * changes is which end of the pipe it enters.
+   */
+  readonly uSoak: { value: number }
   cuts: number
   runs: number
 }
@@ -93,7 +104,10 @@ export function createWoundSet(): WoundSet {
     a.push(new THREE.Vector4(0, 0, 0, 0.01))
     b.push(new THREE.Vector4(0, 0, 0, 0))
   }
-  return { a, b, uA: { value: a }, uB: { value: b }, uCount: { value: 0 }, cuts: 0, runs: 0 }
+  return {
+    a, b, uA: { value: a }, uB: { value: b },
+    uCount: { value: 0 }, uSoak: { value: 0 }, cuts: 0, runs: 0,
+  }
 }
 
 function write(
@@ -149,6 +163,7 @@ export function extendRun(
 export function clearWounds(set: WoundSet) {
   for (const v of set.b) v.w = 0
   set.uCount.value = 0
+  set.uSoak.value = 0
   set.cuts = 0
   set.runs = 0
 }
@@ -170,6 +185,7 @@ export function addWoundShading(mat: THREE.Material, set: WoundSet) {
     shader.uniforms.uWoundA = set.uA
     shader.uniforms.uWoundB = set.uB
     shader.uniforms.uWoundCount = set.uCount
+    shader.uniforms.uWoundSoak = set.uSoak
     shader.uniforms.uWoundRamp = uRamp
 
     shader.vertexShader = shader.vertexShader
@@ -185,6 +201,7 @@ export function addWoundShading(mat: THREE.Material, set: WoundSet) {
         uniform vec4 uWoundA[ ${WOUND_SLOTS} ];
         uniform vec4 uWoundB[ ${WOUND_SLOTS} ];
         uniform int uWoundCount;
+        uniform float uWoundSoak;
         uniform vec3 uWoundRamp[ 3 ];
 
         float woundHash( vec3 p ) {
@@ -210,6 +227,15 @@ export function addWoundShading(mat: THREE.Material, set: WoundSet) {
         '#include <color_fragment>',
         /* glsl */ `
         #include <color_fragment>
+        // The soak goes on first so the cuts land on top of it, and it darkens
+        // what is already there rather than replacing it — same reason the cuts
+        // themselves do. A fixed stain is invisible on a dark shirt and a wash
+        // over a white one.
+        if ( uWoundSoak > 0.0 ) {
+          diffuseColor.rgb = mix( diffuseColor.rgb,
+                                  diffuseColor.rgb * 0.55 + uWoundRamp[ 0 ] * 0.5,
+                                  uWoundSoak );
+        }
         float woundAmt = 0.0;
         for ( int i = 0; i < ${WOUND_SLOTS}; i ++ ) {
           if ( i >= uWoundCount ) break;

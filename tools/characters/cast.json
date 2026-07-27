@@ -1,0 +1,363 @@
+{
+  "_note": "Ordinary people in ordinary clothes. The garments carry their own authored diffuse (shirt and trousers are painted separately in one mesh), so nothing here recolours them.",
+  "base": {
+    "macro": {
+      "gender": 0.94,
+      "age": 0.52,
+      "muscle": 0.7,
+      "weight": 0.4,
+      "proportions": 0.55,
+      "height": 0.5,
+      "cupsize": 0.5,
+      "firmness": 0.5,
+      "race": {
+        "asian": 0.34,
+        "caucasian": 0.33,
+        "african": 0.33
+      }
+    },
+    "skin": "skins/middleage_caucasian_male/middleage_caucasian_male.mhmat",
+    "rig": "cmu_mb",
+    "wear": {
+      "eyes": [
+        "eyes/low-poly/low-poly.mhclo",
+        "Eyes"
+      ],
+      "brows": [
+        "eyebrows/eyebrow010/eyebrow010.mhclo",
+        "Eyebrows"
+      ],
+      "_hair": "Only villager_a inherits this slot; everyone else names their own. It has been short04, whose alpha parting landed on his temple and cut a stair-stepped bite out of the hairline, and then short03, which is one swept opaque panel that hangs to the mouth and leaves him no face — the same way bob01 lost the woman hers. What survives a head it was not fitted to is the styles drawn as layered strands rather than as a solid sweep: short01 and short02, which is what the rest of the cast wears.",
+      "hair": [
+        "hair/short01/short01.mhclo",
+        "Hair"
+      ]
+    },
+    "look": {
+      "body": {
+        "alpha": "opaque",
+        "rough": 0.62,
+        "spec": 0.35,
+        "skin_fix": true,
+        "albedo": 0.3
+      },
+      "eyes": {
+        "_note": "A wet eye is tempting and wrong: at rough 0.12 the sun puts one specular lobe across the whole iris and the villager looks blind. Rough enough to keep a highlight the size of a highlight.",
+        "alpha": "clip",
+        "cutoff": 0.5,
+        "rough": 0.32,
+        "spec": 0.45,
+        "tint": [
+          0.78,
+          0.78,
+          0.8
+        ]
+      },
+      "brows": {
+        "alpha": "clip",
+        "cutoff": 0.4,
+        "recolour": [
+          0.1,
+          0.07,
+          0.055
+        ],
+        "rough": 0.75,
+        "spec": 0.2
+      },
+      "hair": {
+        "_note": "recolour, not tint. Every hair card MakeHuman ships is already all but black, and multiplying black by a dark brown gives black — which under this game's sun renders as a flat silhouette that reads as a cloth cap rather than as hair. recolour sets the mean level instead, so the strand detail that is in the card survives to be seen.",
+        "alpha": "clip",
+        "cutoff": 0.35,
+        "recolour": [
+          0.13,
+          0.09,
+          0.07
+        ],
+        "rough": 0.78,
+        "spec": 0.15
+      }
+    },
+    "_decimate": "Triangle budgets, not ratios. Anything already under its budget is left as it is, and anything cut out of an alpha map \u2014 hair, eyebrows, eyes \u2014 is deliberately absent, because collapsing a stack of alpha cards fuses them into a shell. Garments get a loose budget on purpose: MakeHuman's clothes run 4\u20137k triangles, and at 2500 the collapse ate the shoulder seams and left the elder's worksuit with two inflated blobs where the sleeve caps had been. The frame is fill-bound anyway, so the triangles cost nothing but download.",
+    "decimate": {
+      "body": 8000,
+      "clothes": 4500,
+      "shoes": 1500
+    }
+  },
+  "variants": [
+    {
+      "name": "villager_a",
+      "macro": {
+        "age": 0.44,
+        "muscle": 0.66,
+        "race": {
+          "asian": 0.7,
+          "caucasian": 0.2,
+          "african": 0.1
+        }
+      },
+      "skin": "skins/middleage_asian_male/middleage_asian_male.mhmat",
+      "wear": {
+        "clothes": [
+          "clothes/male_casualsuit01/male_casualsuit01.mhclo",
+          "Clothes"
+        ],
+        "shoes": [
+          "clothes/shoes01/shoes01.mhclo",
+          "Clothes"
+        ]
+      },
+      "look": {
+        "clothes": {
+          "rough": 0.86,
+          "spec": 0.3
+        },
+        "shoes": {
+          "rough": 0.6,
+          "spec": 0.45
+        }
+      }
+    },
+    {
+      "name": "villager_b",
+      "macro": {
+        "age": 0.36,
+        "muscle": 0.78,
+        "weight": 0.36,
+        "height": 0.6,
+        "race": {
+          "asian": 0.15,
+          "caucasian": 0.7,
+          "african": 0.15
+        }
+      },
+      "skin": "skins/young_caucasian_male/young_caucasian_male.mhmat",
+      "_clothes": "casualsuit03 is out. It is a maroon pinstripe shirt in MakeHuman's own thumbnail and a magenta highlighter under this game's sun: the white stripe is a one-pixel feature in a 4096 map, so the resize to 1024 leaves it as full-brightness lines that ACES then pushes hot. 05 is a plain quilted jacket, and a flat garment cannot alias.",
+      "wear": {
+        "hair": [
+          "hair/short02/short02.mhclo",
+          "Hair"
+        ],
+        "clothes": [
+          "clothes/male_casualsuit05/male_casualsuit05.mhclo",
+          "Clothes"
+        ],
+        "shoes": [
+          "clothes/shoes03/shoes03.mhclo",
+          "Clothes"
+        ]
+      },
+      "look": {
+        "clothes": {
+          "rough": 0.88,
+          "spec": 0.28
+        },
+        "shoes": {
+          "rough": 0.65,
+          "spec": 0.4
+        },
+        "hair": {
+          "alpha": "clip",
+          "cutoff": 0.35,
+          "recolour": [
+            0.19,
+            0.13,
+            0.085
+          ],
+          "rough": 0.78,
+          "spec": 0.15
+        }
+      }
+    },
+    {
+      "name": "villager_elder",
+      "macro": {
+        "age": 0.9,
+        "muscle": 0.4,
+        "weight": 0.46,
+        "height": 0.4,
+        "race": {
+          "asian": 0.55,
+          "caucasian": 0.25,
+          "african": 0.2
+        }
+      },
+      "skin": "skins/old_asian_male/old_asian_male.mhmat",
+      "wear": {
+        "hair": [
+          "hair/short01/short01.mhclo",
+          "Hair"
+        ],
+        "top": [
+          "clothes/namuhekam_male_polo_shirt/namuhekam_male_polo_shirt.mhclo",
+          "Clothes"
+        ],
+        "trousers": [
+          "clothes/toigo_wool_pants/toigo_wool_pants.mhclo",
+          "Clothes"
+        ],
+        "shoes": [
+          "clothes/shoes02/shoes02.mhclo",
+          "Clothes"
+        ]
+      },
+      "_wear": "worksuit01 is out. It is white dungarees over a white tee — a painter's uniform, which is a costume, and its sleeve caps are cut so wide that on this body they read as two balloons at the shoulder. A grey polo and wool trousers are what an old man actually has on, they are 4k triangles between them where the worksuit needed 7k, and neither is bright enough to clip in the sun.",
+      "look": {
+        "top": {
+          "_note": "The polo is authored as a pale grey for a studio render, and under this game's low sun it clips: the old man is the brightest object in the village and the eye goes to him instead of to whatever is stalking him. recolour to a warm mid-grey, which is what a shirt that has been washed a few hundred times looks like anyway.",
+          "recolour": [
+            0.21,
+            0.2,
+            0.185
+          ],
+          "rough": 0.9,
+          "spec": 0.26
+        },
+        "trousers": {
+          "rough": 0.88,
+          "spec": 0.24
+        },
+        "shoes": {
+          "rough": 0.7,
+          "spec": 0.35
+        },
+        "hair": {
+          "alpha": "clip",
+          "cutoff": 0.35,
+          "rough": 0.82,
+          "spec": 0.12,
+          "recolour": [
+            0.42,
+            0.4,
+            0.385
+          ]
+        },
+        "brows": {
+          "alpha": "clip",
+          "cutoff": 0.4,
+          "rough": 0.8,
+          "spec": 0.18,
+          "recolour": [
+            0.34,
+            0.32,
+            0.3
+          ]
+        }
+      }
+    },
+    {
+      "name": "villager_woman",
+      "macro": {
+        "gender": 0.06,
+        "age": 0.5,
+        "muscle": 0.42,
+        "weight": 0.44,
+        "height": 0.36,
+        "race": {
+          "asian": 0.2,
+          "caucasian": 0.25,
+          "african": 0.55
+        }
+      },
+      "skin": "skins/young_african_female/young_african_female.mhmat",
+      "_hair": "bob01 is out. Its cap and fringe are three large fully-opaque panels rather than strands, and fitted to this head the fringe hangs to the mouth, so the villager has no face at all — raising the alpha cutoff cannot help, because there is no alpha there to cut. ponytail01 is drawn as wisps with a real alpha edge and is parted off the forehead by construction, so a face stays a face whatever shape the head under it is, and it is 3000 triangles cheaper besides.",
+      "wear": {
+        "brows": [
+          "eyebrows/eyebrow007/eyebrow007.mhclo",
+          "Eyebrows"
+        ],
+        "hair": [
+          "hair/ponytail01/ponytail01.mhclo",
+          "Hair"
+        ],
+        "clothes": [
+          "clothes/female_casualsuit01/female_casualsuit01.mhclo",
+          "Clothes"
+        ],
+        "shoes": [
+          "clothes/shoes05/shoes05.mhclo",
+          "Clothes"
+        ]
+      },
+      "_inflate": "The t-shirt is fitted to MakeHuman's default female and this body is not it: at the bust and the small of the back the skin sits outside the cloth and shows through as pale blotches. The delete group cannot help, because the vertices that poke are the ones at the garment's own hem that have to stay.",
+      "inflate": {
+        "clothes": 0.013
+      },
+      "look": {
+        "clothes": {
+          "_note": "The only garment in the cast that had to be toned down. Measured off the built map, this tee and its stonewashed jeans both sit at 0.22 linear luma, against 0.079 for villager_a's and 0.006 for the hunter's — at that distance she stops being a villager and becomes the thing the eye tracks across the whole village. 0.55 lands her at 0.12, mid-band for the 0.05-0.26 that this game's sun and ACES leave for cotton, and a little cooler on red so the denim reads worn rather than new.",
+          "drop_trim": true,
+          "tint": [
+            0.5,
+            0.55,
+            0.6
+          ],
+          "rough": 0.86,
+          "spec": 0.3
+        },
+        "shoes": {
+          "rough": 0.62,
+          "spec": 0.42
+        }
+      }
+    },
+    {
+      "name": "hunter",
+      "macro": {
+        "muscle": 0.8,
+        "weight": 0.44,
+        "age": 0.46,
+        "height": 0.62,
+        "race": {
+          "asian": 0.25,
+          "caucasian": 0.5,
+          "african": 0.25
+        }
+      },
+      "skin": "skins/middleage_caucasian_male/middleage_caucasian_male.mhmat",
+      "wear": {
+        "hair": [
+          "hair/short02/short02.mhclo",
+          "Hair"
+        ],
+        "trousers": [
+          "clothes/cortu_cargo_pants/cortu_cargo_pants.mhclo",
+          "Clothes"
+        ],
+        "top": [
+          "clothes/elvs_crude_t-shirt_male/elvs_crude_t-shirt_male.mhclo",
+          "Clothes"
+        ],
+        "boots": [
+          "clothes/toigo_ankle_boots_male/toigo_ankle_boots_male.mhclo",
+          "Clothes"
+        ]
+      },
+      "_top": "The fisherman sweater is out, and not for any of the reasons it first looked like. It renders as a vest with a knot at each elbow, and that survives removing its triangle budget, removing its inflate, and every check I could make on the export: no degenerate triangles, no zero-weight vertices, sleeve vertices correctly dominated by ForeArm and Hand, one shared skeleton, a double-sided opaque material. What gives it away is the skeleton's own rest pose, where the sleeves are already two cones tapering to a point at the cuff — MPFB's fit of that mhclo to this body collapses each sleeve's cross-section to nearly zero radius, so what ships is a needle along the arm that is invisible except where it bunches. Nothing downstream of the fit can put width back. A plain short-sleeved tee has no sleeve tube to lose.",
+      "_inflate": "Small, and smaller than the woman's t-shirt needs, because this is a short sleeve. Inflate pushes every vertex along its own normal, and on a sleeve cap the normals fan out in every direction at once, so what keeps a bust from poking through a hem puffs a cap into a leg-of-mutton shoulder. 0.006 is enough to clear a muscle-0.8 deltoid and not enough to see.",
+      "inflate": {
+        "top": 0.006
+      },
+      "look": {
+        "top": {
+          "_note": "recolour, not tint: the tee is authored white, and multiplying white by olive would work, but recolour sets the mean level and so also flattens the baked highlight down the chest that reads as satin on a cotton shirt. 0.26 was picked as olive drab and rendered as pale sage, because recolour sets a linear albedo and this game's sun plus ACES lifts a mid value most of a stop.",
+          "recolour": [
+            0.13,
+            0.14,
+            0.1
+          ],
+          "rough": 0.9,
+          "spec": 0.22
+        },
+        "trousers": {
+          "rough": 0.9,
+          "spec": 0.26
+        },
+        "boots": {
+          "rough": 0.6,
+          "spec": 0.45
+        }
+      }
+    }
+  ]
+}

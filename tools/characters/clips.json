@@ -1,0 +1,94 @@
+{
+  "_note": "CMU Graphics Lab Motion Capture Database (mocap.cs.cmu.edu), free for all use; BVH conversion by B. Hahne. Subjects 140/141/143 are neutral 'general capture' performers, which is what a villager needs — subject 139 is an action performer whose every take is crouched forward 30 degrees, so he only supplies the two clips that should be crouched.",
+  "macro": {
+    "gender": 0.9,
+    "age": 0.5,
+    "muscle": 0.6,
+    "weight": 0.42,
+    "proportions": 0.55,
+    "height": 0.5,
+    "cupsize": 0.5,
+    "firmness": 0.5,
+    "race": {
+      "asian": 0.34,
+      "caucasian": 0.33,
+      "african": 0.33
+    }
+  },
+  "clips": [
+    {
+      "name": "idle",
+      "_src": "141_20 Waiting. Not 140_06 'Idle', which sounds right and is not: scan.py shows that performer settling into a 25-31 degree hunch two seconds in and staying there for the remaining 28.",
+      "bvh": "141_20.bvh",
+      "from": 0.5,
+      "scan": 5.5,
+      "loop": [2.5, 4.5]
+    },
+    {
+      "name": "idle2",
+      "_src": "141_13 Stretch and Yawn. A village wants two ambient idles more than it wants an alert glance; flee and wounded already carry the reactions.",
+      "bvh": "141_13.bvh",
+      "from": 0.2,
+      "scan": 2.8,
+      "loop": [1.6, 2.6]
+    },
+    {
+      "name": "walk",
+      "_src": "141_19 Walk",
+      "bvh": "141_19.bvh",
+      "from": 2,
+      "scan": 7,
+      "loop": [0.95, 1.7]
+    },
+    {
+      "name": "run",
+      "_src": "143_42 Run. The figure-8 take leans into its turn every stride, which reads as a limp once the horizontal drift is thrown away.",
+      "bvh": "143_42.bvh",
+      "from": 1,
+      "scan": 3,
+      "loop": [0.6, 1.05]
+    },
+    {
+      "name": "sneak",
+      "_src": "143_41 Sneak",
+      "bvh": "143_41.bvh",
+      "from": 3,
+      "scan": 6,
+      "loop": [1.1, 2.2]
+    },
+    {
+      "name": "chores",
+      "_src": "143_28 Sweeping, Push Broom. Late in the take, because the performer walks the broom forward at 0.9 m/s for the first three seconds and this clip is played on a man standing still — a sweeper who slides across the yard is worse than no sweeper.",
+      "bvh": "143_28.bvh",
+      "from": 3.1,
+      "scan": 2.3,
+      "loop": [1.0, 1.9]
+    },
+    {
+      "name": "wounded",
+      "_src": "139_19, an action performer, and a wounded stagger should be bent over",
+      "bvh": "139_19.bvh",
+      "from": 3,
+      "scan": 12,
+      "loop": [1.25, 2.4]
+    },
+    {
+      "name": "flee",
+      "_src": "142_16 Scared. The take opens with thirty seconds of flinching on the spot and only breaks into a run twice; t=36 is the second and the cleaner one, 1.7-1.85 m/s at 12-15 degrees of lean. The obvious window at t=4 is where this clip shipped from and it averages 0.3 m/s, i.e. a terrified man moonwalking.",
+      "bvh": "142_16.bvh",
+      "from": 35.9,
+      "scan": 2.2,
+      "loop": [0.55, 1.1]
+    },
+    {
+      "name": "collapse",
+      "_src": "140_01 Get Up Face Down, played backwards, which is a fall onto the face",
+      "_trim": "Measured against the reversed clock, not the take's. trim runs after reverse, so [0, 3.2] kept the standing end of the get-up and threw the floor away: every corpse in the village finished the fall on its knees with its hips 0.56 m up, held there because the action clamps on its last frame. On the reversed clock the man is upright until about 1.8 and face down by 6.4, and the first two seconds of that are him standing still at the end of a take, so they go. Verified by reading the shipped clip's Hips.position track rather than by eye: it ran 0.81 m down to only 0.56 m and now runs 1.16 m down to 0.25 m.",
+      "bvh": "140_01.bvh",
+      "from": 0,
+      "scan": 7,
+      "reverse": true,
+      "trim": [1.8, 6.4]
+    }
+  ]
+}

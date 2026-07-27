@@ -68,6 +68,35 @@ function hdrTarget(w: number, h: number) {
 }
 
 /** Full-screen materials never test or write depth; saying so avoids a clear. */
+/**
+ * `toneMapped: false` is load-bearing, and its absence cost the whole picture.
+ *
+ * three compiles a separate program per material *per destination*, because
+ * `outputColorSpace` and `toneMapping` are both part of the program cache key
+ * and both are forced off when the destination is a render target. So a
+ * material that only ever draws into a target gets one prefix, and the moment
+ * the same material draws to the canvas it gets a second, different one — with
+ * `<tonemapping_pars_fragment>` prepended, which declares `RRTAndODTFit`. The
+ * grade shader below declares its own, copied from that very chunk. Duplicate
+ * definition, link failure, `useProgram` on a dead program: GL_INVALID_OPERATION
+ * and a black canvas.
+ *
+ * That is why the black screen only appeared on Low. Every other tier ends on
+ * FXAA, so the grade only ever drew into `gradeRT` and compiled the harmless
+ * variant; `smaa: false` sends it to the canvas, where it compiles the broken
+ * one. Verified by removing the cause and watching the symptom go: renaming the
+ * function alone renders the frame, restoring the name blacks it again.
+ *
+ * The error *is* reported, once, on the compile — but a program is cached
+ * forever after, so it scrolls past at the instant the tier first drops and
+ * every subsequent black frame is silent. A tier sweep that samples the canvas
+ * sees the failure with no error beside it.
+ *
+ * These materials all tone map themselves, or deliberately don't; none of them
+ * wants three's chunk. Switching it off is both what they mean and what keeps
+ * the two prefixes identical, so the canvas can never get a program the render
+ * target never proved.
+ */
 function screenMaterial(fragmentShader: string, uniforms: Record<string, THREE.IUniform>) {
   return new THREE.ShaderMaterial({
     uniforms,
@@ -75,6 +104,7 @@ function screenMaterial(fragmentShader: string, uniforms: Record<string, THREE.I
     fragmentShader,
     depthTest: false,
     depthWrite: false,
+    toneMapped: false,
   })
 }
 
@@ -278,7 +308,9 @@ const GRADE_FRAG = /* glsl */ `
     return fract( sin( dot( p, vec2( 12.9898, 78.233 ) ) ) * 43758.5453 );
   }
 
-  // ---- three.js ACESFilmicToneMapping, verbatim.
+  // ---- three.js ACESFilmicToneMapping, verbatim. Verbatim includes the name,
+  // which collides with the real chunk if three ever prepends it — see
+  // screenMaterial() for the black screen that caused and what stops it.
   vec3 RRTAndODTFit( vec3 v ) {
     vec3 a = v * ( v + 0.0245786 ) - 0.000090537;
     vec3 b = v * ( 0.983729 * v + 0.4329510 ) + 0.238081;
@@ -529,6 +561,7 @@ export class PostFX {
       fragmentShader: FXAAShader.fragmentShader,
       depthTest: false,
       depthWrite: false,
+      toneMapped: false,
     })
     this.fxaaMat.uniforms.tDiffuse!.value = this.gradeRT.texture
 
