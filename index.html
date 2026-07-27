@@ -45,6 +45,13 @@
         background: radial-gradient(ellipse at center, rgba(190, 20, 20, 0) 35%, rgba(190, 20, 20, 0.85) 100%);
         opacity: 0; transition: opacity 0.35s ease-out;
       }
+      /* Kill confirm. White, brief and edge-weighted; it must stay under the
+         blood and never read as a photo flash. */
+      #kill-flash {
+        position: absolute; inset: 0;
+        background: radial-gradient(ellipse at center, rgba(255, 244, 224, 0) 46%, rgba(255, 248, 234, 0.5) 100%);
+        opacity: 0; transition: opacity 0.22s ease-out;
+      }
       #frenzy-tint {
         position: absolute; inset: 0;
         background: radial-gradient(ellipse at center, rgba(255, 60, 20, 0.06) 30%, rgba(255, 30, 10, 0.4) 100%);
@@ -140,15 +147,26 @@
 
       /* top-left score */
       #score-box { position: absolute; left: 28px; top: 22px; }
-      #score { font-size: 54px; line-height: 0.9; color: var(--amber); text-shadow: 0 3px 0 rgba(0,0,0,0.6); }
+      #score {
+        font-size: 54px; line-height: 0.9; color: var(--amber); text-shadow: 0 3px 0 rgba(0,0,0,0.6);
+        font-variant-numeric: tabular-nums; transform-origin: left bottom;
+      }
+      #score.pop { animation: scorePop 0.22s ease-out; }
+      @keyframes scorePop { 0% { transform: scale(1.09); } 100% { transform: scale(1); } }
       #score-sub {
         font-size: 13px; letter-spacing: 0.22em; text-transform: uppercase;
         color: rgba(244, 234, 217, 0.5); font-weight: 700;
       }
       #combo {
         font-size: 30px; color: #fff; margin-top: 6px;
-        text-shadow: 0 0 16px rgba(255, 100, 40, 0.9); opacity: 0; transition: opacity 0.2s;
+        text-shadow: 0 0 16px rgba(255, 100, 40, 0.9); opacity: 0;
+        transform-origin: left center;
+        transition: opacity 0.2s, color 0.25s, transform 0.25s ease-out;
       }
+      #combo.pop { animation: comboPop 0.18s ease-out; }
+      /* Additive to the chain-length scale set inline; scale(1) here would
+         stamp the escalation flat for the duration of the pop. */
+      @keyframes comboPop { 0% { filter: brightness(1.6); } 100% { filter: brightness(1); } }
 
       /* top-right wave / objective */
       #wave-box { position: absolute; right: 28px; top: 22px; text-align: right; }
@@ -233,6 +251,19 @@
         align-items: center; justify-content: center; text-align: center;
         background: radial-gradient(ellipse at center, rgba(28, 14, 6, 0.86) 0%, rgba(6, 4, 3, 0.97) 75%);
         backdrop-filter: blur(3px); z-index: 10; padding: 24px; overflow-y: auto;
+        /* Enter only. Exit is display:none, and must stay that way — restart
+           has a hard budget of half a second. */
+        animation: overlayIn 0.3s ease-out;
+      }
+      @keyframes overlayIn { from { opacity: 0; } }
+      .overlay > * { animation: overlayChild 0.4s ease-out backwards; }
+      .overlay > :nth-child(2) { animation-delay: 0.06s; }
+      .overlay > :nth-child(3) { animation-delay: 0.12s; }
+      .overlay > :nth-child(4) { animation-delay: 0.18s; }
+      .overlay > :nth-child(5) { animation-delay: 0.24s; }
+      .overlay > :nth-child(6) { animation-delay: 0.3s; }
+      @keyframes overlayChild {
+        from { opacity: 0; transform: translateY(10px); filter: blur(4px); }
       }
       .overlay h1 {
         font-family: 'Bebas Neue', Impact, sans-serif;
@@ -297,6 +328,7 @@
       <div id="pulse"></div>
       <div id="frenzy-tint"></div>
       <div id="damage-flash"></div>
+      <div id="kill-flash"></div>
 
       <div id="reticle">
         <div class="bar t"></div><div class="bar b"></div>

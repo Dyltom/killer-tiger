@@ -1053,6 +1053,13 @@ export const LEVELS = {
   chew: 2.4,
   comboTick: 1.4,
   distantShot: 1.6,
+
+  // Interface. Quietest tier in the mix: these confirm input, they do not
+  // compete with anything that happens in the world.
+  uiClick: 0.4,
+  uiHover: 0.25,
+  killConfirm: 0.45,
+  lowHealth: 0.5,
 }
 
 export const STORAGE_KEY = 'killer-tiger:best'

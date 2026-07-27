@@ -57,6 +57,8 @@ export interface Rig {
   head: THREE.Bone
   /** Index 0 is the left arm, 1 the right — the order the old rig used. */
   arms: { upper: THREE.Bone; fore: THREE.Bone; hand: THREE.Bone }[]
+  /** Thighs, same order. For the stance-width overlay on the run gait. */
+  legs: THREE.Bone[]
 }
 
 export interface Body {
@@ -561,6 +563,7 @@ export function makeBody(name: string): Body | null {
     neck: bone('Neck'),
     head: bone('Head'),
     arms: [arm('Left'), arm('Right')],
+    legs: [bone('LeftUpLeg'), bone('RightUpLeg')],
   }
 
   // Measured, not tabulated: the cast.json heights are macro slider values, not

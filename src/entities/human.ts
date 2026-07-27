@@ -175,6 +175,7 @@ export class Human {
    * settle on the head and spine once the man has stopped moving.
    */
   private jitter: number[] = []
+  private deadPose: THREE.Quaternion[] | null = null
   /** Ground pools stamped so far, the cap, and the clock to the next one. */
   private poolCount = 0
   private poolMax = 4
@@ -182,6 +183,8 @@ export class Human {
 
   /** Pose blends, all damped so nothing snaps between stances. */
   private aimBlend = 0
+  private gaitHold = 0
+  private widen = 0
   /** How far the head is turned toward whatever this man is watching. */
   private lookBlend = 0
   private readonly lookAt = new THREE.Vector3()
@@ -771,6 +774,7 @@ export class Human {
     // would be the same corpse, and this pool is only twenty slots deep.
     this.jitter = []
     for (let i = 0; i < 6; i++) this.jitter.push(this.rng.range(-1, 1))
+    this.deadPose = null
 
     // How they go down. A man whose heart stops folds where he stands; a man
     // hit by three hundred kilos of tiger leaves the ground, and the only lever
@@ -1232,13 +1236,26 @@ export class Human {
   }
 
   private updateMotion(dt: number, world: World) {
-    this.pos.x += this.vel.x * dt
-    this.pos.z += this.vel.z * dt
-    const r = world.resolve(this.pos.x, this.pos.z, HUMAN.radius, this.pos.y + 1)
+    const px = this.pos.x + this.vel.x * dt
+    const pz = this.pos.z + this.vel.z * dt
+    const r = world.resolve(px, pz, HUMAN.radius, this.pos.y + 1)
     this.pos.x = r.x
     this.pos.z = r.z
     if (r.hit) {
-      // Bumped a wall — repath next tick instead of grinding against it.
+      // Bumped a wall — repath next tick instead of grinding against it, and
+      // shed the part of the velocity that points into the wall. Without the
+      // slide, a man fleeing dead-on at a fence repaths onto the same blocked
+      // bearing forever and stands there sprinting at 6 m/s on the spot.
+      const nx = r.x - px
+      const nz = r.z - pz
+      const nl = Math.hypot(nx, nz)
+      if (nl > 1e-4) {
+        const into = (this.vel.x * nx + this.vel.z * nz) / nl
+        if (into < 0) {
+          this.vel.x -= (nx / nl) * into
+          this.vel.z -= (nz / nl) * into
+        }
+      }
       this.repathTimer = Math.min(this.repathTimer, 0.15)
     }
     this.pos.y = terrainHeight(this.pos.x, this.pos.z)
@@ -1271,9 +1288,15 @@ export class Human {
 
     const speed = Math.hypot(this.vel.x, this.vel.z)
     const hurt = clamp(1 - this.health / this.maxHealth, 0, 1)
-    const aiming = this.kind === 'hunter' && (this.state === 'hunt' || this.aimTimer > 0.1)
+    // Shouldered only to shoot — standing in the firing envelope or already
+    // holding the aim. On the move the rifle drops to a two-handed low ready:
+    // a full cheek-weld held through a walk cycle reads as a man fencing with
+    // his own gun, and no hunter walks like that anyway.
+    const hunter = this.kind === 'hunter'
+    const shouldering = hunter && (this.aimTimer > 0.05 || (this.state === 'hunt' && speed < 0.7))
+    const aiming = shouldering ? 1 : hunter && this.state === 'hunt' ? 0.5 : 0
     const terrified = this.state === 'panic' || (this.state === 'flee' && speed > 3)
-    this.aimBlend = damp(this.aimBlend, aiming ? 1 : 0, 7, dt)
+    this.aimBlend = damp(this.aimBlend, aiming, 7, dt)
     // A man with a rifle up is looking down it, so the head-track goes away as
     // the aim comes in rather than fighting it.
     this.lookBlend = damp(this.lookBlend, this.alerted ? 1 - this.aimBlend : 0, 5, dt)
@@ -1282,14 +1305,20 @@ export class Human {
     if (speed > 0.4) {
       // Wounded outranks the rest, because a man limping is worth reading from
       // across the village and it is the tell that this one is nearly done. The
-      // speed gate is the clip's own pace times the rate ceiling: past that it
+      // speed gates are each clip's own pace times the rate band: past that it
       // cannot be played fast enough to keep its feet on the ground, and a bad
       // wound turning into a slide reads as a bug rather than as a wound.
+      //
+      // The walk/run boundary is hysteretic — whichever gait is already playing
+      // holds on for an extra 0.4 m/s. A fleeing man's speed dips through the
+      // boundary at every turn and doorway, and without the band each dip was
+      // a fresh 0.24 s crossfade: two out-of-phase gaits blending, which on
+      // screen is legs scissoring through each other.
+      const inRun = motion.playing === 'run'
       if (hurt > 0.55 && speed < 1.5) clip = 'wounded'
-      else if (speed > 3.2) clip = 'run'
-      else if (terrified) clip = 'flee'
+      else if (terrified) clip = speed > (inRun ? 2.1 : 2.5) ? 'run' : 'flee'
       else if (this.kind === 'hunter' && this.alerted && speed < 1.4) clip = 'sneak'
-      else clip = 'walk'
+      else clip = speed > (inRun ? 2.6 : 3.0) ? 'run' : 'walk'
     } else if (terrified) {
       clip = 'flee'
     } else if (this.alerted || this.kind === 'hunter') {
@@ -1300,11 +1329,35 @@ export class Human {
       // busy with something; the other half is standing about.
       clip = this.chores ? 'chores' : 'idle2'
     }
+    // And even with the band, no gait-to-gait change lands more often than
+    // every third of a second — a gait that cannot commit for that long is
+    // noise. Stops and starts are exempt: holding a walk cycle on a man who
+    // has stopped is its own bug.
+    this.gaitHold -= dt
+    const playing = motion.playing
+    if (clip !== playing) {
+      if (this.gaitHold > 0 && playing !== null && GAITS.has(clip) && GAITS.has(playing)) clip = playing
+      else this.gaitHold = 0.35
+    }
     const pace = this.paces[clip]
     motion.play(clip, 0.24, {
       rate: pace ? clamp(speed / pace, 0.6, 1.7) : 1,
     })
     motion.update(dt)
+
+    // The run take is cut from a figure-8 — the performer plants every stride
+    // a little across his own line of travel because he is always about to
+    // turn, and played dead straight that reads as legs scissoring. A few
+    // degrees of outward roll on each thigh, about the travel axis, puts the
+    // feet back on two tracks. Damped so a gait swap doesn't snap the knees.
+    const wantWiden = motion.playing === 'run' || motion.playing === 'flee' ? 0.2 : 0
+    this.widen = damp(this.widen, wantWiden, 8, dt)
+    if (this.widen > 0.005) {
+      const rig = avatar.rig
+      FWD.set(-Math.sin(this.yaw), 0, -Math.cos(this.yaw))
+      twist(rig.legs[0]!, FWD, this.widen)
+      twist(rig.legs[1]!, FWD, -this.widen)
+    }
 
     // ---- overlays, on top of whatever the clip just wrote.
     if (this.lookBlend > 0.01) this.poseLook(this.lookBlend)
@@ -1368,16 +1421,30 @@ export class Human {
     // with it instead of leaving them behind in the air. The grip is the same
     // point `placeRifle` puts the weapon at, so the two cannot drift apart; the
     // fore-end is measured up the barrel from it.
-    this.body.localToWorld(GRIP.copy(AIMED_POS).multiplyScalar(s))
-    this.body.localToWorld(FORE.set(0.015 * s, 1.405 * s, -0.475 * s))
+    // The hands chase the same blended line the rifle rides — not the full-aim
+    // line — and the grip saturates early, so a rifle carried at low ready is
+    // still fully held rather than 40% reached-for.
+    this.rifleLine(GRIP, k)
+    // The fore-end is measured up the barrel, so its offset turns with the
+    // rifle: at low ready the barrel is tipped down and the support hand has
+    // to follow it there, not hover where the level barrel used to be.
+    rifleRot(FORE_E, k)
+    FORE.copy(GRIP).add(FORE_D.set(-0.06, 0.04, -0.32).applyEuler(FORE_E))
+    this.body.localToWorld(GRIP.multiplyScalar(s))
+    this.body.localToWorld(FORE.multiplyScalar(s))
     this.body.getWorldQuaternion(Q_AIM)
+    const hold = clamp(k / 0.35, 0, 1)
     // Where each elbow goes. The trigger elbow rides out and up off the ribs;
     // the support elbow tucks down under the fore-end. Get these the wrong way
     // round and the man is holding the rifle like a tray.
     POLE.set(1, 0.55, 0.1).applyQuaternion(Q_AIM)
-    reach(rig.arms[1]!, GRIP, POLE, k)
+    reach(rig.arms[1]!, GRIP, POLE, hold)
     POLE.set(-0.35, -1, 0.1).applyQuaternion(Q_AIM)
-    reach(rig.arms[0]!, FORE, POLE, k)
+    reach(rig.arms[0]!, FORE, POLE, hold)
+    // The clips leave the support hand splayed palm-out; roll it about the
+    // barrel so the open palm sits under the fore-end and reads as cradling it.
+    FORE.set(0, 0, -1).applyEuler(FORE_E).applyQuaternion(Q_AIM)
+    twist(rig.arms[0]!.hand, FORE, 1.1 * hold)
   }
 
   /**
@@ -1394,12 +1461,33 @@ export class Human {
     const k = this.aimBlend
     // Slung across the back is the resting place: a sling needs no hands, leaves
     // the walk alone, and still says "armed" from the front.
-    rifle.position.lerpVectors(SLUNG_POS, AIMED_POS, k).multiplyScalar(this.scale)
-    rifle.rotation.set(
-      THREE.MathUtils.lerp(SLUNG_ROT.x, AIMED_ROT.x, k),
-      THREE.MathUtils.lerp(SLUNG_ROT.y, AIMED_ROT.y, k),
-      THREE.MathUtils.lerp(SLUNG_ROT.z, AIMED_ROT.z, k),
-    )
+    this.rifleLine(RIFLE_AT, k)
+    rifle.position.copy(RIFLE_AT).multiplyScalar(this.scale)
+    rifleRot(rifle.rotation, k)
+  }
+
+  /**
+   * The rifle's resting-to-aimed line, in nominal body units, anchored to the
+   * animated chest.
+   *
+   * SLUNG_POS and AIMED_POS are authored against a 1.72 m man standing at bind
+   * height, but no clip leaves him there: the hunter's ready stance drops the
+   * chest 15 cm and carries it 10 cm forward, which put the authored line above
+   * his head — and the hands, solved onto it, over his head with it. Offsetting
+   * by where the chest actually is keeps the weapon on the torso through a
+   * hunch, a walk sway, or a flinch. The chest matrix is at worst a frame
+   * stale, which on a sling is invisible; `poseAim` refreshes it first.
+   */
+  private rifleLine(out: THREE.Vector3, k: number) {
+    if (k < 0.5) out.lerpVectors(SLUNG_POS, READY_POS, k / 0.5)
+    else out.lerpVectors(READY_POS, AIMED_POS, (k - 0.5) / 0.5)
+    const rig = this.avatar?.rig
+    if (!rig) return
+    CHEST_L.setFromMatrixPosition(rig.chest.matrixWorld)
+    this.body.worldToLocal(CHEST_L).divideScalar(this.scale)
+    out.x += CHEST_L.x
+    out.y += CHEST_L.y - CHEST_REST_Y
+    out.z += CHEST_L.z
   }
 
   private updateDeath(dt: number) {
@@ -1469,6 +1557,18 @@ export class Human {
     // as a corpse arranging itself rather than as a fall that was already wrong.
     const rig = this.avatar?.rig
     if (rig) {
+      // The twists premultiply, which is only safe while the mixer rewrites the
+      // channels each frame. A finished LoopOnce action doesn't — the mixer skips
+      // paused actions, the bones keep last frame's values, and five small twists
+      // a frame compound into a corpse whose torso spins on the floor. So once
+      // the clip stops writing, snapshot the clamped pose and restore it before
+      // twisting: the overlay becomes absolute instead of cumulative.
+      const bones = [rig.head, rig.neck, rig.spine]
+      if (this.deadPose) {
+        for (let i = 0; i < bones.length; i++) bones[i]!.quaternion.copy(this.deadPose[i]!)
+      } else if (this.motion?.finished) {
+        this.deadPose = bones.map((b) => b!.quaternion.clone())
+      }
       const j = this.jitter
       const settle = smooth01(clamp((t - 0.7) / 1.5, 0, 1))
       FWD.set(-Math.sin(this.yaw), 0, -Math.cos(this.yaw))
@@ -1484,8 +1584,20 @@ export class Human {
     // samples give the gradient; the corpse pitches and rolls onto it.
     const gx = terrainHeight(this.pos.x + 0.6, this.pos.z) - terrainHeight(this.pos.x - 0.6, this.pos.z)
     const gz = terrainHeight(this.pos.x, this.pos.z + 0.6) - terrainHeight(this.pos.x, this.pos.z - 0.6)
-    this.group.rotation.set(clamp(gz / 1.2, -0.5, 0.5) * eased, this.yaw, -clamp(gx / 1.2, -0.5, 0.5) * eased, 'YXZ')
+    // The clip is a get-up reversed, so its middle is a man lowering himself
+    // through a crouch with no weight on his feet — which, played at kill
+    // speed, is a man levitating. A forward topple about the feet and a dip
+    // toward the ground through the middle of the fall put gravity back in it;
+    // both are sine-shaped in `eased`, so the landed pose is the clip's own.
+    // The overlay must be gone before the clip is: it decays while the body is
+    // still coming down, or the corpse visibly rolls back flat on the floor.
+    const mid = Math.sin(Math.PI * clamp(eased / 0.72, 0, 1))
+    this.group.rotation.set(
+      clamp(gz / 1.2, -0.5, 0.5) * eased - mid * 0.5, this.yaw,
+      -clamp(gx / 1.2, -0.5, 0.5) * eased, 'YXZ',
+    )
     this.group.position.copy(this.pos)
+    this.group.position.y -= mid * 0.22
 
     // ---- what pools under it. Stamped from where the torso actually came to
     // rest rather than from where the feet were: the body travels most of its
@@ -1543,8 +1655,30 @@ export class Human {
  */
 const SLUNG_POS = new THREE.Vector3(0.05, 1.14, 0.19)
 const SLUNG_ROT = new THREE.Euler(1.2, 0.62, 0)
-const AIMED_POS = new THREE.Vector3(0.075, 1.365, -0.155)
-const AIMED_ROT = new THREE.Euler(-0.04, 0.03, 0)
+// Low ready: both hands on, muzzle tipped down and forward off the chest. The
+// waypoint exists because the straight slung-to-aimed line passes through the
+// torso, and it is where the carry settles while a hunter is on the move.
+const READY_POS = new THREE.Vector3(0.07, 1.08, -0.21)
+const READY_ROT = new THREE.Euler(0.5, 0.2, 0)
+// The grip sits over the right shoulder pocket (+x is the man's right), not
+// the centreline: with the stock running back from the grip, a centred grip
+// puts the butt through his neck. Toed in a little about y so the muzzle
+// comes back onto the eye line.
+const AIMED_POS = new THREE.Vector3(0.16, 1.34, -0.19)
+const AIMED_ROT = new THREE.Euler(-0.04, 0.14, 0)
+
+/** The rifle's orientation along the same piecewise slung→ready→aimed blend. */
+function rifleRot(out: THREE.Euler, k: number) {
+  const a = k < 0.5 ? SLUNG_ROT : READY_ROT
+  const b = k < 0.5 ? READY_ROT : AIMED_ROT
+  const t = k < 0.5 ? k / 0.5 : (k - 0.5) / 0.5
+  out.set(
+    THREE.MathUtils.lerp(a.x, b.x, t),
+    THREE.MathUtils.lerp(a.y, b.y, t),
+    THREE.MathUtils.lerp(a.z, b.z, t),
+  )
+}
+const FORE_E = new THREE.Euler()
 
 const SOAK_AT = new THREE.Vector3()
 const WOUND_AT = new THREE.Vector3()
@@ -1554,8 +1688,16 @@ const CUT_B = new THREE.Vector3()
 const CUT_C = new THREE.Vector3()
 const GRIP = new THREE.Vector3()
 const FORE = new THREE.Vector3()
+const FORE_D = new THREE.Vector3()
 const POLE = new THREE.Vector3()
+const RIFLE_AT = new THREE.Vector3()
+const CHEST_L = new THREE.Vector3()
 const Q_AIM = new THREE.Quaternion()
+/** Where the chest bone sits on the nominal body at bind height. */
+const CHEST_REST_Y = 1.245
+
+/** The clips that carry a man over the ground — the ones the gait hold arbitrates between. */
+const GAITS: ReadonlySet<ClipName> = new Set(['walk', 'run', 'flee', 'sneak', 'wounded'])
 
 /**
  * How far the body's surface is from its vertical axis at height `y`, looking

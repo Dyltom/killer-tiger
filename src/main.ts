@@ -197,6 +197,13 @@ $('resume-btn').addEventListener('click', () => {
   input.requestLock()
 })
 
+// Silent before the first gesture creates the context; that is the platform
+// rule, not a bug to work around.
+for (const id of ['start-btn', 'retry-btn', 'resume-btn']) {
+  $(id).addEventListener('mouseenter', () => audio.uiHover())
+  $(id).addEventListener('click', () => audio.uiClick())
+}
+
 // Clicking the canvas after ESC re-locks rather than dumping you to a menu.
 renderer.domElement.addEventListener('click', () => {
   if (game.state === 'playing' && !input.locked) input.requestLock()
@@ -287,6 +294,7 @@ function frame(dt: number) {
   // snapping off; hurt is driven by how close to death the tiger is.
   const frenzy = Math.min(1, game.tiger.frenzy / 1.0)
   const hurt = 1 - Math.min(1, game.tiger.health / (TIGER.maxHealth * 0.45))
+  audio.setHurt(game.state === 'playing' ? hurt : 0)
   postfx.render(dt, frenzy, game.state === 'playing' ? hurt : 0, sky.day.darkness)
 }
 

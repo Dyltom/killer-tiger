@@ -29,6 +29,7 @@
 import * as THREE from 'three'
 import { LIGHTS } from '../config'
 import { fbm } from '../engine/rng'
+import { WIND_DIR } from './wind'
 
 export type LampKind = 'fire' | 'lamp'
 
@@ -131,10 +132,20 @@ export class Lamps {
       // A fire gutters hard; an oil lamp behind a doorway barely moves.
       const flickerAmp = fire ? 0.5 : 0.12
       const flicker = 1 + (Math.abs(fbm(time * 2.4 + a.phase, a.phase, 2)) - 0.5) * flickerAmp
+      // Gust constants (0.42 rate, 0.035 front wavelength) must match wind.ts:
+      // firelight has to surge on the same phase the grass around it bends on.
+      // Sheltered lamps sit out of the wind, so only open fires take it.
+      let surge = 1
+      if (fire) {
+        const front = a.x * WIND_DIR.x + a.z * WIND_DIR.y
+        let gust = Math.sin(time * 0.42 - front * 0.035) * 0.5 + 0.5
+        gust *= gust
+        surge = 1 + (gust - 0.5) * 0.5
+      }
       // Fires keep a floor in daylight — you can see a cook fire at noon. Lamps
       // do not; a burning lamp in full sun is just a bright smudge on a wall.
       const day = fire ? LIGHTS.dayFloor + (1 - LIGHTS.dayFloor) * lit : lit
-      s.light.intensity = base * s.level * flicker * day
+      s.light.intensity = base * s.level * flicker * day * surge
     }
   }
 

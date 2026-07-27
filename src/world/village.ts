@@ -28,6 +28,7 @@
 import * as THREE from 'three'
 import { HUT, WORLD } from '../config'
 import { Rng } from '../engine/rng'
+import { addSmokeSource } from '../entities/particles'
 import type { LampAnchor } from './lamps'
 import { surface } from './materials'
 import { mergeStatic } from './merge'
@@ -370,7 +371,7 @@ function cart(kit: Kit, rng: Rng): THREE.Group {
 }
 
 /** A run of posts and rails following an arc. */
-function fenceRun(kit: Kit, rng: Rng, height: (x: number, z: number) => number, cx: number, cz: number, radius: number, a0: number, span: number): THREE.Group {
+function fenceRun(kit: Kit, rng: Rng, height: (x: number, z: number) => number, colliders: Collider[], cx: number, cz: number, radius: number, a0: number, span: number): THREE.Group {
   const g = new THREE.Group()
   const posts = Math.max(3, Math.round((span * radius) / 1.5))
   const pts: THREE.Vector3[] = []
@@ -400,6 +401,16 @@ function fenceRun(kit: Kit, rng: Rng, height: (x: number, z: number) => number, 
       rail.castShadow = true
       g.add(rail)
     }
+    // One thin wall per rail span. Low enough that a pounce clears it — a fence
+    // is exactly the thing a tiger goes over — but a walk stops at it.
+    const dx = b.x - a.x
+    const dz = b.z - a.z
+    colliders.push({
+      kind: 'box',
+      x: (a.x + b.x) / 2, z: (a.z + b.z) / 2,
+      hw: Math.hypot(dx, dz) / 2, hd: 0.08,
+      rot: Math.atan2(dz, dx), h: 1.1,
+    })
   }
   return g
 }
@@ -1230,14 +1241,35 @@ export function buildVillage(ctx: VillageContext): THREE.Group {
       // Hut-local +z is the doorway; nothing gets left in the threshold.
       if (Math.abs((px - x) * cr + (pz - z) * -sr) < 1.6 && (px - x) * sr + (pz - z) * cr > 0) continue
       const roll = rng.next()
+      const yaw = rng.range(0, Math.PI * 2)
       let obj: THREE.Object3D
-      if (roll < 0.3) obj = clayPot(kit, rng)
-      else if (roll < 0.55) obj = basket(kit, rng)
-      else if (roll < 0.75) obj = woodpile(kit, rng)
-      else if (roll < 0.93) obj = dryingRack(kit, rng)
-      else obj = cart(kit, rng)
+      // Each prop registers the footprint it actually stands on. A drying rack
+      // is two posts and hanging hides, not a wall — only the posts collide, so
+      // a tiger still shoulders through the cloth like it should.
+      if (roll < 0.3) {
+        obj = clayPot(kit, rng)
+        ctx.colliders.push({ kind: 'circle', x: px, z: pz, r: 0.34, h: 0.65 })
+      } else if (roll < 0.55) {
+        obj = basket(kit, rng)
+        ctx.colliders.push({ kind: 'circle', x: px, z: pz, r: 0.42, h: 0.42 })
+      } else if (roll < 0.75) {
+        obj = woodpile(kit, rng)
+        ctx.colliders.push({ kind: 'circle', x: px, z: pz, r: 0.7, h: 0.55 })
+      } else if (roll < 0.93) {
+        obj = dryingRack(kit, rng)
+        // Posts sit at hut-local ±span/2 along x, spun by yaw. rotation.y = yaw
+        // maps local (x, z) to (x cos + z sin, -x sin + z cos).
+        for (const side of [-1.25, 1.25]) {
+          ctx.colliders.push({ kind: 'circle', x: px + Math.cos(yaw) * side, z: pz - Math.sin(yaw) * side, r: 0.16, h: 2.0 })
+        }
+      } else {
+        obj = cart(kit, rng)
+        // Collider frame is mirrored from the scene graph's — same negation as
+        // the huts above.
+        ctx.colliders.push({ kind: 'box', x: px, z: pz, hw: 0.9, hd: 1.35, rot: -yaw, h: 1.0 })
+      }
       obj.position.set(px, groundUnder(ctx.height, px, pz, 0.9) - 0.03, pz)
-      layOnSlope(obj, ctx.height, px, pz, rng.range(0, Math.PI * 2))
+      layOnSlope(obj, ctx.height, px, pz, yaw)
       root.add(obj)
     }
 
@@ -1247,7 +1279,7 @@ export function buildVillage(ctx: VillageContext): THREE.Group {
     if (rng.chance(0.35)) {
       const span = rng.range(0.9, 2.1)
       const a0 = Math.atan2(cr, sr) + Math.PI - span / 2 + rng.range(-0.5, 0.5)
-      root.add(fenceRun(kit, rng, ctx.height, x, z, Math.max(5.4, outR + 1.2), a0, span))
+      root.add(fenceRun(kit, rng, ctx.height, ctx.colliders, x, z, Math.max(5.4, outR + 1.2), a0, span))
     }
   }
 
@@ -1271,18 +1303,24 @@ export function buildVillage(ctx: VillageContext): THREE.Group {
     // why the pool is fixed and dealt out instead of one light per fire.
     ctx.lamps.push({ x, y: y + 1.0, z, kind: 'fire', phase: rng.range(0, 10) })
     ctx.colliders.push({ kind: 'circle', x, z, r: 1.1, h: 0.5 })
+    // Smoke rises off the flame tip, not the ash bed — puffs born inside the
+    // cone would pop against it before they cleared the fire.
+    addSmokeSource(x, y + 1.5, z)
 
     // A ring of seating logs — gives the AI's "safe zone" a visible reason.
     for (let s = 0; s < 3; s++) {
       const sa = rng.range(0, Math.PI * 2)
       const sx = x + Math.cos(sa) * 2.1
       const sz = z + Math.sin(sa) * 2.1
-      const log = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.24, rng.range(1.4, 2.2), 7), kit.wood)
+      const len = rng.range(1.4, 2.2)
+      const log = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.24, len, 7), kit.wood)
       log.rotation.set(Math.PI / 2, 0, sa)
       log.position.set(sx, ctx.height(sx, sz) + 0.22, sz)
       log.castShadow = true
       log.receiveShadow = true
       root.add(log)
+      // The XYZ euler above lays the log along (-sin sa, 0, cos sa).
+      ctx.colliders.push({ kind: 'box', x: sx, z: sz, hw: len / 2, hd: 0.25, rot: Math.atan2(Math.cos(sa), -Math.sin(sa)), h: 0.48 })
     }
   }
 

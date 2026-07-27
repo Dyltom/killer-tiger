@@ -5,9 +5,47 @@
 import * as THREE from 'three'
 import { atmosphere } from '../render/atmosphere'
 import { textures } from '../world/textures'
+import { WIND_DIR } from '../world/wind'
 import { terrainHeight } from '../world/world'
 
 const MAX = 1400
+
+/**
+ * Continuous smoke columns share the burst pool, so the whole village together
+ * has to stay a small fraction of the 1400 slots: at this rate and a ~5 s life,
+ * five fires hold about 70 slots between them.
+ */
+const SMOKE_RATE = 2.5
+
+interface SmokeSource { x: number; y: number; z: number; acc: number }
+const smokeSources: SmokeSource[] = []
+
+/** Register a standing smoke column, e.g. above a campfire. World coordinates. */
+export function addSmokeSource(x: number, y: number, z: number) {
+  smokeSources.push({ x, y, z, acc: Math.random() })
+}
+
+/**
+ * Scene depth for the soft fade, provided by the post chain. Optional: without
+ * it the material compiles without SOFT_DEPTH and particles keep hard edges.
+ * Registered through module state because the particle system and the post
+ * chain are constructed by different owners in either order.
+ */
+let sceneDepth: { tex: THREE.Texture; near: number; far: number } | null = null
+let softMat: THREE.ShaderMaterial | null = null
+
+export function setSceneDepth(tex: THREE.Texture, near: number, far: number) {
+  sceneDepth = { tex, near, far }
+  if (softMat) applySoftDepth(softMat)
+}
+
+function applySoftDepth(mat: THREE.ShaderMaterial) {
+  if (!sceneDepth) return
+  mat.uniforms.uDepth!.value = sceneDepth.tex
+  ;(mat.uniforms.uNearFar!.value as THREE.Vector2).set(sceneDepth.near, sceneDepth.far)
+  mat.defines = { ...mat.defines, SOFT_DEPTH: '' }
+  mat.needsUpdate = true
+}
 
 export class Particles {
   private geo = new THREE.BufferGeometry()
@@ -20,7 +58,11 @@ export class Particles {
   private maxLife = new Float32Array(MAX)
   private gravity = new Float32Array(MAX)
   private alpha = new Float32Array(MAX)
+  /** Per-particle ceiling on alpha — smoke is translucent from birth. */
+  private baseAlpha = new Float32Array(MAX)
   private cursor = 0
+  /** Accumulated from dt, so it tracks the clock updateWind() is fed. */
+  private time = 0
 
   constructor(scene: THREE.Scene) {
     this.geo.setAttribute('position', new THREE.BufferAttribute(this.pos, 3))
@@ -42,6 +84,10 @@ export class Particles {
       // raw ShaderMaterial gets nothing from ShaderLib.
       uniforms: {
         uMap: { value: textures().spark },
+        // Inert until the post chain hands over a depth texture — see
+        // setSceneDepth(); the shader only references them under SOFT_DEPTH.
+        uDepth: { value: null },
+        uNearFar: { value: new THREE.Vector2(0.1, 1000) },
         ...THREE.UniformsLib.fog,
         fogSunDir: { value: atmosphere.sunDir },
         fogSunColor: { value: atmosphere.sunColor },
@@ -55,6 +101,7 @@ export class Particles {
         attribute float alpha;
         varying vec3 vColor;
         varying float vAlpha;
+        varying float vViewZ;
         void main() {
           vColor = color;
           vAlpha = alpha;
@@ -67,6 +114,7 @@ export class Particles {
           // perspective size turns one droplet near the eye into a full-screen
           // disc.
           gl_PointSize = clamp(size * (700.0 / -mvPosition.z), 1.0, 90.0);
+          vViewZ = -mvPosition.z;
           gl_Position = projectionMatrix * mvPosition;
           #include <fog_vertex>
         }
@@ -75,9 +123,26 @@ export class Particles {
         uniform sampler2D uMap;
         varying vec3 vColor;
         varying float vAlpha;
+        varying float vViewZ;
+        #include <packing>
+        #ifdef SOFT_DEPTH
+        uniform sampler2D uDepth;
+        uniform vec2 uNearFar;
+        #endif
         #include <fog_pars_fragment>
         void main() {
           float a = texture2D(uMap, gl_PointCoord).a * vAlpha;
+          #ifdef SOFT_DEPTH
+          {
+            // uDepth is a copy blitted after the previous frame's scene pass:
+            // WebGL forbids sampling a depth attachment of the framebuffer
+            // being drawn, so the fade runs one frame behind. texelFetch needs
+            // no resolution uniform.
+            float d = texelFetch(uDepth, ivec2(gl_FragCoord.xy), 0).r;
+            float sceneZ = -perspectiveDepthToViewZ(d, uNearFar.x, uNearFar.y);
+            a *= clamp((sceneZ - vViewZ) * 2.5, 0.0, 1.0);
+          }
+          #endif
           if (a < 0.02) discard;
           gl_FragColor = vec4(vColor, a);
           #include <fog_fragment>
@@ -87,6 +152,9 @@ export class Particles {
       depthWrite: false,
       vertexColors: true,
     })
+
+    softMat = mat
+    applySoftDepth(mat)
 
     this.points = new THREE.Points(this.geo, mat)
     this.points.frustumCulled = false
@@ -99,7 +167,7 @@ export class Particles {
     x: number, y: number, z: number,
     vx: number, vy: number, vz: number,
     r: number, g: number, b: number,
-    s: number, life: number, grav: number,
+    s: number, life: number, grav: number, a = 1,
   ) {
     const i = this.cursor
     this.cursor = (this.cursor + 1) % MAX
@@ -110,7 +178,8 @@ export class Particles {
     this.life[i] = life
     this.maxLife[i] = life
     this.gravity[i] = grav
-    this.alpha[i] = 1
+    this.alpha[i] = a
+    this.baseAlpha[i] = a
   }
 
   /** Arterial spray in a cone along `dir`. */
@@ -196,7 +265,42 @@ export class Particles {
     }
   }
 
+  /** One puff of smoke off a registered source, angled by the current gust. */
+  private emitSmoke(s: SmokeSource) {
+    // Gust constants (0.42 rate, 0.035 front wavelength) must match wind.ts,
+    // so a column leans hardest on the same phase the grass bends on.
+    const front = s.x * WIND_DIR.x + s.z * WIND_DIR.y
+    let gust = Math.sin(this.time * 0.42 - front * 0.035) * 0.5 + 0.5
+    gust *= gust
+    const drift = 0.35 + gust * 1.1
+    const grey = 0.3 + Math.random() * 0.1
+    this.emit(
+      s.x + (Math.random() - 0.5) * 0.3, s.y, s.z + (Math.random() - 0.5) * 0.3,
+      WIND_DIR.x * drift + (Math.random() - 0.5) * 0.25,
+      0.85 + Math.random() * 0.4,
+      WIND_DIR.y * drift + (Math.random() - 0.5) * 0.25,
+      grey, grey, grey * 1.06,
+      // Negative gravity is buoyancy — the column keeps accelerating gently
+      // upward for its whole life instead of coasting to a stop.
+      0.9 + Math.random() * 0.8, 4.5 + Math.random() * 2, -0.16,
+      0.3,
+    )
+  }
+
   update(dt: number) {
+    this.time += dt
+
+    for (const s of smokeSources) {
+      s.acc += dt * SMOKE_RATE
+      // Bounded per source, so a stalled tab's huge dt cannot flood the pool.
+      let burst = 4
+      while (s.acc >= 1 && burst-- > 0) {
+        s.acc -= 1
+        this.emitSmoke(s)
+      }
+      s.acc = Math.min(s.acc, 1)
+    }
+
     const pos = this.pos
     const vel = this.vel
     let dirty = false
@@ -223,7 +327,7 @@ export class Particles {
       // dust and smoke dissolve.
       const t = this.life[i]! / this.maxLife[i]!
       this.size[i]! *= t < 0.35 ? 1 - dt * 4 : 1
-      this.alpha[i] = t < 0.45 ? t / 0.45 : 1
+      this.alpha[i] = this.baseAlpha[i]! * (t < 0.45 ? t / 0.45 : 1)
 
       if (this.life[i]! <= 0) {
         pos[i3 + 1] = -1000

@@ -549,7 +549,12 @@ export class Game {
     // there. The corpse asks for its own now, from where its chest ends up and
     // over the seconds it takes to make one. See Human.poolPulse.
     audio.biteKill(this.placeOf(h.pos))
+    audio.killConfirm()
     audio.scream(this.placeOf(h.pos), h.kind === 'hunter' ? 0.8 : 1.1)
+
+    // Small: it rides on top of the hit-stop and shake that already exist.
+    this.tiger.fovKick = 4
+    this.hud.killFlash()
 
     // Panic ripples outward — nearby witnesses break.
     for (const other of this.humans) {

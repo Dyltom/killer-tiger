@@ -32,6 +32,7 @@ export class Hud {
   private hitmark = $('hitmark')
   private reticle = $('reticle')
   private damageFlash = $('damage-flash')
+  private killFlashEl = $('kill-flash')
   private frenzyTint = $('frenzy-tint')
   private vignette = $('vignette')
   private critical = $('critical')
@@ -43,6 +44,8 @@ export class Hud {
   private radarCtx = this.radar.getContext('2d')!
 
   private shownScore = 0
+  private lastScoreTarget = 0
+  private lastChain = 0
   private feedItems: { el: HTMLElement; t: number }[] = []
   private lastBuffKey = ''
 
@@ -61,6 +64,13 @@ export class Hud {
 
   setScore(score: number) {
     // Roll the number up so kills feel like they pay out.
+    if (score < this.lastScoreTarget) this.lastScoreTarget = score // restart
+    if (score > this.lastScoreTarget) {
+      this.lastScoreTarget = score
+      this.scoreEl.classList.remove('pop')
+      void this.scoreEl.offsetWidth // restart the animation
+      this.scoreEl.classList.add('pop')
+    }
     this.shownScore += (score - this.shownScore) * 0.24
     if (Math.abs(score - this.shownScore) < 1) this.shownScore = score
     this.scoreEl.textContent = String(Math.round(this.shownScore))
@@ -69,9 +79,23 @@ export class Hud {
   setCombo(chain: number, mult: number) {
     if (chain <= 1) {
       this.comboEl.style.opacity = '0'
+      this.lastChain = 0
       return
     }
+    // The chain escalates in colour and size, capped well short of a siren:
+    // bone white through amber into blood over eight links.
+    const t = Math.min(1, (chain - 2) / 8)
     this.comboEl.style.opacity = '1'
+    this.comboEl.style.color = t < 0.5
+      ? `rgb(255, ${Math.round(255 - t * 2 * 79)}, ${Math.round(255 - t * 2 * 197)})`
+      : `rgb(${Math.round(255 - (t - 0.5) * 2 * 61)}, ${Math.round(176 - (t - 0.5) * 2 * 133)}, ${Math.round(58 - (t - 0.5) * 2 * 15)})`
+    this.comboEl.style.transform = `scale(${(1 + t * 0.22).toFixed(3)})`
+    if (chain !== this.lastChain) {
+      this.lastChain = chain
+      this.comboEl.classList.remove('pop')
+      void this.comboEl.offsetWidth // restart the animation
+      this.comboEl.classList.add('pop')
+    }
     this.comboEl.textContent = `${chain} CHAIN  ×${mult.toFixed(2)}`
   }
 
@@ -145,6 +169,14 @@ export class Hud {
     this.hitmark.classList.remove('pop')
     void this.hitmark.offsetWidth // restart the animation
     this.hitmark.classList.add('pop')
+  }
+
+  killFlash() {
+    this.killFlashEl.style.transition = 'none'
+    this.killFlashEl.style.opacity = '1'
+    void this.killFlashEl.offsetWidth
+    this.killFlashEl.style.transition = ''
+    setTimeout(() => { this.killFlashEl.style.opacity = '0' }, 60)
   }
 
   flashDamage() {

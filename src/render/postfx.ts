@@ -34,6 +34,7 @@ import * as THREE from 'three'
 import { FullScreenQuad } from 'three/examples/jsm/postprocessing/Pass.js'
 import { FXAAShader } from 'three/examples/jsm/shaders/FXAAShader.js'
 import { POST } from '../config'
+import { setSceneDepth } from '../entities/particles'
 import { sunScreenPosition } from './sky'
 
 const FULLSCREEN_VERT = /* glsl */ `
@@ -452,6 +453,13 @@ const GRADE_FRAG = /* glsl */ `
     float g = hash( vUv * 900.0 + fract( uTime ) * 137.0 ) - 0.5;
     col += g * uGrain * ( 1.0 + uNight * 1.2 ) * ( 1.0 - smoothstep( 0.35, 1.0, luma( col ) ) * 0.7 );
 
+    // The grain fades to nothing in the highlights, so a smooth bright
+    // gradient — the sky around a low sun, the night dome — still quantises
+    // to visible 8-bit bands. A half-LSB of interleaved-gradient noise is
+    // below the threshold of visibility everywhere but under the bands.
+    float ign = fract( 52.9829189 * fract( dot( gl_FragCoord.xy, vec2( 0.06711056, 0.00583715 ) ) ) );
+    col += ( ign - 0.5 ) / 255.0;
+
     gl_FragColor = vec4( clamp( col, 0.0, 1.0 ), 1.0 );
   }
 `
@@ -463,6 +471,16 @@ export class PostFX {
   private bloomRT: THREE.WebGLRenderTarget[] = []
   /** Graded LDR, only allocated because FXAA needs somewhere to read from. */
   private gradeRT: THREE.WebGLRenderTarget
+
+  /**
+   * Scene depth for the particles' soft fade. WebGL forbids sampling a texture
+   * attached to the framebuffer being drawn, so the scene target keeps its
+   * depth renderbuffer and the depth is blitted out here after the scene pass;
+   * the particles therefore read depth that is one frame old. A blit is a raw
+   * copy, not a full-screen pass — no shader, no extra target bind in the chain.
+   */
+  private depthRT: THREE.WebGLRenderTarget
+  private depthReady = false
 
   private rayMat: THREE.ShaderMaterial
   private prefilterMat: THREE.ShaderMaterial
@@ -493,6 +511,16 @@ export class PostFX {
       samples: 0,
       depthBuffer: true,
     })
+    // Depth-only in intent; the unused colour attachment is the price of a
+    // stock WebGLRenderTarget. UnsignedIntType keeps the texture's internal
+    // format identical to the scene target's renderbuffer — blitFramebuffer
+    // requires the depth formats to match exactly.
+    this.depthRT = new THREE.WebGLRenderTarget(size.x, size.y, {
+      depthBuffer: true,
+      depthTexture: new THREE.DepthTexture(size.x, size.y, THREE.UnsignedIntType),
+    })
+    setSceneDepth(this.depthRT.depthTexture!, camera.near, camera.far)
+
     this.raysRT = hdrTarget(size.x * 0.5, size.y * 0.5)
     for (let i = 0; i < BLOOM_LEVELS; i++) {
       const s = BLOOM_SCALE / 2 ** i
@@ -584,6 +612,9 @@ export class PostFX {
     this.renderer.getDrawingBufferSize(this.size)
     const { x, y } = this.size
     this.sceneRT.setSize(x, y)
+    this.depthRT.setSize(x, y)
+    // Resizing reallocates the framebuffer, so the copy must re-bind it first.
+    this.depthReady = false
     this.gradeRT.setSize(x, y)
     this.raysRT.setSize(Math.max(1, Math.round(x * 0.5)), Math.max(1, Math.round(y * 0.5)))
     for (let i = 0; i < this.bloomRT.length; i++) {
@@ -614,6 +645,29 @@ export class PostFX {
     r.autoClear = previous
   }
 
+  /** See depthRT: the copy has to happen outside the scene pass. */
+  private copySceneDepth() {
+    const r = this.renderer
+    if (!this.depthReady) {
+      // A target's GL framebuffer only exists once it has been bound.
+      r.setRenderTarget(this.depthRT)
+      this.depthReady = true
+    }
+    const gl = r.getContext() as WebGL2RenderingContext
+    type FbProps = { __webglFramebuffer?: WebGLFramebuffer }
+    const src = (r.properties.get(this.sceneRT) as FbProps).__webglFramebuffer
+    const dst = (r.properties.get(this.depthRT) as FbProps).__webglFramebuffer
+    if (!src || !dst) return
+    // Bound through three's state cache, so its own bookkeeping stays valid.
+    r.state.bindFramebuffer(gl.READ_FRAMEBUFFER, src)
+    r.state.bindFramebuffer(gl.DRAW_FRAMEBUFFER, dst)
+    gl.blitFramebuffer(
+      0, 0, this.size.x, this.size.y,
+      0, 0, this.size.x, this.size.y,
+      gl.DEPTH_BUFFER_BIT, gl.NEAREST,
+    )
+  }
+
   /** @param frenzy 0..1 @param hurt 0..1 @param night 0..1, DayNight.darkness */
   render(dt: number, frenzy: number, hurt: number, night = 0) {
     this.time += dt
@@ -623,6 +677,7 @@ export class PostFX {
     // when it is drawing to the canvas, so what lands here is untouched light.
     r.setRenderTarget(this.sceneRT)
     r.render(this.scene, this.camera)
+    this.copySceneDepth()
 
     // ---- shafts, at half resolution, only when the sun is actually on screen.
     const rays = sunScreenPosition(this.sunDir, this.camera, this.sunUv) && this.godraysOn
@@ -681,6 +736,7 @@ export class PostFX {
 
   dispose() {
     this.sceneRT.dispose()
+    this.depthRT.dispose()
     this.raysRT.dispose()
     this.gradeRT.dispose()
     for (const t of this.bloomRT) t.dispose()

@@ -1073,6 +1073,8 @@ export class Tiger {
   private hitStop = 0
   /** Kick along the look axis on contact — the arm stopping against a body. */
   private impact = 0
+  /** Degrees of momentary FOV pull-in; set on a kill, decays on its own. */
+  fovKick = 0
   private clawBlood = 0
 
   /** Viewmodel. */
@@ -1726,6 +1728,7 @@ export class Tiger {
     this.recoilY = damp(this.recoilY, 0, 9, dt)
     this.hitStop = Math.max(0, this.hitStop - dt)
     this.impact = damp(this.impact, 0, 11, dt)
+    this.fovKick = damp(this.fovKick, 0, 8, dt)
 
     // The landing spring. Critically damped, and integrated semi-implicitly so it
     // cannot gain energy at a long frame: velocity first, then position off the
@@ -2334,6 +2337,7 @@ export class Tiger {
     let fov = CAMERA.fov
     if (this.frenzy > 0) fov = CAMERA.frenzyFov
     else if (this.sprinting) fov = CAMERA.sprintFov
+    fov -= this.fovKick
     if (Math.abs(this.camera.fov - fov) > 0.05) {
       this.camera.fov = damp(this.camera.fov, fov, 6, dt)
       this.camera.updateProjectionMatrix()
@@ -2357,6 +2361,7 @@ export class Tiger {
     this.camShake = 0
     this.hitStop = 0
     this.impact = 0
+    this.fovKick = 0
     this.clawBlood = 0
     this.clawMat.color.setHex(CLAW_CLEAN)
     this.clawMat.roughness = CLAW_ROUGH

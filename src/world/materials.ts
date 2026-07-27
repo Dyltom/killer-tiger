@@ -134,6 +134,7 @@ const MACRO_TILES = 5.5
 export function terrainMaterial(size: number): THREE.MeshStandardMaterial {
   const grass = pbr('grass')
   const dirt = pbr('dirt')
+  const rock = pbr('rock')
 
   const mat = new THREE.MeshStandardMaterial({
     // These four exist to make three define USE_MAP / USE_NORMALMAP /
@@ -154,6 +155,9 @@ export function terrainMaterial(size: number): THREE.MeshStandardMaterial {
     shader.uniforms.tDirtD = { value: dirt.map }
     shader.uniforms.tDirtN = { value: dirt.normalMap }
     shader.uniforms.tDirtA = { value: dirt.armMap }
+    shader.uniforms.tRockD = { value: rock.map }
+    shader.uniforms.tRockN = { value: rock.normalMap }
+    shader.uniforms.tRockA = { value: rock.armMap }
     shader.uniforms.uTerrainSize = { value: size }
 
     shader.vertexShader = shader.vertexShader
@@ -183,6 +187,7 @@ export function terrainMaterial(size: number): THREE.MeshStandardMaterial {
         #include <common>
         uniform sampler2D tGrassD, tGrassN, tGrassA;
         uniform sampler2D tDirtD, tDirtN, tDirtA;
+        uniform sampler2D tRockD, tRockN, tRockA;
         uniform float uTerrainSize;
         varying vec3 vTerrainW;
         varying vec3 vTerrainN;
@@ -216,6 +221,21 @@ export function terrainMaterial(size: number): THREE.MeshStandardMaterial {
           float dry = smoothstep( 0.54, 0.80, terrFbm( vTerrainW.xz * 0.021 ) );
           return clamp( village * 1.2 + slope + dry * 0.7, 0.0, 1.0 );
         }
+
+        // Crossfade two layers, letting whichever texture stands taller win the
+        // contested band. ARM red (AO) stands in for a height map: crevices are
+        // occluded and raised detail is not, which is close enough to relief for
+        // a blend mask. TERR_BLEND_DEPTH is the height overlap of the contested
+        // band — smaller is crisper, and 0 divides by zero where a == b.
+        #define TERR_BLEND_DEPTH 0.22
+        float terrHeightBlend( float hA, float hB, float t ) {
+          float a = 1.0 - t + hA;
+          float b = t + hB;
+          float m = max( a, b ) - TERR_BLEND_DEPTH;
+          a = max( a - m, 0.0 );
+          b = max( b - m, 0.0 );
+          return b / ( a + b );
+        }
         `,
       )
       // Albedo: two layers, each sampled at a detail and a macro frequency.
@@ -224,10 +244,14 @@ export function terrainMaterial(size: number): THREE.MeshStandardMaterial {
         /* glsl */ `
         vec2 tUv = vMapUv * ${DETAIL_TILES.toFixed(1)};
         vec2 tUvMacro = vMapUv * ${MACRO_TILES.toFixed(1)};
-        float dirtW = terrainDirtWeight();
 
         vec3 grassC = texture2D( tGrassD, tUv ).rgb;
         vec3 dirtC  = texture2D( tDirtD,  tUv ).rgb;
+        // One ARM fetch per layer here feeds the blend mask, the roughness
+        // chunk and the AO chunk — the chunks below must reuse these, not
+        // sample again.
+        vec3 grassARM = texture2D( tGrassA, tUv ).rgb;
+        vec3 dirtARM  = texture2D( tDirtA,  tUv ).rgb;
 
         // Macro variation. Modulating the detail layer by a very low-frequency
         // sample of the same image is what stops a 90x tiled texture from
@@ -237,18 +261,41 @@ export function terrainMaterial(size: number): THREE.MeshStandardMaterial {
         grassC *= mix( 0.68, 1.34, gm );
         dirtC  *= mix( 0.74, 1.28, dm );
 
-        vec4 sampledDiffuseColor = vec4( mix( grassC, dirtC, dirtW ), 1.0 );
+        float dirtW = terrHeightBlend( grassARM.r, dirtARM.r, terrainDirtWeight() );
+
+        // Third layer: bare rock where the ground is too steep to hold even
+        // dirt. The rock fetches sit behind the weight test so flat ground —
+        // most of the terrain — never pays for them.
+        float rockRaw = smoothstep( 0.55, 0.72, 1.0 - clamp( vTerrainN.y, 0.0, 1.0 ) );
+        float rockW = 0.0;
+        vec3 rockC = vec3( 0.0 );
+        vec3 rockARM = vec3( 0.0 );
+        vec3 rockN = vec3( 0.5, 0.5, 1.0 );
+        if ( rockRaw > 0.001 ) {
+          rockC = texture2D( tRockD, tUv ).rgb;
+          rockARM = texture2D( tRockA, tUv ).rgb;
+          rockN = texture2D( tRockN, tUv ).xyz;
+          float rm = dot( texture2D( tRockD, tUvMacro ).rgb, vec3( 0.3333 ) );
+          rockC *= mix( 0.74, 1.28, rm );
+          rockW = terrHeightBlend( mix( grassARM.r, dirtARM.r, dirtW ), rockARM.r, rockRaw );
+        }
+
+        // Every map — diffuse here, normal / roughness / AO in their chunks —
+        // must blend with these same two weights or the layers slide apart.
+        vec3 blendARM = mix( mix( grassARM, dirtARM, dirtW ), rockARM, rockW );
+
+        vec4 sampledDiffuseColor = vec4( mix( mix( grassC, dirtC, dirtW ), rockC, rockW ), 1.0 );
         diffuseColor *= sampledDiffuseColor;
         `,
       )
       .replace(
         '#include <normal_fragment_maps>',
         /* glsl */ `
-        vec3 mapN = mix(
+        vec3 mapN = mix( mix(
           texture2D( tGrassN, tUv ).xyz,
           texture2D( tDirtN,  tUv ).xyz,
           dirtW
-        ) * 2.0 - 1.0;
+        ), rockN, rockW ) * 2.0 - 1.0;
         // Flatten the normal with distance: past ~50 m the bumps are smaller
         // than a pixel and only produce shimmer.
         float nFade = 1.0 - smoothstep( 30.0, 90.0, length( vTerrainW - cameraPosition ) ) * 0.8;
@@ -259,21 +306,13 @@ export function terrainMaterial(size: number): THREE.MeshStandardMaterial {
       .replace(
         '#include <roughnessmap_fragment>',
         /* glsl */ `
-        float roughnessFactor = roughness * mix(
-          texture2D( tGrassA, tUv ).g,
-          texture2D( tDirtA,  tUv ).g,
-          dirtW
-        );
+        float roughnessFactor = roughness * blendARM.g;
         `,
       )
       .replace(
         '#include <aomap_fragment>',
         /* glsl */ `
-        float ambientOcclusion = mix(
-          texture2D( tGrassA, tUv ).r,
-          texture2D( tDirtA,  tUv ).r,
-          dirtW
-        );
+        float ambientOcclusion = blendARM.r;
         ambientOcclusion = ( ambientOcclusion - 1.0 ) * aoMapIntensity + 1.0;
         reflectedLight.indirectDiffuse *= ambientOcclusion;
         #if defined( USE_ENVMAP ) && defined( STANDARD )

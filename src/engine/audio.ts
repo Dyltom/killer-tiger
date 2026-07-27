@@ -1582,6 +1582,68 @@ export class Audio {
     this.grains(dest, 9, 0.45, 0.055, 4000, 11000, 0.004, 0.02, 0.02, 3, 0.6)
   }
 
+  /** Menu button press. A tick, not a chime — it must never outrank gameplay. */
+  uiClick() {
+    const dest = this.voice(PRI.low, 0.1, LEVELS.uiClick, {}, 0.25)
+    if (!dest) return
+    this.tone(dest, 'triangle', 1750, 1500, 0.035, 0.2, 0, 0.002)
+    this.noise(dest, 0.02, 0.12, 'highpass', 5500, 7000, 0, 0.8, 0.001)
+  }
+
+  /** Menu button hover. Quieter and shorter than the click it precedes. */
+  uiHover() {
+    const dest = this.voice(PRI.low, 0.08, LEVELS.uiHover, {}, 0.2)
+    if (!dest) return
+    this.tone(dest, 'triangle', 2300, 2200, 0.022, 0.14, 0, 0.002)
+  }
+
+  /**
+   * Kill confirm — a dry accent under the bite, at the ear rather than at the
+   * body. The bite carries the violence; this carries the receipt.
+   */
+  killConfirm() {
+    const dest = this.voice(PRI.normal, 0.25, LEVELS.killConfirm, {}, 0.4)
+    if (!dest) return
+    this.tone(dest, 'sine', 90, 62, 0.16, 0.4, 0, 0.004)
+    this.tone(dest, 'sine', 1240, 1180, 0.09, 0.1, 0.01, 0.002)
+    this.noise(dest, 0.03, 0.1, 'highpass', 4500, 6500, 0.01, 0.8, 0.001)
+  }
+
+  /**
+   * Low-health bed: a heartbeat with a thin tinnitus whine over it, driven
+   * every frame by the same hurt scalar the post grade uses. Silent above the
+   * threshold; the ramp keeps it from switching on audibly.
+   */
+  private hurtBed: GainNode | null = null
+  private hurtNextBeat = 0
+  setHurt(hurt: number) {
+    const ctx = this.ctx
+    if (!ctx || !this.ambBus) return
+    // hurt begins below 45% health; the bed holds off until ~35%.
+    const level = clamp((hurt - 0.22) / 0.78, 0, 1)
+    if (!this.hurtBed) {
+      this.hurtBed = ctx.createGain()
+      this.hurtBed.gain.value = 0
+      this.hurtBed.connect(this.ambBus)
+      const whine = ctx.createOscillator()
+      whine.type = 'sine'
+      whine.frequency.value = 5100
+      const wg = ctx.createGain()
+      wg.gain.value = 0.012
+      whine.connect(wg)
+      wg.connect(this.hurtBed)
+      whine.start()
+    }
+    this.hurtBed.gain.setTargetAtTime(level * LEVELS.lowHealth, ctx.currentTime, 0.4)
+    if (level <= 0.01) return
+    if (ctx.currentTime >= this.hurtNextBeat) {
+      // Lub-dub; the rate climbs with how close to death the tiger is.
+      this.hurtNextBeat = ctx.currentTime + 1.05 - level * 0.3
+      this.tone(this.hurtBed, 'sine', 62, 44, 0.14, 0.55, 0, 0.006)
+      this.tone(this.hurtBed, 'sine', 56, 40, 0.12, 0.38, 0.17, 0.006)
+    }
+  }
+
   /**
    * Leaving the ground.
    *

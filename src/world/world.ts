@@ -631,8 +631,12 @@ export class World {
           const lz = (x - c.x) * sin + (z - c.z) * cos
           // The doorway is a corridor along local +z as wide as the opening
           // less the body squeezing through it. Inside that corridor there is
-          // simply nothing to hit, which is what makes walking in work.
-          if (lz > 0 && Math.abs(lx) < c.hollow.doorW / 2 - radius) return
+          // simply nothing to hit, which is what makes walking in work. The
+          // body's radius is halved for this one test: at full radius the
+          // corridor was 0.65 m across and going in meant threading a needle,
+          // which read as "the door doesn't work". A shoulder clipping the
+          // jamb by a few centimetres is a fairer lie than that.
+          if (lz > 0 && Math.abs(lx) < c.hollow.doorW / 2 - radius * 0.5) return
           const t = c.hollow.wall
           let nlx = lx
           let nlz = lz

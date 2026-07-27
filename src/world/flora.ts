@@ -26,6 +26,53 @@ import { addContactShade } from './contact'
 import { addDistanceFade, addTranslucency, addWind } from './wind'
 import type { Collider } from './world'
 
+// ---------------------------------------------------------------- dryness
+/**
+ * CPU port of the terrain shader's dirt weight (materials.ts, terrFbm /
+ * terrainDirtWeight). The hash, octave count and lacunarity must stay in
+ * lockstep with the GLSL or the grass tint drifts off the ground pattern it is
+ * supposed to sit on. The slope term is omitted — it needs the surface normal,
+ * and grass is barely scattered on slopes steep enough for it to matter.
+ */
+function terrHash(x: number, y: number): number {
+  const s = Math.sin(x * 127.1 + y * 311.7) * 43758.5453
+  return s - Math.floor(s)
+}
+function terrNoise(x: number, y: number): number {
+  const xi = Math.floor(x)
+  const yi = Math.floor(y)
+  let fx = x - xi
+  let fy = y - yi
+  fx = fx * fx * (3 - 2 * fx)
+  fy = fy * fy * (3 - 2 * fy)
+  const a = terrHash(xi, yi)
+  const b = terrHash(xi + 1, yi)
+  const c = terrHash(xi, yi + 1)
+  const d = terrHash(xi + 1, yi + 1)
+  return a + (b - a) * fx + (c - a) * fy + (a - b - c + d) * fx * fy
+}
+function terrFbm(x: number, y: number): number {
+  let v = 0
+  let a = 0.5
+  for (let i = 0; i < 4; i++) {
+    v += a * terrNoise(x, y)
+    x *= 2.03
+    y *= 2.03
+    a *= 0.5
+  }
+  return v
+}
+function smoothstep(lo: number, hi: number, v: number): number {
+  const t = Math.min(Math.max((v - lo) / (hi - lo), 0), 1)
+  return t * t * (3 - 2 * t)
+}
+/** 0 where the ground shader shows grass, 1 where it shows bare dirt. */
+function terrainDryness(x: number, z: number): number {
+  const village = 1 - smoothstep(24, 44, Math.hypot(x, z))
+  const dry = smoothstep(0.54, 0.8, terrFbm(x * 0.021, z * 0.021))
+  return Math.min(Math.max(village * 1.2 + dry * 0.7, 0), 1)
+}
+
 export interface FloraContext {
   rng: Rng
   /** Ground height at a world position. */
@@ -63,7 +110,9 @@ function cardClump(count: number, radius: number, cardSize: number, seed: number
     q.translate(Math.cos(a) * r, rng.range(0.05, 1) * radius, Math.sin(a) * r)
     parts.push(q)
   }
-  return mergeGeometries(parts)!
+  // Shade the clump as one rounded mass: flat card normals inside it flip
+  // against each other and light like a pile of paper.
+  return radiateNormals(mergeGeometries(parts)!, radius * 0.5)
 }
 
 /** Crossed quads, pivoting about the base so wind bends them like a plant. */
@@ -75,7 +124,10 @@ function crossedQuads(planes: number, width: number, height: number): THREE.Buff
     q.rotateY((i / planes) * Math.PI)
     parts.push(q)
   }
-  return mergeGeometries(parts)!
+  // Grass takes most of its light from the sky, so the normals lean toward up
+  // rather than the card facing — otherwise crossed quads shade as two flat
+  // panes with a seam where they meet.
+  return bendNormalsUp(mergeGeometries(parts)!, 0.7)
 }
 
 /** Foliage lit as a thin surface: no metal, no gloss, lit from both sides. */
@@ -91,6 +143,45 @@ function leafMaterial(map: THREE.Texture, color: number): THREE.MeshStandardMate
     // shadows — a transparent material would drop out of the shadow map.
     transparent: false,
   })
+}
+
+// -------------------------------------------------------------- bent normals
+/**
+ * Cut-out cards carry the plane's flat normal, which lights every blade in a
+ * tuft identically and flips hard where quads cross. Bending the normals is
+ * done here, in the geometry, so the materials stay shared across every
+ * instance — per-instance materials are off the table in this project.
+ */
+
+/** Blend each vertex normal toward local up. `up` = 1 shades like a lawn. */
+function bendNormalsUp(geo: THREE.BufferGeometry, up: number): THREE.BufferGeometry {
+  const n = geo.attributes.normal as THREE.BufferAttribute
+  const v = new THREE.Vector3()
+  for (let i = 0; i < n.count; i++) {
+    v.fromBufferAttribute(n, i).multiplyScalar(1 - up)
+    v.y += up
+    v.normalize()
+    n.setXYZ(i, v.x, v.y, v.z)
+  }
+  n.needsUpdate = true
+  return geo
+}
+
+/** Point every normal outward from a local centre, as if the clump were a ball. */
+function radiateNormals(geo: THREE.BufferGeometry, cy: number): THREE.BufferGeometry {
+  const p = geo.attributes.position as THREE.BufferAttribute
+  const n = geo.attributes.normal as THREE.BufferAttribute
+  const v = new THREE.Vector3()
+  for (let i = 0; i < n.count; i++) {
+    v.fromBufferAttribute(p, i)
+    v.y -= cy
+    // A card sitting exactly on the centre keeps its own facing.
+    if (v.lengthSq() < 1e-6) continue
+    v.normalize()
+    n.setXYZ(i, v.x, v.y, v.z)
+  }
+  n.needsUpdate = true
+  return geo
 }
 
 const M = new THREE.Matrix4()
@@ -189,6 +280,11 @@ export function buildTrees(ctx: FloraContext): ChunkedScatter[] {
   branchGeo.translate(0, 0.5, 0)
   const cardGeo = new THREE.PlaneGeometry(1, 1)
   cardGeo.translate(0, 0.5, 0)
+  // composeCard tilts each card's local up along its limb, and the limbs fan
+  // outward from the crown — so an up-biased normal, rotated per instance,
+  // points away from the clump centre and the canopy shades as a rounded mass.
+  // No per-instance data, so the leaf material stays shared.
+  bendNormalsUp(cardGeo, 0.75)
 
   // ---- materials
   // Repeats are set from the real size of the thing they're on. The bark set is
@@ -416,7 +512,13 @@ export function buildGrass(ctx: FloraContext): GrassResult {
       const s = rng.range(0.8, 1.15)
       // Dry-season savanna: olive and straw, never lime. Hues below ~0.12 come
       // out fluorescent yellow once the low sun rakes across them.
-      tint.setHSL(rng.range(0.13, 0.2), rng.range(0.18, 0.36), rng.range(0.3, 0.48))
+      // Pulled toward straw exactly where the terrain shader shows bare dirt,
+      // so ground and cover read as one biome rather than green tufts on dust.
+      const dw = terrainDryness(x, z) * 0.85
+      const h = rng.range(0.13, 0.2)
+      const sat = rng.range(0.18, 0.36)
+      const l = rng.range(0.3, 0.48)
+      tint.setHSL(h + (0.125 - h) * dw, sat + (0.3 - sat) * dw, l + (0.52 - l) * dw)
       // Sunk slightly so no clump shows a floating hard edge on a slope.
       const y = ctx.height(x, z) - 0.08
       tall.push(compose(x, y, z, 0, rng.range(0, Math.PI), 0, s, s * rng.range(0.8, 1.15), s), x, y + 1.3, z, tint)
@@ -449,7 +551,13 @@ export function buildGrass(ctx: FloraContext): GrassResult {
     const s = rng.range(0.85, 1.65)
     // Desaturated and pulled toward the ground's own hue: high-contrast tufts
     // on pale dirt read as scattered props rather than a continuous sward.
-    tint.setHSL(rng.range(0.12, 0.19), rng.range(0.12, 0.28), rng.range(0.28, 0.46))
+    // Same dryness pull as the tall grass — the cover sits directly on the
+    // terrain texture, so any mismatch shows as a green film over bare dirt.
+    const dw = terrainDryness(d.x, d.z) * 0.85
+    const h = rng.range(0.12, 0.19)
+    const sat = rng.range(0.12, 0.28)
+    const l = rng.range(0.28, 0.46)
+    tint.setHSL(h + (0.125 - h) * dw, sat + (0.28 - sat) * dw, l + (0.5 - l) * dw)
     const y = ctx.height(d.x, d.z) - 0.05
     cover.push(compose(d.x, y, d.z, 0, rng.range(0, Math.PI), 0, s, s * rng.range(0.8, 1.25), s), d.x, y + 0.6, d.z, tint)
   }
