@@ -175,7 +175,23 @@ const CASES: [string, number, (a: InstanceType<typeof Audio>) => void][] = [
   ['gameOver', 5.0, (a) => a.gameOver()],
   ['comboTick', 0.8, (a) => a.comboTick(4)],
   ['frenzyStart', 3.0, (a) => a.frenzyStart()],
+  // The ambience one-shots pick a branch at random off a roll the probe can't
+  // steer, so they're driven straight rather than through ambientOneShot().
+  ['bird', 1.0, (a) => amb(a).birdCall(bus(a))],
+  ['dogBark', 1.5, (a) => amb(a).dogBark(bus(a), 3)],
+  ['scrubRustle', 1.5, (a) => amb(a).scrubRustle(bus(a))],
 ]
+
+type Amb = {
+  birdCall(d: AudioNode): void
+  dogBark(d: AudioNode, n: number): void
+  scrubRustle(d: AudioNode): void
+  voice(p: number, dur: number, g: number, place: object, wet: number): AudioNode | null
+}
+const amb = (a: InstanceType<typeof Audio>) => a as unknown as Amb
+/** The same routing ambientOneShot() gives them: distant, off to one side. */
+const bus = (a: InstanceType<typeof Audio>) =>
+  amb(a).voice(1, 0.5, 0.5, { pan: 0.5, dist: 55 }, 2.2) ?? ({} as AudioNode)
 
 const only = process.argv.slice(2).filter((a) => a !== '--env')
 const pick = CASES.filter(([n]) => !only.length || only.some((o) => n.includes(o)))

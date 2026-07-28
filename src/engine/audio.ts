@@ -1780,10 +1780,15 @@ export class Audio {
     // audible. So the click and the wet band came up and the sub went down.
     this.noise(dest, 0.01, 0.3, 'highpass', 3800, 2600, 0.002, 0.8, 0.0006)
     this.noise(dest, 0.06, 0.16, 'bandpass', 1500 * j, 800, 0.004, 3.4, 0.004)
-    // Settling. Quiet enough to be felt under the wet part rather than to *be*
-    // the sound: a swallow carrying nothing but sub measured fifty-five decibels
-    // down through presence, which on the speakers this is played on is a
-    // pickup the player gets no feedback from at all.
+    // Settling, felt under the wet part rather than being the sound.
+    //
+    // Band energy still reads this cue as almost pure sub, and that reading is
+    // an artefact: it integrates four hundred milliseconds of settling tone
+    // against a ten-millisecond click, so the click cannot win however loud it
+    // is. Measured the way the ear hears it — peak level, in a window — the
+    // high end of the first forty milliseconds comes within 2.4 dB of the whole
+    // sound's peak, and is 24 dB above anything after it. The front of the gulp
+    // is the click. Don't "fix" the band number by pulling this any further.
     if (big) this.tone(dest, 'sine', 70, 44, 0.4, 0.1, 0.1, 0.03)
   }
 
@@ -1806,16 +1811,28 @@ export class Audio {
     this.noise(dest, 0.02, 0.18, 'highpass', 5000, 3000, 0, 0.7, 0.0008)
     // A rising fourth-stack, which is the interval every "you got stronger"
     // cue in the medium is built on.
+    //
+    // The pitches are fixed on purpose — the whole point is landing in key with
+    // the score — but everything that isn't pitch varies. Measured, twenty
+    // renders of this were four tenths of a decibel apart, the most identical
+    // sound in the game and the one signature the ear reads as a sample rather
+    // than a performance. A struck object is never struck twice the same way:
+    // the roll of the arpeggio, how hard each note is hit and where its
+    // inharmonic partials fall all move, and none of that touches the key.
+    const roll = rand(0.035, 0.07)
     for (const [i, mult] of [1, 1.5, 2, 3].entries()) {
-      this.tone(dest, 'triangle', root * mult, root * mult * 1.002, 0.42, 0.13, i * 0.05, 0.01)
-      this.tone(dest, 'sine', root * mult * 2, root * mult * 2, 0.3, 0.05, i * 0.05, 0.01)
+      const at = i * roll * rand(0.85, 1.15)
+      const hit = rand(0.8, 1.25)
+      this.tone(dest, 'triangle', root * mult, root * mult * 1.002, 0.42, 0.13 * hit, at, 0.01)
+      this.tone(dest, 'sine', root * mult * 2, root * mult * 2, 0.3, 0.05 * hit, at, 0.01)
       // Struck-metal partials. Deliberately not whole multiples of the note:
       // inharmonic upper partials that decay faster than the fundamental are
       // the whole difference between a bell and an organ, and this measured
       // thirty-six decibels down through presence — an organ, in a game about
-      // a tiger.
-      this.tone(dest, 'sine', root * mult * 4.1, root * mult * 4.1, 0.5, 0.035, i * 0.05, 0.004)
-      this.tone(dest, 'sine', root * mult * 6.8, root * mult * 6.8, 0.32, 0.02, i * 0.05, 0.004)
+      // a tiger. Where exactly they fall is a property of the casting, not of
+      // the note, so it moves per strike.
+      this.tone(dest, 'sine', root * mult * rand(3.8, 4.4), root * mult * 4.1, 0.5, 0.035 * hit, at, 0.004)
+      this.tone(dest, 'sine', root * mult * rand(6.3, 7.3), root * mult * 6.8, 0.32, 0.02 * hit, at, 0.004)
     }
     this.tone(dest, 'sine', 55, 55, 0.7, 0.28, 0, 0.02)
     // Shimmer, at a level you can actually hear rather than as a token.
@@ -1946,16 +1963,25 @@ export class Audio {
     bp.frequency.setValueAtTime(720 * j, t + 0.01)
     bp.frequency.exponentialRampToValueAtTime(340 * j, t + 0.26)
     bp.Q.value = 0.9
+    //
+    // The exhale is also where each pounce gets to be its own pounce. Pitch was
+    // the only thing varying here, and pitch alone is a sampler with a tuning
+    // knob — twenty renders measured four tenths of a decibel apart at the peak,
+    // which is what a single sample retriggered sounds like. How hard and how
+    // long a cat blows out is not fixed, so the level, the length and the tract
+    // it comes through all move with it.
+    const push = rand(0.17, 0.28)
+    const len = rand(0.28, 0.4)
     const breath = ctx.createGain()
     breath.gain.setValueAtTime(0.0001, t + 0.01)
-    breath.gain.exponentialRampToValueAtTime(0.22, t + 0.06)
-    breath.gain.exponentialRampToValueAtTime(0.0001, t + 0.34)
+    breath.gain.exponentialRampToValueAtTime(push, t + rand(0.045, 0.08))
+    breath.gain.exponentialRampToValueAtTime(0.0001, t + len)
     bs.connect(bp)
     bp.connect(breath)
     breath.connect(dest)
     bs.start(t + 0.01, Math.random() * 0.4)
-    bs.stop(t + 0.32)
-    this.formants(breath, bp, [520 * j, 1150, 2500], [0.5, 0.22, 0.07], 4)
+    bs.stop(t + len)
+    this.formants(breath, bp, [520 * j * rand(0.94, 1.07), 1150 * rand(0.92, 1.1), 2500], [0.5, rand(0.15, 0.3), 0.07], 4)
 
     const osc = ctx.createOscillator()
     osc.type = 'sawtooth'
@@ -1963,8 +1989,8 @@ export class Audio {
     osc.frequency.exponentialRampToValueAtTime(88, t + 0.22)
     const ve = ctx.createGain()
     ve.gain.setValueAtTime(0.0001, t + 0.012)
-    ve.gain.exponentialRampToValueAtTime(0.045, t + 0.04)
-    ve.gain.exponentialRampToValueAtTime(0.0001, t + 0.24)
+    ve.gain.exponentialRampToValueAtTime(0.045 * rand(0.7, 1.35), t + 0.04)
+    ve.gain.exponentialRampToValueAtTime(0.0001, t + rand(0.2, 0.3))
     osc.connect(ve)
     ve.connect(dest)
     osc.start(t + 0.012)
@@ -2268,24 +2294,113 @@ export class Audio {
     const dest = this.voice(PRI.low, 0.5, LEVELS.distantShot, { pan: rand(-0.9, 0.9), dist: rand(35, 95) }, 2.2)
     if (!dest) return
 
-    if (dark < 0.4 && roll < 0.14) {
-      // Daytime bird — a few quick descending whistles.
-      const n = 2 + Math.floor(Math.random() * 3)
-      const f = rand(1800, 3200)
-      for (let i = 0; i < n; i++) {
-        this.tone(dest, 'sine', f * rand(0.95, 1.05), f * 0.75, 0.09, 0.22, i * rand(0.1, 0.17), 0.01)
-      }
-    } else if (dark > 0.45 && roll < 0.1) {
-      // A dog in the village, and once the hunts are late, several.
-      const barks = this.ambWave > 3 ? 3 : 2
-      for (let i = 0; i < barks; i++) {
-        const at = i * rand(0.22, 0.38)
-        this.noise(dest, 0.06, 0.5, 'bandpass', rand(600, 900), 300, at, 2.5, 0.003)
-        this.tone(dest, 'sawtooth', rand(300, 420), 160, 0.1, 0.3, at, 0.004)
-      }
-    } else if (roll < 0.22) {
-      // Something moving in the scrub. Nothing you can see.
-      this.noise(dest, rand(0.15, 0.4), 0.4, 'bandpass', rand(2200, 4000), rand(1200, 2000), 0, 1.4, 0.05)
+    if (dark < 0.4 && roll < 0.14) this.birdCall(dest)
+    else if (dark > 0.45 && roll < 0.1) this.dogBark(dest, this.ambWave > 3 ? 3 : 2)
+    else if (roll < 0.22) this.scrubRustle(dest)
+  }
+
+  /**
+   * A bird somewhere in the trees. A few quick descending whistles.
+   *
+   * These were bare sine glides, which is the sound a hearing test makes. Three
+   * things separate a whistle from a test tone and all three are cheap: the
+   * pitch never holds still (a bird's syrinx runs at five to nine hertz of
+   * vibrato and wanders while it does), the note starts with a puff of air
+   * before it finds its pitch, and there is a faint second harmonic that dies
+   * before the fundamental does. The phrase also has to be a phrase — notes at
+   * one level and one interval are a metronome, not an animal.
+   */
+  private birdCall(dest: AudioNode) {
+    const ctx = this.ctx
+    if (!ctx) return
+    const n = 2 + Math.floor(Math.random() * 3)
+    const base = rand(1800, 3200)
+    // Whether this one falls away or holds up over the phrase. Both are birds;
+    // always falling is a sound effect.
+    const drift = rand(-0.12, 0.05)
+    for (let i = 0; i < n; i++) {
+      const t = this.when(i * rand(0.1, 0.17))
+      const dur = rand(0.07, 0.12)
+      const f0 = base * (1 + drift * i) * rand(0.95, 1.05)
+      const f1 = f0 * rand(0.68, 0.82)
+      const lvl = 0.22 * rand(0.75, 1)
+      const g = this.env(dest, t, dur, lvl, 0.012)
+      const osc = ctx.createOscillator()
+      osc.type = 'sine'
+      osc.frequency.setValueAtTime(f0, t)
+      osc.frequency.exponentialRampToValueAtTime(f1, t + dur)
+      this.jitter(osc.frequency, t, dur, f0 * 0.02)
+      osc.connect(g)
+      osc.start(t)
+      osc.stop(t + dur + 0.02)
+      // The harmonic, an octave up and gone first — this is the difference
+      // between a whistle and a flute.
+      const h = ctx.createOscillator()
+      h.type = 'sine'
+      h.frequency.setValueAtTime(f0 * 2, t)
+      h.frequency.exponentialRampToValueAtTime(f1 * 2, t + dur)
+      h.connect(this.env(dest, t, dur * 0.55, lvl * 0.16, 0.008))
+      h.start(t)
+      h.stop(t + dur + 0.02)
+      // Air finding the note.
+      this.noise(dest, 0.014, lvl * 0.3, 'bandpass', f0 * 1.2, f0, i * rand(0.1, 0.17), 2.2, 0.002)
+    }
+  }
+
+  /**
+   * A dog in the village, across open ground.
+   *
+   * A bark was a sawtooth glide with a noise burst on the front, which reads as
+   * a buzzer. A bark is a *voice*: a hard glottal onset, a harmonic stack
+   * shaped by a short muzzle into two low formants, and a tail that opens into
+   * breath as the mouth does. The formant pair is what makes it a dog rather
+   * than a horn, and the breath at the end is what makes it an animal that has
+   * to stop and take another one.
+   */
+  private dogBark(dest: AudioNode, barks: number) {
+    const ctx = this.ctx
+    if (!ctx) return
+    for (let i = 0; i < barks; i++) {
+      const at = i * rand(0.22, 0.38)
+      const t = this.when(at)
+      const dur = rand(0.11, 0.16)
+      // A dog does not repeat itself exactly either — each bark of a series
+      // sits a little lower and a little tireder than the one before it.
+      const f0 = rand(320, 430) * (1 - i * 0.05)
+      const src = ctx.createOscillator()
+      src.type = 'sawtooth'
+      src.frequency.setValueAtTime(f0 * 1.25, t)
+      src.frequency.exponentialRampToValueAtTime(f0 * 0.55, t + dur)
+      this.jitter(src.frequency, t, dur, f0 * 0.05)
+      const g = this.env(dest, t, dur, 0.34, 0.003)
+      // Short muzzle: first formant low and loud, second up where the bark
+      // carries across the fields.
+      this.formants(g, src, [rand(430, 520), rand(1150, 1400), rand(2300, 2700)], [1, 0.5, 0.22], 6)
+      src.start(t)
+      src.stop(t + dur + 0.02)
+      // The glottal slam on the front, and the breath the mouth opens into.
+      this.noise(dest, 0.012, 0.42, 'bandpass', rand(900, 1300), 500, at, 2.2, 0.0008)
+      this.breath(dest, at + dur * 0.55, dur * 0.9, 0.1, [500, 1300, 2500], 2.4)
+    }
+  }
+
+  /**
+   * Something moving in the scrub. Nothing you can see.
+   *
+   * This was one band of noise fading in and out, which is wind, not an animal.
+   * Dry vegetation is hundreds of separate contacts — a rustle is granular by
+   * construction — and something *moving* through it does so in bursts, with
+   * gaps where it stops to check whether it is being followed. The gaps are
+   * most of why this reads as alive.
+   */
+  private scrubRustle(dest: AudioNode) {
+    const steps = 2 + Math.floor(Math.random() * 2)
+    let at = 0
+    for (let i = 0; i < steps; i++) {
+      this.grains(dest, 5 + Math.floor(Math.random() * 4), rand(0.07, 0.14), 0.16, 2200, 6500, 0.004, 0.018, at, 2.2, 0.7)
+      // A little body under the leaves, so it has a mass pushing through them.
+      this.noise(dest, rand(0.08, 0.14), 0.07, 'bandpass', rand(700, 1100), rand(400, 700), at, 1.6, 0.02)
+      at += rand(0.16, 0.34)
     }
   }
 
