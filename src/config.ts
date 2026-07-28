@@ -877,8 +877,18 @@ export const POST = {
  * the score gets out of the way when something loud happens.
  */
 export const AUDIO = {
-  /** Bus trims, pre-limiter. */
-  master: 0.92,
+  /**
+   * Bus trims. `master` is the only one *after* the limiter, and it is what
+   * actually sets the true peak — which is why lowering `satMakeup` or a
+   * sound's own level does not stop it clipping. Web Audio's compressor
+   * applies its own makeup gain, so the harder the limiter works the more it
+   * hands back; at 0.92 the rifle measured 0.0 dBFS at the converter no matter
+   * what was done upstream of it. At 0.70 the loudest thing in the game sits
+   * just over two decibels down, which is headroom the soft clipper can spend
+   * on making things sound loud instead of the converter spending it on
+   * distortion. See `scripts/audio-probe.ts`.
+   */
+  master: 0.70,
   sfx: 1.0,
   music: 0.55,
   ambience: 0.42,
@@ -905,11 +915,17 @@ export const AUDIO = {
   /** Concurrent voice budget. Past this, low-priority one-shots are dropped. */
   maxVoices: 40,
 
-  /** Two reverbs: a tight treeline slap and the long valley behind it. */
+  /**
+   * Two reverbs: a tight treeline slap and the long valley behind it. The
+   * decay figures are nepers across the whole length, so 6.9 is a tail that
+   * reaches -60 dB exactly as the buffer ends — the ordinary definition of a
+   * reverb time. They used to be exponents on `1 - t`, which held the wash
+   * within eighteen decibels of full for two seconds; see `impulseResponse`.
+   */
   nearSeconds: 0.55,
-  nearDecay: 2.6,
+  nearDecay: 6.9,
   farSeconds: 2.9,
-  farDecay: 1.5,
+  farDecay: 6.9,
   /** Base send levels; both scale up with distance. */
   wetNear: 0.20,
   wetFar: 0.09,
@@ -932,7 +948,7 @@ export const AUDIO = {
    * every normal sound, it also sets the loudest a normal sound may be.
    */
   satCeiling: 2.0,
-  satMakeup: 0.95,
+  satMakeup: 0.82,
 
   /** Sidechain. Big events pull the score down and let it back up. */
   duckAmount: 0.55,
@@ -1043,7 +1059,7 @@ export const LEVELS = {
   // peak level as a claw strike is not a loud footstep, it is a broken mix:
   // every step steals a decibel of the limiter from whatever else is playing.
   swipe: 3.0,
-  bulletWhiz: 9.0,
+  bulletWhiz: 6.5,
   pounce: 9.0,
   footstep: 4.5,
   pickup: 1.6,

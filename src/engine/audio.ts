@@ -138,45 +138,104 @@ function saturationCurve(): Float32Array<ArrayBuffer> {
   return c
 }
 
-function noiseBuffer(ctx: Ctx, seconds: number, channels = 1): AudioBuffer {
+/**
+ * Noise to read layers out of.
+ *
+ * Always stereo, and that is the point. Every short burst in this file — the
+ * pad of a footstep, the tear of a claw, the muzzle blast, the grit — read out
+ * of a *mono* buffer, so no matter what else was done to them they collapsed to
+ * a point in the exact centre of the image. Measured, the sounds the player
+ * hears most and hears closest were the narrowest things in the game: the claw
+ * strike, the landing, the hurt and the chew all sat twenty-two to twenty-eight
+ * decibels of side under mid, which is mono with rounding. In a first-person
+ * game that means your own body happens inside your skull rather than around
+ * you, and no amount of layering fixes it.
+ *
+ * `corr` is how much the right channel shares with the left. Fully independent
+ * channels are *too* wide for a close source — they lose the sense of a single
+ * point making the sound, and they half-cancel in mono. Around half is what a
+ * real pair of microphones on something an arm's length away actually measures.
+ */
+function noiseBuffer(ctx: Ctx, seconds: number, corr = 0.5): AudioBuffer {
   const n = Math.max(1, Math.floor(ctx.sampleRate * seconds))
-  const buf = ctx.createBuffer(channels, n, ctx.sampleRate)
-  for (let c = 0; c < channels; c++) {
-    const d = buf.getChannelData(c)
-    for (let i = 0; i < n; i++) d[i] = Math.random() * 2 - 1
+  const buf = ctx.createBuffer(2, n, ctx.sampleRate)
+  const l = buf.getChannelData(0)
+  const r = buf.getChannelData(1)
+  // Normalised so the pair keeps unit variance whatever the correlation is.
+  const k = Math.sqrt(1 - corr * corr)
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * 2 - 1
+    const b = Math.random() * 2 - 1
+    l[i] = a
+    r[i] = corr * a + k * b
   }
   return buf
 }
 
 /**
- * A synthetic impulse response: a handful of discrete early reflections in
- * front of an exponentially decaying, progressively darkening noise tail.
+ * A synthetic impulse response: a short buildup, a handful of discrete early
+ * reflections, and a decaying, progressively darkening noise tail.
  *
- * The early taps are what tell you the size of the space — without them a
- * decaying noise burst reads as a reverb plugin rather than as a place. The
- * tail is lowpassed harder as it decays because air and foliage eat treble
- * before they eat bass, which is why a valley echo comes back muffled.
+ * **The decay has to be exponential**, which is to say straight in decibels.
+ * This used to raise `1 - t` to a power, and that is not a small stylistic
+ * difference — a power law spends almost its whole length near the top and
+ * then falls off a cliff at the very end. Measured, the valley tail was still
+ * within eighteen decibels of full level two and a quarter seconds in, so
+ * every one-shot in the game had a flat, undecaying wash sitting about thirty
+ * decibels underneath it that simply stopped when the buffer ran out. A claw
+ * strike measured -30 dB at 200 ms and *the same* -33 dB a full second later.
+ * That floor is the single most recognisable sound of a cheap reverb, and it
+ * was under everything.
+ *
+ * `decay` is now nepers across the whole length, so 6.9 is a tail that reaches
+ * -60 dB exactly at the end — the usual definition of the reverb time.
+ *
+ * Two other things separate a place from a plugin. The **buildup**: reflection
+ * density grows for the first few tens of milliseconds rather than arriving all
+ * at once, so the tail swells into existence behind the early taps instead of
+ * starting at its own maximum. And the **brightness**: this started at a
+ * one-pole coefficient of 0.35, which is a corner near 2.7 kHz — the room was
+ * already dull on its first sample, so it could only ever add mud. A real
+ * reflection off a treeline comes back bright and *then* darkens, because that
+ * is what foliage and air do to it over distance.
+ *
+ * Finally it is normalised to fixed energy, so the send levels in `AUDIO` mean
+ * the same thing after any edit here.
  */
 function impulseResponse(ctx: Ctx, seconds: number, decay: number): AudioBuffer {
   const rate = ctx.sampleRate
   const n = Math.floor(rate * seconds)
   const buf = ctx.createBuffer(2, n, rate)
+  // Density reaches full over 30 ms; below that the tail is thinned out.
+  const build = Math.max(1, Math.floor(rate * 0.03))
+  let energy = 0
   for (let c = 0; c < 2; c++) {
     const d = buf.getChannelData(c)
-    // One-pole lowpass state, its coefficient swept over the tail.
+    // One-pole lowpass state, its coefficient swept from open to dark.
     let lp = 0
     for (let i = 0; i < n; i++) {
       const t = i / n
       const white = Math.random() * 2 - 1
-      const a = 0.35 - t * 0.28
+      const a = 0.9 * Math.exp(-t * 3.2) + 0.02
       lp += a * (white - lp)
-      d[i] = lp * Math.pow(1 - t, decay)
+      const swell = i < build ? i / build : 1
+      d[i] = lp * Math.exp(-t * decay) * swell
     }
-    // Early reflections, decorrelated per channel so the space has width.
+    // Early reflections, decorrelated per channel so the space has width. They
+    // decay with the tail rather than on their own schedule, so a short room
+    // and a long one do not both hand back the same set of slaps.
     for (let r = 0; r < 6; r++) {
-      const at = Math.floor(rate * (0.006 + r * 0.011 + Math.random() * 0.008 + c * 0.002))
-      if (at < n) d[at] += (Math.random() * 2 - 1) * (0.6 / (1 + r))
+      const dt = 0.006 + r * 0.011 + Math.random() * 0.008 + c * 0.002
+      const at = Math.floor(rate * dt)
+      if (at < n) d[at] += (Math.random() * 2 - 1) * (0.6 / (1 + r)) * Math.exp((-dt / seconds) * decay)
     }
+    for (let i = 0; i < n; i++) energy += d[i]! * d[i]!
+  }
+  // Fixed energy per second of length, so a longer space is not a louder one.
+  const norm = Math.sqrt(seconds / Math.max(1e-9, energy / rate)) * 0.06
+  for (let c = 0; c < 2; c++) {
+    const d = buf.getChannelData(c)
+    for (let i = 0; i < n; i++) d[i]! *= norm
   }
   return buf
 }
@@ -185,6 +244,8 @@ export class Audio {
   private ctx: Ctx | null = null
   private master: GainNode | null = null
   private muffle: BiquadFilterNode | null = null
+  /** Sounds that happen inside the player's head, past the concussion filter. */
+  private headBus: GainNode | null = null
   private sfxBus: GainNode | null = null
   private musicBus: GainNode | null = null
   private ambBus: GainNode | null = null
@@ -240,12 +301,31 @@ export class Audio {
     limiter.release.value = 0.12
     limiter.connect(this.master)
 
+    // Rumble cut, ahead of everything that controls level.
+    //
+    // Almost every sound in this file has weight built into it, and weight is
+    // built out of sines gliding down to thirty and forty hertz. Forty voices
+    // of that sums, and what it sums into is headroom: the soft clipper and the
+    // limiter both work on peak, and a peak made of infrasound is a peak that
+    // costs the mix decibels it can never spend on anything the player can
+    // hear. Nothing this game is played on reproduces below about fifty hertz
+    // anyway — laptop speakers roll off an octave above that — so this is pure
+    // profit, and it is why the shots and the strikes can now sit where they do
+    // without folding.
+    const rumble = ctx.createBiquadFilter()
+    rumble.type = 'highpass'
+    rumble.frequency.value = 32
+    // Damped below Butterworth. A highpass with any resonance at all overshoots
+    // on exactly the transients this is sitting in front of to protect.
+    rumble.Q.value = 0.5
+
     // Instantaneous peak control, ahead of the limiter that cannot be.
     //
     // The curve's linear third has a gain of 2, so pre-scaling by 1/ceiling and
     // post-scaling by ceiling/2 is unity below the knee. `satMakeup` is that
     // ceiling/2 with a little taken off, which is where the output ceiling
     // actually comes from: nothing leaves here above `satMakeup`.
+    rumble.connect(limiter)
     const satIn = ctx.createGain()
     satIn.gain.value = 1 / AUDIO.satCeiling
     const sat = ctx.createWaveShaper()
@@ -255,7 +335,7 @@ export class Audio {
     satOut.gain.value = AUDIO.satMakeup
     satIn.connect(sat)
     sat.connect(satOut)
-    satOut.connect(limiter)
+    satOut.connect(rumble)
 
     // Concussion filter. Normally wide open; swept down when the tiger is hit.
     this.muffle = ctx.createBiquadFilter()
@@ -263,6 +343,18 @@ export class Audio {
     this.muffle.frequency.value = 20000
     this.muffle.Q.value = 0.6
     this.muffle.connect(satIn)
+
+    // Inside the skull, past the concussion filter.
+    //
+    // The ring after a hit is the least ambiguous cue in the game and the one
+    // the player must never miss — and it was routed through the very filter
+    // that hit installs, so the concussion was erasing its own signature. That
+    // is backwards physically as well as musically: the muffle models the
+    // world arriving through a rung bell of a head, and tinnitus is not
+    // arriving from the world. It is the bell.
+    this.headBus = ctx.createGain()
+    this.headBus.gain.value = 1
+    this.headBus.connect(satIn)
 
     // ---- buses.
     // Glue compression on effects only, so the score is not pumped by footsteps.
@@ -311,8 +403,11 @@ export class Audio {
     this.farSend.gain.value = 1
     this.farSend.connect(far)
 
-    this.noiseShort = noiseBuffer(ctx, 1.0)
-    this.noiseLong = noiseBuffer(ctx, 4.0, 2)
+    // Half-correlated up close, near-independent for the ambience beds — a bed
+    // is a field of sound with no source in it, so it should be as wide as the
+    // speakers go.
+    this.noiseShort = noiseBuffer(ctx, 1.0, 0.5)
+    this.noiseLong = noiseBuffer(ctx, 4.0, 0.15)
     this.drive = driveCurve(0.6)
 
     // The score gets the long reverb as its own send, so it sits in the same
@@ -462,6 +557,31 @@ export class Audio {
     chain?.push(g)
 
     let node: AudioNode = g
+
+    // Per-instance tilt. One shelf, three decibels either way, and it is the
+    // cheapest defence there is against the thing that gives a synthesised
+    // effect away fastest: hearing the *same* sound twice.
+    //
+    // The layers already jitter their pitch and their filter corners, which
+    // makes two footsteps different footsteps — but they are different in the
+    // same direction every time, because every layer is jittered
+    // independently and the average of eleven independent jitters barely
+    // moves. Tilting the whole voice moves them together, so one strike is
+    // brighter than the next the way two swings of the same paw against two
+    // different bodies are, and ten thousand steps do not converge on one
+    // timbre. It costs one node on a chain that already builds four.
+    const tilt = ctx.createBiquadFilter()
+    tilt.type = 'highshelf'
+    tilt.frequency.value = 1400
+    // Five decibels of range, but biased downward: a shelf that boosts is a
+    // shelf that costs headroom, and measured at a symmetric ±3 this pushed the
+    // gunshot, the pounce and the whiz past full scale. Cutting mostly and
+    // boosting a little gives the same audible spread for none of the ceiling.
+    tilt.gain.value = rand(-4, 1)
+    node.connect(tilt)
+    node = tilt
+    chain?.push(tilt)
+
     if (dist > 4) {
       const air = ctx.createBiquadFilter()
       air.type = 'lowpass'
@@ -516,6 +636,50 @@ export class Audio {
   }
 
   // ------------------------------------------------------------ primitives
+  /**
+   * The amplitude envelope every layer in this file is built on: attack, then
+   * a fast drop, then a slower ring down to silence.
+   *
+   * The two-stage decay is the whole reason this is a function rather than
+   * three lines repeated in `tone` and `noise`. A single exponential — which is
+   * what a straight ramp to zero gives, and what everything here used to use —
+   * is a straight line in decibels, and *nothing physical decays that way.*
+   * Struck material loses its broadband energy almost at once and then rings on
+   * in whatever resonance is left, which is a steep segment followed by a
+   * shallow one. The ear reads the steep part as how hard the thing was hit and
+   * the shallow part as what it is made of, and a single slope has to trade one
+   * against the other: short and the sound is a click with no body, long and
+   * the transient is smeared into a beep. Measured, every impact in the game
+   * was fifty decibels down by a hundred and sixty milliseconds and then simply
+   * gone — hits with no ring at all.
+   *
+   * The knee is skipped when the attack is a meaningful fraction of the length,
+   * because that describes a swell — a riser, a breath, a reverb-length tail —
+   * and a swell has no transient for a fast stage to belong to.
+   */
+  private env(dest: AudioNode, t: number, dur: number, gain: number, attack: number): GainNode {
+    const g = this.ctx!.createGain()
+    const atk = Math.min(attack, dur * 0.3)
+    g.gain.setValueAtTime(0.0001, t)
+    g.gain.exponentialRampToValueAtTime(gain, t + atk)
+    // Long enough to have two stages, and enough of it spent decaying to tell
+    // them apart. Below about forty-five milliseconds a layer *is* the
+    // transient — a rifle crack is seven milliseconds end to end, a grain of
+    // grit thirty — and kneeing those only takes decibels off the top of the
+    // sound. Measured at a twenty-five millisecond threshold the knee was
+    // reaching into the grain scatter and costing the scream and the claw
+    // strike most of their presence.
+    if (atk < dur * 0.1 && dur > 0.045) {
+      // Down 14 dB across the first fifth, then the rest of the way over the
+      // remainder — so the front is sharper than a single slope and the tail
+      // lasts longer than one, both at once.
+      g.gain.exponentialRampToValueAtTime(gain * 0.2, t + atk + (dur - atk) * 0.2)
+    }
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur)
+    g.connect(dest)
+    return g
+  }
+
   /** A pitched voice with an exponential frequency glide and AD envelope. */
   private tone(
     dest: AudioNode,
@@ -534,12 +698,7 @@ export class Audio {
     osc.type = type
     osc.frequency.setValueAtTime(Math.max(1, f0), t)
     osc.frequency.exponentialRampToValueAtTime(Math.max(1, f1), t + dur)
-    const env = ctx.createGain()
-    env.gain.setValueAtTime(0.0001, t)
-    env.gain.exponentialRampToValueAtTime(gain, t + Math.min(attack, dur * 0.3))
-    env.gain.exponentialRampToValueAtTime(0.0001, t + dur)
-    osc.connect(env)
-    env.connect(dest)
+    osc.connect(this.env(dest, t, dur, gain, attack))
     osc.start(t)
     osc.stop(t + dur + 0.02)
   }
@@ -569,13 +728,8 @@ export class Audio {
     filt.Q.value = q
     filt.frequency.setValueAtTime(Math.max(20, f0), t)
     filt.frequency.exponentialRampToValueAtTime(Math.max(20, f1), t + dur)
-    const env = ctx.createGain()
-    env.gain.setValueAtTime(0.0001, t)
-    env.gain.exponentialRampToValueAtTime(gain, t + Math.min(attack, dur * 0.3))
-    env.gain.exponentialRampToValueAtTime(0.0001, t + dur)
     src.connect(filt)
-    filt.connect(env)
-    env.connect(dest)
+    filt.connect(this.env(dest, t, dur, gain, attack))
     // Random read offset: the same buffer never grains the same way twice.
     src.start(t, Math.random() * (buf.duration - Math.min(dur, buf.duration * 0.5)))
     src.stop(t + dur + 0.02)
@@ -703,6 +857,37 @@ export class Audio {
     this.noise(dest, dur * 0.8, gain * 0.6, 'bandpass', freqs[2] * 1.45, freqs[2] * 1.2, at, q * 0.6, dur * 0.15)
   }
 
+  /**
+   * Wobble an AudioParam with two slow oscillators at unrelated rates.
+   *
+   * Every animal voice here is a tone chopped by a flutter LFO, and a flutter
+   * LFO on a straight linear ramp is a tremolo pedal — the modulation repeats
+   * exactly, and the ear picks a perfectly periodic amplitude modulation out of
+   * anything instantly and files the whole sound as a synthesiser. Real vocal
+   * folds under that much pressure are chaotic; the rate wanders by tens of
+   * percent from cycle to cycle, and that wander is most of what "an animal"
+   * means here.
+   *
+   * Two rates with an irrational ratio never come back into phase inside the
+   * length of a roar, so the flutter never repeats. The rates are randomised
+   * per call as well, so two roars do not wobble the same way either.
+   */
+  private jitter(param: AudioParam, t: number, dur: number, depth: number) {
+    const ctx = this.ctx
+    if (!ctx) return
+    for (const [rate, share] of [[rand(5.5, 9), 0.62], [rand(1.7, 3.1), 0.38]] as const) {
+      const o = ctx.createOscillator()
+      o.type = 'sine'
+      o.frequency.value = rate
+      const g = ctx.createGain()
+      g.gain.value = depth * share
+      o.connect(g)
+      g.connect(param)
+      o.start(t)
+      o.stop(t + dur + 0.1)
+    }
+  }
+
   /** Pull the score down under a loud event, then let it back up. */
   private duck(amount = AUDIO.duckAmount) {
     const ctx = this.ctx
@@ -779,6 +964,10 @@ export class Audio {
     lfo.type = 'triangle'
     lfo.frequency.setValueAtTime(26 * pitch, t0 + start)
     lfo.frequency.linearRampToValueAtTime(44 * pitch, t0 + start + dur)
+    // ±9 Hz of wander on a flutter that averages 35 — a quarter, which is about
+    // what a real set of folds does and is well past where the ear stops
+    // hearing the rasp as periodic.
+    this.jitter(lfo.frequency, t0 + start, dur, 9 * pitch)
     const lfoGain = ctx.createGain()
     lfoGain.gain.value = 0.38
     lfo.connect(lfoGain)
@@ -807,7 +996,7 @@ export class Audio {
     // all there, but weight alone is a truck going past. What tells you it is
     // alive, and what makes it carry across a clearing, is the rasp on top.
     for (const [f, lvl, q] of [
-      [330, 1, 5], [980, 0.42, 5.8], [2100, 0.34, 6], [3400, 0.2, 5],
+      [330, 1, 5], [980, 0.5, 5.8], [2100, 0.52, 6], [3400, 0.36, 5],
     ] as const) {
       const bp = ctx.createBiquadFilter()
       bp.type = 'bandpass'
@@ -829,8 +1018,8 @@ export class Audio {
     snarl.gain.value = 0.34
     lfoGain.connect(snarl.gain)
     snarl.connect(env)
-    this.noise(snarl, dur, 0.5, 'bandpass', 2600, 1700, tv + start, 1.5, 0.03)
-    this.noise(snarl, dur * 0.9, 0.3, 'bandpass', 4600, 3200, tv + start, 1.2, 0.04)
+    this.noise(snarl, dur, 0.7, 'bandpass', 2600, 1700, tv + start, 1.5, 0.03)
+    this.noise(snarl, dur * 0.9, 0.5, 'bandpass', 4600, 3200, tv + start, 1.2, 0.04)
     // Chaotic sputter. Big cats roar with a thick fibrous pad on the folds that
     // makes the vibration break up irregularly, and that irregularity is most
     // of what separates a real roar from a sawtooth with tremolo on it.
@@ -879,6 +1068,7 @@ export class Audio {
     const lfo = ctx.createOscillator()
     lfo.type = 'triangle'
     lfo.frequency.value = rand(22, 33)
+    this.jitter(lfo.frequency, t, dur, 7)
     const lg = ctx.createGain()
     lg.gain.value = 0.4
     lfo.connect(lg)
@@ -1034,8 +1224,14 @@ export class Audio {
     // Sinew and cartilage letting go one strand at a time, behind the break.
     this.grains(dest, 10, 0.22, 0.15, 1400, 5600, 0.006, 0.028, 0.06, 2.8, 0.45)
     // Spray, and the body going down.
-    this.noise(dest, 0.2, 0.1, 'highpass', 3600, 1400, 0.11, 0.8, 0.01)
-    this.tone(dest, 'sine', 96, 36, 0.4, 0.42, 0.02, 0.006)
+    //
+    // The drop used to carry 0.42 against cracks at 0.2-0.4, and measured that
+    // put nineteen decibels between the sub and everything above it: the sound
+    // of a neck breaking was a kick drum with some detail hidden under it. What
+    // makes a kill bite read as fatal is the break, so the break is what gets
+    // the level and the body going down is what sits underneath it.
+    this.noise(dest, 0.2, 0.16, 'highpass', 3600, 1400, 0.11, 0.8, 0.01)
+    this.tone(dest, 'sine', 96, 36, 0.4, 0.26, 0.02, 0.006)
   }
 
   /**
@@ -1433,6 +1629,7 @@ export class Audio {
       lfo.type = 'triangle'
       lfo.frequency.setValueAtTime(38, t)
       lfo.frequency.linearRampToValueAtTime(62, t + 0.4)
+      this.jitter(lfo.frequency, t, 0.4, 12)
       const lg = ctx.createGain()
       lg.gain.value = 0.45
       lfo.connect(lg)
@@ -1472,9 +1669,11 @@ export class Audio {
       // shimmers instead of sitting there like a test tone.
       const ring = ctx.createGain()
       ring.gain.setValueAtTime(0.0001, t)
-      ring.gain.exponentialRampToValueAtTime(0.075, t + 0.09)
+      ring.gain.exponentialRampToValueAtTime(0.055, t + 0.09)
       ring.gain.exponentialRampToValueAtTime(0.0001, t + 1.5)
-      ring.connect(dest)
+      // Straight to the head bus, so the concussion filter this same call just
+      // slammed shut cannot take the signature down with the rest of the world.
+      ring.connect(this.headBus ?? dest)
       const rf = rand(4100, 4900)
       for (const [mult, lvl] of [[1, 1], [1.006, 0.7], [2.02, 0.22]] as const) {
         const o = ctx.createOscillator()
@@ -1536,14 +1735,21 @@ export class Audio {
     const j = rand(0.92, 1.1)
     // The throat working, top to bottom.
     this.noise(dest, big ? 0.26 : 0.18, big ? 0.24 : 0.17, 'bandpass', 900 * j, 260 * j, 0, 2.8, 0.015)
-    this.tone(dest, 'sine', 260 * j, 90 * j, big ? 0.3 : 0.22, big ? 0.2 : 0.14, 0.01, 0.02)
-    this.grains(dest, big ? 5 : 3, 0.1, 0.07, 500, 2200, 0.006, 0.022, 0.02, 2.4, 0.35)
-    // The tongue coming off the palate. Tiny, and the only part of a swallow
-    // that lives above three kilohertz — without it the pickup is felt but not
-    // heard, which is why it measured forty-six decibels down at the top.
-    this.noise(dest, 0.008, 0.085, 'highpass', 4000, 2500, 0.002, 0.8, 0.0006)
+    this.tone(dest, 'sine', 260 * j, 90 * j, big ? 0.3 : 0.22, big ? 0.14 : 0.1, 0.01, 0.02)
+    this.grains(dest, big ? 7 : 5, 0.12, 0.16, 700, 3600, 0.006, 0.022, 0.02, 2.4, 0.4)
+    // The tongue coming off the palate, and the wet click behind it.
+    //
+    // A swallow is a low sound, but it is not *only* a low sound, and measured
+    // this was: sixty-five decibels down through presence and seventy-five at
+    // the top, which on a laptop speaker is a pickup the player feels nothing
+    // of at all. The parts of a gulp that actually carry are the click of the
+    // tongue releasing and the wet band around a kilohertz — the sub under them
+    // is what makes it satisfying once you can hear it, not what makes it
+    // audible. So the click and the wet band came up and the sub went down.
+    this.noise(dest, 0.01, 0.3, 'highpass', 3800, 2600, 0.002, 0.8, 0.0006)
+    this.noise(dest, 0.06, 0.16, 'bandpass', 1500 * j, 800, 0.004, 3.4, 0.004)
     // Settling.
-    if (big) this.tone(dest, 'sine', 70, 44, 0.4, 0.22, 0.1, 0.03)
+    if (big) this.tone(dest, 'sine', 70, 44, 0.4, 0.16, 0.1, 0.03)
   }
 
   /** Meat. Not a coin — a wet, low, satisfying swallow. */
@@ -1604,9 +1810,17 @@ export class Audio {
   killConfirm() {
     const dest = this.voice(PRI.normal, 0.25, LEVELS.killConfirm, {}, 0.4)
     if (!dest) return
-    this.tone(dest, 'sine', 90, 62, 0.16, 0.4, 0, 0.004)
-    this.tone(dest, 'sine', 1240, 1180, 0.09, 0.1, 0.01, 0.002)
-    this.noise(dest, 0.03, 0.1, 'highpass', 4500, 6500, 0.01, 0.8, 0.001)
+    // A receipt has to be *legible*, and legibility lives in the top three
+    // octaves. This was a 90 Hz sine at four times the level of everything
+    // above it, which measured forty-nine decibels down through presence — a
+    // confirmation the player feels in the chest and never hears. The thud
+    // still carries the weight; the struck edge over it is what reads as
+    // "that one is dead" through gunfire.
+    this.tone(dest, 'sine', 90, 62, 0.16, 0.3, 0, 0.004)
+    this.tone(dest, 'sine', 1240, 1180, 0.09, 0.16, 0.008, 0.002)
+    // Inharmonic partial: a struck edge rather than a sine, for two nodes.
+    this.tone(dest, 'sine', 2960, 2880, 0.06, 0.09, 0.008, 0.0015)
+    this.noise(dest, 0.03, 0.18, 'highpass', 4500, 6500, 0.006, 0.8, 0.001)
   }
 
   /**
@@ -1624,7 +1838,10 @@ export class Audio {
     if (!this.hurtBed) {
       this.hurtBed = ctx.createGain()
       this.hurtBed.gain.value = 0
-      this.hurtBed.connect(this.ambBus)
+      // The heartbeat and the whine are both inside the animal, so they belong
+      // past the concussion filter with the rest of what the skull is doing —
+      // otherwise every round taken mutes the bed that says you are dying.
+      this.hurtBed.connect(this.headBus ?? this.ambBus)
       const whine = ctx.createOscillator()
       whine.type = 'sine'
       whine.frequency.value = 5100
@@ -1634,7 +1851,10 @@ export class Audio {
       wg.connect(this.hurtBed)
       whine.start()
     }
-    this.hurtBed.gain.setTargetAtTime(level * LEVELS.lowHealth, ctx.currentTime, 0.4)
+    // Trimmed by the ambience bus level it used to hang off, because the head
+    // bus is post-fader by construction — it has to be, or the concussion
+    // filter would be back in front of it.
+    this.hurtBed.gain.setTargetAtTime(level * LEVELS.lowHealth * AUDIO.ambience, ctx.currentTime, 0.4)
     if (level <= 0.01) return
     if (ctx.currentTime >= this.hurtNextBeat) {
       // Lub-dub; the rate climbs with how close to death the tiger is.
@@ -1876,9 +2096,12 @@ export class Audio {
     // Struck, not beeped. Two inharmonic partials that die before the
     // fundamental does is the cheapest bell there is, and it costs two
     // oscillators to stop the combo sounding like a menu confirming something.
-    this.tone(dest, 'sine', f * 2.76, f * 2.76, 0.13, 0.042, 0, 0.002)
-    this.tone(dest, 'sine', f * 5.4, f * 5.4, 0.075, 0.02, 0, 0.002)
-    this.noise(dest, 0.05, 0.03, 'highpass', 6000, 9000, 0, 0.8, 0.001)
+    this.tone(dest, 'sine', f * 2.76, f * 2.76, 0.13, 0.075, 0, 0.002)
+    this.tone(dest, 'sine', f * 5.4, f * 5.4, 0.075, 0.04, 0, 0.002)
+    // The strike itself. A bell you only hear ringing is a bell recorded from
+    // the next room; the mallet is what puts it in the player's hands.
+    this.noise(dest, 0.05, 0.075, 'highpass', 6000, 9000, 0, 0.8, 0.0008)
+    this.noise(dest, 0.006, 0.09, 'bandpass', f * 8, f * 8, 0, 1.2, 0.0004)
   }
 
   /** Rage tipping over. A held breath, then everything opens up. */
