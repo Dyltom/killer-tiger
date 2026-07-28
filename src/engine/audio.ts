@@ -1,7 +1,14 @@
 /**
- * Fully procedural audio — no asset files, no network, never fails to load.
- * Everything you hear is built out of oscillators, shaped noise and filters at
- * the moment it plays.
+ * Procedural audio, with one exception: the human voices are recordings.
+ *
+ * Everything else you hear — the tiger, the gunfire, every impact, all the
+ * foley, the interface and the ambient bed — is built out of oscillators,
+ * shaped noise and filters at the moment it plays, and never loads a file.
+ * The three voice cues (`scream`, `shout`, and the village murmur) play CC0
+ * samples when `Samples` has them and fall back to the synthesis that is still
+ * in this file when it does not, so the game runs identically with no assets
+ * on disk. See `samples.ts` for why the voices, and only the voices, are the
+ * exception.
  *
  * The signal path is the one a game mixer would build:
  *
@@ -29,6 +36,7 @@
  */
 import { AUDIO, LEVELS } from '../config'
 import { Music, type MusicMode } from './music'
+import { Samples, type VoiceSet } from './samples'
 
 /**
  * Anything that can build audio nodes. Normally a live `AudioContext`; an
@@ -262,6 +270,8 @@ export class Audio {
   private ambWave = 1
 
   private music: Music | null = null
+  /** Recorded voices, or null on an offline render. Never required. */
+  private samples: Samples | null = null
   /** End times of live voices; the length of the live set is the budget. */
   private voiceEnds: number[] = []
   /** Routing chains waiting to be disconnected once their sound has died. */
@@ -416,6 +426,16 @@ export class Audio {
     musicVerb.gain.value = 0.5
     musicVerb.connect(far)
     this.music = new Music(ctx, this.musicBus, musicVerb)
+
+    // Live contexts only. An offline render is measuring the synthesis, and
+    // starting a fetch it will never wait for only adds a source of drift
+    // between two runs of the probe.
+    //
+    // Gated on `into` rather than on `this.live`, which looks like the right
+    // test and is not: `live` asks whether the context has a `resume` method,
+    // and an OfflineAudioContext has one — so the probe was constructing
+    // `Samples` and failing a relative fetch on every render.
+    if (!into) this.samples = new Samples(ctx)
   }
 
   /** Live contexts only; an offline render has no transport to resume. */
@@ -633,6 +653,39 @@ export class Audio {
   /** Seconds before a sound made `dist` metres away reaches the ear. */
   private travel(place: Place): number {
     return clamp(place.dist ?? 0, 0, 2000) / AUDIO.speedOfSound
+  }
+
+  /**
+   * Play a recorded voice through the ordinary voice chain. False if there is
+   * no sample for this cue, which is the caller's cue to synthesise one.
+   *
+   * A dozen takes is enough because the chain around them does the work. `out`
+   * already gives every voice its own distance attenuation, air absorption,
+   * stereo placement, matched reverb sends and a per-instance shelf tilt, and
+   * the rate jitter below moves the pitch on top of that — so the same take
+   * fired twice is not the same sound arriving twice, which is the failure
+   * that makes a sample library read as a sample library.
+   *
+   * `playbackRate` deliberately drags the formants along with the pitch rather
+   * than being corrected for. Shifting both together is what a differently
+   * sized vocal tract does, so a rate change reads as a different person; the
+   * range is narrow because far enough in either direction it stops reading as
+   * a person at all.
+   */
+  private sample(set: VoiceSet, place: Place, level: number, pitch: number, wetMult: number): boolean {
+    const ctx = this.ctx
+    const buf = this.samples?.pick(set)
+    if (!ctx || !buf) return false
+    const rate = clamp(pitch, 0.75, 1.35, 1) * rand(0.94, 1.07)
+    const dur = buf.duration / rate
+    const dest = this.voice(PRI.normal, dur, level, place, wetMult)
+    if (!dest) return false
+    const src = ctx.createBufferSource()
+    src.buffer = buf
+    src.playbackRate.value = rate
+    src.connect(dest)
+    src.start(this.t + this.travel(place))
+    return true
   }
 
   // ------------------------------------------------------------ primitives
@@ -1343,10 +1396,19 @@ export class Audio {
    * what makes this read as a person rather than as a siren, and the formants
    * pick the vowel: a wide open "aa" for terror.
    */
+  /**
+   * A villager or a hunter screaming.
+   *
+   * Recorded when the samples are there. Everything below the early return is
+   * the synthesised fallback, kept because it is what plays on a checkout with
+   * no assets fetched — and it is as close as synthesis got, which is why the
+   * recordings are here.
+   */
   scream(place: Place = {}, pitch = 1) {
     const ctx = this.ctx
     if (!ctx) return
     pitch = clamp(pitch, 0.4, 2.5, 1)
+    if (this.sample('scream', place, LEVELS.screamSample, pitch, 1.3)) return
     const dest = this.voice(PRI.normal, 0.9, LEVELS.scream, place, 1.3)
     if (!dest) return
     const t = this.t + this.travel(place)
@@ -1519,6 +1581,7 @@ export class Audio {
     const ctx = this.ctx
     if (!ctx) return
     pitch = clamp(pitch, 0.4, 2.5, 1)
+    if (this.sample('shout', place, LEVELS.shoutSample, pitch, 1.2)) return
     const dest = this.voice(PRI.normal, 0.5, LEVELS.shout, place, 1.2)
     if (!dest) return
     const t = this.t + this.travel(place)
@@ -2458,6 +2521,46 @@ export class Audio {
     // The village: a low murmur of voices and fires, always slightly to one side.
     const village = bed('bandpass', 420, 1.6, 0.02, 0.037, 0.012)
 
+    // Recorded murmur over the top of it, when there is one.
+    //
+    // This starts late on purpose — decoding is async and the ambience is
+    // already running by the time it lands — so it fades in rather than
+    // appearing, and it has to check `alive`, because a player who quits
+    // inside the first second would otherwise get a village bed wired to a
+    // bus that nothing is left to stop.
+    //
+    // `village` stays underneath at a reduced level rather than being
+    // replaced: half its job was standing in for voices, which the recording
+    // now does, but the other half is cooking fires and low activity, which
+    // it still does and the recording does not.
+    let murmur: GainNode | null = null
+    let alive = true
+    stops.push(() => { alive = false })
+    void this.samples?.ready.then(() => {
+      const buf = this.samples?.pick('murmur')
+      if (!alive || !buf || !this.ambBus) return
+      const src = ctx.createBufferSource()
+      src.buffer = buf
+      src.loop = true
+      const g = ctx.createGain()
+      g.gain.value = 0.0001
+      g.gain.setTargetAtTime(LEVELS.murmurSample, ctx.currentTime, 2)
+      let node: AudioNode = g
+      if (ctx.createStereoPanner) {
+        const p = ctx.createStereoPanner()
+        p.pan.value = rand(-0.5, 0.5)
+        g.connect(p)
+        node = p
+      }
+      src.connect(g)
+      node.connect(this.ambBus)
+      // Start somewhere random in the file so reloading the page does not
+      // replay the same thirty seconds of crowd from the same word.
+      src.start(0, Math.random() * buf.duration)
+      murmur = g
+      stops.push(() => { try { src.stop() } catch { /* already stopped */ } })
+    })
+
     this.ambienceStop = () => {
       for (const s of stops) s()
       if (this.ambienceTimer !== null) clearInterval(this.ambienceTimer)
@@ -2472,7 +2575,9 @@ export class Audio {
       insects.gain.setTargetAtTime(0.012 + dark * 0.055, now, 3)
       canopy.gain.setTargetAtTime(0.04 + (1 - dark) * 0.04, now, 3)
       // An alarmed village is a loud one.
-      village.gain.setTargetAtTime(0.012 + Math.min(0.05, this.ambWave * 0.008), now, 3)
+      const alarm = Math.min(0.05, this.ambWave * 0.008)
+      village.gain.setTargetAtTime((murmur ? 0.004 : 0.012) + alarm, now, 3)
+      murmur?.gain.setTargetAtTime(LEVELS.murmurSample * (1 + alarm * 12), now, 3)
       this.ambientOneShot()
       // Backstop for the teardown sweep, for the same reason the transport
       // keeps one: the render loop is not guaranteed to be running.

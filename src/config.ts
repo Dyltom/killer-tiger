@@ -1057,6 +1057,24 @@ export const LEVELS = {
   shout: 3.1,
   growl: 7.0,
 
+  // The recorded voices need their own numbers and cannot borrow the three
+  // above. Those are gains applied to a synthesised signal whose amplitude is
+  // whatever its layers happen to sum to; a sample is normalised to a known
+  // peak by the fetch script, so the same figure means something completely
+  // different on each path. Matching the two by ear is not good enough either,
+  // because the whole reason the voices are loud is that a fleeing village
+  // fires a lot of them into the limiter at once.
+  //
+  // These three are unmeasured. The fetch script normalises every take to a
+  // known peak, so they are at least consistent across the set, but nothing
+  // has yet checked them against the rest of the mix the way the probe checks
+  // the synthesised cues — the probe renders offline, and the sample path
+  // deliberately does not load there. They need a pass with real files.
+  screamSample: 0.34,
+  shoutSample: 0.30,
+  /** Ambience bed, so far quieter — it is under everything, all the time. */
+  murmurSample: 0.05,
+
   // Stingers. These were eating the whole headroom; they are deliberately
   // under the gun now, and they duck the score instead of shouting over it.
   waveStart: 0.3,
