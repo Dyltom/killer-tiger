@@ -1288,10 +1288,15 @@ export class Audio {
     osc.frequency.exponentialRampToValueAtTime(base * 1.6, t + dur * 0.45)
     osc.frequency.exponentialRampToValueAtTime(base * 0.6, t + dur)
 
-    // Vibrato that gets wider as the voice loses control.
+    // Vibrato that gets wider as the voice loses control — and that wanders
+    // while it does. A vibrato on a clean linear ramp is a sine modulating a
+    // sine, which the ear picks out instantly and files as a theremin; the
+    // whole reason a scream is frightening is that the person has stopped
+    // being in control of it.
     const vib = ctx.createOscillator()
     vib.frequency.setValueAtTime(5.5, t)
     vib.frequency.linearRampToValueAtTime(9, t + dur)
+    this.jitter(vib.frequency, t, dur, 2.2)
     const vibGain = ctx.createGain()
     vibGain.gain.setValueAtTime(12, t)
     vibGain.gain.linearRampToValueAtTime(75, t + dur)
@@ -1321,16 +1326,62 @@ export class Audio {
     shaped.oversample = '2x'
     osc.connect(shaped)
 
+    // The voice breaking, into the same saturator and the same throat, because
+    // it is the same throat.
+    //
+    // This is the one thing that separates a scream from a sung note, and it
+    // was the thing this did not have. Folds driven this hard stop vibrating as
+    // one system: they period-double, and half the pitch appears underneath —
+    // which is what "her voice cracked" physically is — while the two folds
+    // drift onto rates that aren't a ratio of each other, which is the
+    // roughness over the top. Both arrive partway through, once the breath has
+    // been going long enough to lose control of it, and neither is loud. They
+    // are what the ear reads the strain off, not the note.
+    const breakAt = t + dur * rand(0.3, 0.5)
+    for (const [ratio, lvl] of [[0.5, 0.26], [1.37, 0.12]] as const) {
+      const fold = ctx.createOscillator()
+      fold.type = 'sawtooth'
+      fold.frequency.setValueAtTime(base * 1.9 * ratio, t)
+      fold.frequency.exponentialRampToValueAtTime(base * 1.6 * ratio, t + dur * 0.45)
+      fold.frequency.exponentialRampToValueAtTime(base * 0.6 * ratio, t + dur)
+      vibGain.connect(fold.detune)
+      const fg = ctx.createGain()
+      fg.gain.setValueAtTime(0.0001, breakAt)
+      fg.gain.exponentialRampToValueAtTime(lvl * rand(0.7, 1.3), breakAt + 0.04)
+      fg.gain.exponentialRampToValueAtTime(0.0001, t + dur)
+      fold.connect(fg)
+      fg.connect(shaped)
+      fold.start(t)
+      fold.stop(t + dur + 0.05)
+    }
+
+    // Source tilt, ahead of the vowel.
+    //
+    // This is why the scream measured twenty-six decibels down through presence
+    // however the formants were balanced. A sawtooth sheds 6 dB an octave, so
+    // at a 380 Hz fundamental the 2.7 kHz formant is sitting on a harmonic that
+    // is already 17 dB down before any filter touches it — the upper formants
+    // were being asked to amplify something that was barely there. A real
+    // screamed voice is not a relaxed voice made louder: the folds slam shut far
+    // more abruptly, and that abrupt closure is a genuinely brighter source
+    // spectrum. Tilting the source is modelling that, and it is the only place
+    // in the chain where the energy can come from.
+    const tilt = ctx.createBiquadFilter()
+    tilt.type = 'highshelf'
+    tilt.frequency.value = 1400
+    tilt.gain.value = 15
+    shaped.connect(tilt)
+
     // Four formants, not three. Three stops at 2.7 kHz, and a scream lives
     // above that — the fourth is the one that makes it hurt to listen to,
     // which is the entire point of the sound. With three it measured thirteen
     // decibels down in presence against its own low-mid: a shout of alarm from
     // the next room, not a person in front of you.
     for (const [f, lvl, q] of [
-      [F[0], 1, 8],
+      [F[0], 0.7, 8],
       [F[1], 0.6, 9],
-      [F[2], 0.5, 8],
-      [3700 * s, 0.3, 6],
+      [F[2], 0.62, 8],
+      [3700 * s, 0.4, 6],
     ] as const) {
       const bp = ctx.createBiquadFilter()
       bp.type = 'bandpass'
@@ -1338,7 +1389,7 @@ export class Audio {
       bp.Q.value = q
       const g = ctx.createGain()
       g.gain.value = lvl
-      shaped.connect(bp)
+      tilt.connect(bp)
       bp.connect(g)
       g.connect(env)
     }
@@ -1385,16 +1436,28 @@ export class Audio {
     shaped.oversample = '2x'
     osc.connect(shaped)
 
+    // And the same source tilt, for the same reason and worse: a shout runs an
+    // octave below a scream, so its 2.6 kHz formant sits on roughly the
+    // fourteenth harmonic of the sawtooth — around 22 dB down before the filter
+    // sees it. Raising the formant gain cannot fix that; there is nothing up
+    // there to raise. Raising the shout's own voice is what fixes it, which is
+    // also what a person does when they need to be heard across a field.
+    const tilt = ctx.createBiquadFilter()
+    tilt.type = 'highshelf'
+    tilt.frequency.value = 1200
+    tilt.gain.value = 16
+    shaped.connect(tilt)
+
     // Formants sliding from "aa" to "oh" — the shape of a shouted syllable.
     // The third one carried a sixth of the first; against three high-Q filters
     // that is inaudible, and it is why this measured thirty decibels down in
     // presence — a shouted word that could not cut across a clearing.
     const ctxNow = t
     for (const [f0, f1, lvl, q] of [
-      [720, 520, 1, 9],
+      [720, 520, 0.8, 9],
       [1150, 900, 0.55, 10],
-      [2600, 2400, 0.45, 9],
-      [3500, 3200, 0.22, 7],
+      [2600, 2400, 0.5, 9],
+      [3500, 3200, 0.3, 7],
     ] as const) {
       const bp = ctx.createBiquadFilter()
       bp.type = 'bandpass'
@@ -1403,7 +1466,7 @@ export class Audio {
       bp.Q.value = q
       const g = ctx.createGain()
       g.gain.value = lvl
-      shaped.connect(bp)
+      tilt.connect(bp)
       bp.connect(g)
       g.connect(env)
     }
@@ -2020,16 +2083,33 @@ export class Audio {
     const j = rand(0.9, 1.12)
 
     // Pad slap. Fast, but not a click — the cushion takes the edge off.
-    this.noise(dest, 0.055, 0.2 * f, 'bandpass', 520 * j, 300, 0, 1.1, 0.0012)
+    this.noise(dest, 0.055, 0.26 * f, 'bandpass', 520 * j, 300, 0, 1.1, 0.0012)
     // The ground taking the weight.
     this.noise(dest, 0.1, 0.3 * f, 'lowpass', 460 * j, 120, 0.002, 1.2, 0.0015)
-    this.tone(dest, 'sine', 88 * j, 36, 0.24, 0.26 * f, 0, 0.003)
+    // The sub, and it is only the sub.
+    //
+    // This used to ring for 240 ms at the highest level in the cue, and it
+    // measured what that is: the sub sitting at the top of the band split with
+    // the mids 24 dB under it — a subwoofer test with some grit sprinkled on.
+    // Two things are wrong with a long low sine here. It is louder than the
+    // impact that supposedly caused it, and soil does not ring: it is about the
+    // most damped surface there is, which is why you can hear the difference
+    // between a cat landing on dirt and on a wooden deck. Shortened and pulled
+    // down, it does what it should — you feel the weight and hear the ground.
+    this.tone(dest, 'sine', 88 * j, 36, 0.15, 0.19 * f, 0, 0.003)
+    // The body of the impact, which is what was actually missing. A hundred
+    // kilos arriving compacts a patch of ground, and the sound that makes is a
+    // broad low-mid whump between about two hundred and eight hundred hertz —
+    // not the sub under it and not the grit over it. This is the band the ear
+    // reads "heavy" from, and there was nothing in it.
+    this.noise(dest, 0.09, 0.34 * f, 'bandpass', 300 * j, 190, 0.001, 0.9, 0.0016)
+    this.noise(dest, 0.13, 0.2 * f, 'bandpass', 620 * j, 340, 0.004, 0.8, 0.004)
     // Soil and grit thrown out sideways from under the paws. Granular and wide:
     // this is the layer that says "dirt" rather than "drum", and the old single
     // highpassed hiss did not survive the mix at all.
-    this.grains(dest, Math.round(6 + f * 5), 0.13, 0.16 * f, 1400, 7000, 0.003, 0.014, 0.006, 1.6, 0.75)
+    this.grains(dest, Math.round(6 + f * 5), 0.13, 0.22 * f, 1400, 7000, 0.003, 0.014, 0.006, 1.6, 0.75)
     // Dry litter kicked up, quieter and later than the grit.
-    this.grains(dest, 4, 0.22, 0.07 * f, 2600, 9000, 0.004, 0.02, 0.03, 1.3, 0.85)
+    this.grains(dest, 5, 0.22, 0.1 * f, 2600, 9000, 0.004, 0.02, 0.03, 1.3, 0.85)
     // Air forced out of the chest, but only when it actually hurt.
     if (f > 1.15) {
       this.noise(dest, 0.2, 0.06 * (f - 1), 'bandpass', 620, 300, 0.02, 1.2, 0.02)

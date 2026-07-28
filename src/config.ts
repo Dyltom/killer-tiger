@@ -1044,8 +1044,17 @@ export const LEVELS = {
 
   // Voices. Two humans yelling at each other across a village is most of what
   // sells the place as inhabited, so they are not allowed to disappear.
-  scream: 1.35,
-  shout: 4.4,
+  //
+  // Both came down when the voices got their source tilt. That change was about
+  // where a scream's energy sits, not how much of it there is — but tilting the
+  // source up 15 dB across the whole top half of the spectrum makes the sound
+  // measurably louder as a side effect, and it took the scream from 7 dB under
+  // a close rifle to level with it. A fleeing village fires a lot of these at
+  // once, so left alone the panic would have flattened everything else in the
+  // mix through the limiter. These trims put the loudness back where it was and
+  // keep only the balance.
+  scream: 0.6,
+  shout: 2.2,
   growl: 7.0,
 
   // Stingers. These were eating the whole headroom; they are deliberately
