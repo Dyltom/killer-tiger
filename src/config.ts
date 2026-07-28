@@ -1065,15 +1065,46 @@ export const LEVELS = {
   // because the whole reason the voices are loud is that a fleeing village
   // fires a lot of them into the limiter at once.
   //
-  // These three are unmeasured. The fetch script normalises every take to a
-  // known peak, so they are at least consistent across the set, but nothing
-  // has yet checked them against the rest of the mix the way the probe checks
-  // the synthesised cues — the probe renders offline, and the sample path
-  // deliberately does not load there. They need a pass with real files.
-  screamSample: 0.34,
-  shoutSample: 0.30,
-  /** Ambience bed, so far quieter — it is under everything, all the time. */
-  murmurSample: 0.05,
+  // Measured in a browser against the rest of the mix, by rendering the sample
+  // path into an OfflineAudioContext with the decoded buffers injected — the
+  // Node probe cannot do this, because the sample path deliberately does not
+  // load offline.
+  //
+  // The first guess at these was 0.34, which put a villager screaming at
+  // -21 dB: thirteen decibels under a rifle and eleven under the synthesised
+  // scream it replaced. That is the trap in swapping synthesis for samples —
+  // the old number was a gain on a signal whose amplitude was whatever its
+  // layers summed to, and the new one is a gain on a take normalised to
+  // -3 dBFS, so the two have no relationship at all and the sound just
+  // quietly disappears rather than breaking in any visible way.
+  //
+  // 1.1 puts it back level with the synthesised cue it replaced.
+  screamSample: 1.1,
+  /** Unused so far: no recorded shout source. See scripts/fetch-voices.ts. */
+  shoutSample: 1.0,
+  /**
+   * The village murmur bed. Far quieter than the one-shots — it is under
+   * everything, all the time.
+   *
+   * Also measured rather than guessed, and for the same reason: at the 0.15
+   * this started as, the recorded crowd raised the whole ambience bus by
+   * 0.21 dB — the murmur's own level backs out to -56 dB against beds at
+   * -43 dB. That is not a quiet village, it is an inaudible one; the samples
+   * were loading, decoding, looping and mixing perfectly, and doing nothing a
+   * player could hear. `startAmbience` drops the synthesised village bed from
+   * 0.012 to 0.004 when a murmur is playing, so the murmur has to carry what
+   * that bed was carrying, and at 0.15 nothing did.
+   *
+   * 0.45 puts it about three decibels over the combined wind and insect beds.
+   *
+   * Measuring this needs an accumulator on the audio thread — a
+   * `ScriptProcessorNode` summing squares — and not an `AnalyserNode` read in
+   * a loop. A sync loop re-reads one 46 ms window N times, and `setTimeout`
+   * between reads is clamped to a second in a background tab, so the first two
+   * attempts at this number averaged a single window and returned differences
+   * smaller than the frame-to-frame noise of the beds themselves.
+   */
+  murmurSample: 0.45,
 
   // Stingers. These were eating the whole headroom; they are deliberately
   // under the gun now, and they duck the score instead of shouting over it.

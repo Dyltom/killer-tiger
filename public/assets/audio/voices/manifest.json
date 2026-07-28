@@ -1,0 +1,22 @@
+{
+  "sets": {
+    "scream": [
+      "scream-01.m4a",
+      "scream-02.m4a",
+      "scream-03.m4a",
+      "scream-04.m4a",
+      "scream-05.m4a",
+      "scream-06.m4a",
+      "scream-07.m4a",
+      "scream-08.m4a",
+      "scream-09.m4a",
+      "scream-10.m4a",
+      "scream-11.m4a",
+      "scream-12.m4a"
+    ],
+    "shout": [],
+    "murmur": [
+      "murmur-01.m4a"
+    ]
+  }
+}
