@@ -67,6 +67,19 @@ interface Credit {
  */
 interface Pinned {
   set: 'scream' | 'shout' | 'murmur'
+  /**
+   * Which villagers this pack can speak for. Defaults to `m`.
+   *
+   * The cue name and the voice are separate axes because they fail separately:
+   * a set can be missing because nobody published a usable recording of it, or
+   * because the half of the cast that would use it has no source yet. Keeping
+   * them separate means the second case degrades to "women use the men's
+   * takes" rather than to "nobody screams" — see `pick()` in samples.ts.
+   *
+   * `murmur` is a room of people and has no voice; leaving it unset is correct
+   * rather than an omission.
+   */
+  voice?: 'm' | 'f'
   url: string
   title: string
   author: string
@@ -116,12 +129,74 @@ const PINNED: Pinned[] = [
     // this engine adds its own distance reverb — baked-in room would put a
     // sample two hundred metres away in a hall while everything around it is
     // outdoors at night.
+    //
+    // Filed under `f`, which is where it always belonged. Its median voiced f0
+    // is 400 Hz against 103-170 Hz for the eleven Baradari takes above, so for
+    // as long as `scream` was one undifferentiated pool this was a woman's
+    // scream that a male villager had a one-in-twelve chance of producing.
+    // Splitting the pool fixed a miscast that predates the split.
     set: 'scream',
+    voice: 'f',
     url: 'https://opengameart.org/sites/default/files/high_pitch_scream.mp3',
     title: 'High pitch scream sounds(2)',
     author: 'pauliuw',
     license: 'CC0',
     source: 'https://opengameart.org/content/high-pitch-scream-sounds2',
+  },
+  {
+    // Four women screaming, 0.6-1.3 s, which is the same window the Baradari
+    // pack covers for the men.
+    //
+    // Taken as CC BY 3.0, the licence on the page, and not as the CC0 that four
+    // of the five entries in the pack's own license.txt carry. That file is a
+    // per-source manifest listing five originals — one CC BY 3.0
+    // (`women_scream_AAA.aiff`) and four CC0 — and the zip contains four files
+    // named `1.ogg`-`4.ogg`, so the obvious reading is that the CC BY original
+    // is the one that was dropped and everything shipping here is CC0.
+    //
+    // The obvious reading is not a verified one. There is no `0.ogg` to anchor
+    // the offset, and the members have been trimmed and re-encoded, so the
+    // mapping cannot be recovered from the audio: the check that would have
+    // settled it — entry 1 is `Girl_Two_Screams`, so its file should contain
+    // two bursts — came back with no internal silence in any of the four, and
+    // `1.ogg` is 0.61 s, too short to hold two screams either way. Rather than
+    // credit under terms that might be a decibel short of the truth, all four
+    // are credited under the strictest licence in the pack. CC BY discharges a
+    // CC0 obligation; the reverse does not.
+    set: 'scream',
+    voice: 'f',
+    url: 'https://opengameart.org/sites/default/files/female_screams.zip',
+    archive: /\d+\.ogg$/i,
+    title: 'Female screams',
+    author: 'congusbongus, from Freesound recordings by thanvannispen, tcrocker68, pushkin and Archeos',
+    license: 'CC BY 3.0',
+    source: 'https://opengameart.org/content/female-screams',
+  },
+  {
+    // Three voice actors' worth of wordless RPG barks. CC0, single tag for the
+    // whole pack, so unlike the screams above there is nothing to disambiguate.
+    //
+    // Only the `attack` takes. The pack also has `damaged`, `jump`, `healed`
+    // and spoken spell names: the spoken lines are English words and this
+    // village does not speak any, `healed` and `jump` are the wrong events, and
+    // `damaged` is a 0.3-0.5 s hit reaction rather than a death. Firing an
+    // "ugh" where the male set fires a 1 s death cry would put the exact
+    // cheapness this whole exercise is about back into the one cue that cannot
+    // afford it. `attack` is a person yelling at something, which is what the
+    // shout cue is.
+    //
+    // All three voice types, not a chosen subset. Their median voiced f0 runs
+    // 281-457 Hz with no type separated from the others, so there is no
+    // measurement that would justify dropping one, and the pack's own
+    // descriptions of them are about acting rather than pitch.
+    set: 'shout',
+    voice: 'f',
+    url: 'https://opengameart.org/sites/default/files/RPG%20Voice%20Starter%20Pack.zip',
+    archive: /Type [123]\/attack[123]\.wav$/i,
+    title: 'Female RPG Voice Starter Pack',
+    author: 'cicifyre',
+    license: 'CC0',
+    source: 'https://opengameart.org/content/female-rpg-voice-starter-pack',
   },
   {
     // Four men yelling, 10-16 takes each. Dual licensed OGA-BY 3.0 and CC0;
@@ -290,6 +365,29 @@ function trimmedSeconds(src: string): number {
   return Number(out.trim()) || 0
 }
 
+/** Overall RMS in dBFS, via ffmpeg's astats. */
+function rmsDb(file: string): number {
+  const out = execFileSync(
+    'ffmpeg',
+    ['-hide_banner', '-nostats', '-i', file,
+     '-af', 'astats=metadata=1:reset=0,ametadata=mode=print:file=-', '-f', 'null', '-'],
+    { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
+  )
+  const all = [...out.matchAll(/astats\.Overall\.RMS_level=(-?[\d.]+)/g)]
+  return all.length ? Number(all[all.length - 1]![1]) : 0
+}
+
+/**
+ * Where a peak-normalised take of this material lands, in dBFS RMS.
+ *
+ * Not a target chosen on principle — it is measured. The eleven Baradari
+ * screams come out of the peak normalisation at a median of -22.4 and the
+ * sixteen HaelDB shouts at -24.5, and those two sets are what every level in
+ * `LEVELS` was tuned against in a browser. Anything within a decibel or two of
+ * this is left alone; the number exists to catch the take that is nowhere near.
+ */
+const TARGET_RMS = -22
+
 function oneShot(src: string, dest: string) {
   const tmp = join(TMP, 'trim.wav')
   ff([
@@ -297,7 +395,32 @@ function oneShot(src: string, dest: string) {
     '-af', TRIM,
     '-ac', '1', '-ar', '44100', tmp,
   ])
-  ff(['-i', tmp, '-af', `volume=${(-3 - peakDb(tmp)).toFixed(2)}dB`, '-ac', '1', '-c:a', 'aac', '-b:a', '96k', dest])
+  // Peak first, then pull back anything far louder than the rest at that peak.
+  //
+  // Peak normalisation alone is not enough, and the female scream pack is why:
+  // measured after it, those five sat at a median of -11.2 dBFS RMS against
+  // -22.4 for the male screams — the same distance from the limiter and eleven
+  // decibels louder to the ear, because they are dense, already-compressed
+  // uploads where the men's takes are a cry with air around it. Shipped as-is
+  // that is not a woman screaming, it is a woman screaming through a megaphone
+  // while the man beside her uses his voice.
+  //
+  // Attenuate only, never boost, which is what keeps the paragraph above this
+  // function true. The peak target is about headroom — a dozen of these arrive
+  // together and the limiter has to survive it — and a gain that could go
+  // positive would spend that headroom to make a quiet take match a loud one,
+  // which is the compressor's job and not the fetch script's. Clamped at zero,
+  // the male sets measure inside a decibel of `TARGET_RMS` and come through
+  // untouched, so every level already tuned against them still holds.
+  const peakGain = -3 - peakDb(tmp)
+  // The RMS the peak normalisation would leave, which is what `TARGET_RMS` is a
+  // figure for — measuring `tmp` directly would compare raw uploads.
+  const trim = Math.min(0, TARGET_RMS - (rmsDb(tmp) + peakGain))
+  ff([
+    '-i', tmp,
+    '-af', `volume=${(peakGain + trim).toFixed(2)}dB`,
+    '-ac', '1', '-c:a', 'aac', '-b:a', '96k', dest,
+  ])
   rmSync(tmp, { force: true })
 }
 
@@ -342,11 +465,27 @@ function loopBed(src: string, dest: string) {
 // ------------------------------------------------------------------- main
 
 const TMP = join(tmpdir(), 'kt-voices')
-const manifest: Record<string, string[]> = { scream: [], shout: [], murmur: [] }
+
+/**
+ * Manifest key for a cue and a voice, and also the filename stem.
+ *
+ * `m` is unsuffixed so that a manifest written before the voices were split
+ * still names every male set exactly as it did — the female sets are additive,
+ * and an old checkout's assets keep working against the new loader.
+ */
+const keyFor = (set: string, voice?: 'm' | 'f') => (voice === 'f' ? `${set}-f` : set)
+
+const manifest: Record<string, string[]> = {
+  scream: [],
+  shout: [],
+  murmur: [],
+  'scream-f': [],
+  'shout-f': [],
+}
 const credits: Credit[] = []
 
 /** Next free filename in a set, so pinned and Freesound takes cannot collide. */
-const nameFor = (set: string) => `${set}-${String(manifest[set]!.length + 1).padStart(2, '0')}.m4a`
+const nameFor = (key: string) => `${key}-${String(manifest[key]!.length + 1).padStart(2, '0')}.m4a`
 
 async function doPinned() {
   console.log('=== pinned sources (no token needed)')
@@ -392,8 +531,9 @@ async function doPinned() {
       members = spread
     }
 
+    const key = keyFor(p.set, p.voice)
     for (const m of members) {
-      const file = nameFor(p.set)
+      const file = nameFor(key)
       try {
         if (p.loop) loopBed(m, join(OUT, file))
         else oneShot(m, join(OUT, file))
@@ -401,10 +541,10 @@ async function doPinned() {
         console.warn(`  ! ${m}: ${String(e)}`)
         continue
       }
-      manifest[p.set]!.push(file)
+      manifest[key]!.push(file)
     }
-    credits.push({ set: p.set, title: p.title, author: p.author, license: p.license, source: p.source })
-    console.log(`  got  ${members.length.toString().padStart(2)} × ${p.set}  ${p.title} (${p.license})`)
+    credits.push({ set: key, title: p.title, author: p.author, license: p.license, source: p.source })
+    console.log(`  got  ${members.length.toString().padStart(2)} × ${key}  ${p.title} (${p.license})`)
   }
 }
 

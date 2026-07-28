@@ -36,7 +36,7 @@
  */
 import { AUDIO, LEVELS } from '../config'
 import { Music, type MusicMode } from './music'
-import { Samples, type VoiceSet } from './samples'
+import { Samples, type VoiceSet, type Voice } from './samples'
 
 /**
  * Anything that can build audio nodes. Normally a live `AudioContext`; an
@@ -71,6 +71,34 @@ export interface Place {
  */
 const PRI = { low: 0.6, normal: 1, high: 1.6 } as const
 type Pri = (typeof PRI)[keyof typeof PRI]
+
+/**
+ * Fundamental multiplier per voice, for the *synthesised* fallback only. The
+ * recorded path picks a different set of takes instead and ignores this.
+ *
+ * 1.55 rather than the ~1.8 the raw numbers suggest. Measured on the material
+ * that actually ships, the male screams sit at a median voiced f0 of 103-170 Hz
+ * and the female ones at 281-457 Hz, but those are recordings of two different
+ * kinds of event as much as of two different larynxes — the male pack is pain
+ * and death, the female one is closer to fright. The synthesised scream already
+ * starts at 660 Hz, well above any of them, because it is written as a contour
+ * rather than as a voice; multiplying that by a ratio derived from speech would
+ * put it somewhere no throat goes.
+ */
+const VOICE_F0 = { m: 1, f: 1.55 } as const
+
+/**
+ * Formant multiplier per voice, again for the synthesised fallback only.
+ *
+ * Separate from `VOICE_F0` and much smaller, because pitch and vowel do not
+ * move together. F0 is how fast the folds beat and the formants are where the
+ * tube above them resonates, and a female tract is roughly 15% shorter than a
+ * male one — not 55%. Scaling both by the same figure is the mistake that makes
+ * a pitched-up voice sound like a chipmunk rather than like a woman, and it is
+ * the same mistake `playbackRate` makes on the recorded path, which is why the
+ * rate clamp there is narrow enough to stay out of this territory.
+ */
+const VOICE_TRACT = { m: 1, f: 1.15 } as const
 
 function rand(a: number, b: number): number {
   return a + Math.random() * (b - a)
@@ -671,10 +699,26 @@ export class Audio {
    * sized vocal tract does, so a rate change reads as a different person; the
    * range is narrow because far enough in either direction it stops reading as
    * a person at all.
+   *
+   * Narrow enough that it cannot do what `voice` does. Rate was the only handle
+   * the callers had for a while, and villagers were fired at 1.05-1.15 against
+   * hunters at 0.8-0.85 to stand in for a mixed village — but every take behind
+   * that was a man, and a man's death cry played 15% fast is a man in a hurry.
+   * Measured, the female packs sit at a median voiced f0 of 281-457 Hz against
+   * 103-170 Hz for the male screams, which is upward of an octave; the clamp
+   * here tops out at 1.35 and stops reading as human well before that. The
+   * distinction had to come from a different larynx, not a faster tape.
    */
-  private sample(set: VoiceSet, place: Place, level: number, pitch: number, wetMult: number): boolean {
+  private sample(
+    set: VoiceSet,
+    place: Place,
+    level: number,
+    pitch: number,
+    wetMult: number,
+    voice?: Voice,
+  ): boolean {
     const ctx = this.ctx
-    const buf = this.samples?.pick(set)
+    const buf = this.samples?.pick(set, voice)
     if (!ctx || !buf) return false
     const rate = clamp(pitch, 0.75, 1.35, 1) * rand(0.94, 1.07)
     const dur = buf.duration / rate
@@ -1403,17 +1447,23 @@ export class Audio {
    * the synthesised fallback, kept because it is what plays on a checkout with
    * no assets fetched — and it is as close as synthesis got, which is why the
    * recordings are here.
+   *
+   * `voice` picks the set; `pitch` is what separates two people of the same sex
+   * and is no longer asked to separate the sexes. On the synthesised path there
+   * is no set to pick, so `voice` becomes an extra pitch factor — the fallback
+   * has always built its larynx from numbers, and this is the one place where
+   * doing it by frequency is not a compromise.
    */
-  scream(place: Place = {}, pitch = 1) {
+  scream(place: Place = {}, pitch = 1, voice: Voice = 'm') {
     const ctx = this.ctx
     if (!ctx) return
     pitch = clamp(pitch, 0.4, 2.5, 1)
-    if (this.sample('scream', place, LEVELS.screamSample, pitch, 1.3)) return
+    if (this.sample('scream', place, LEVELS.screamSample, pitch, 1.3, voice)) return
     const dest = this.voice(PRI.normal, 0.9, LEVELS.scream, place, 1.3)
     if (!dest) return
     const t = this.t + this.travel(place)
     // Where a terrified adult actually sits, rather than a note to swoop up to.
-    const base = 660 * pitch * rand(0.88, 1.14)
+    const base = 660 * pitch * VOICE_F0[voice] * rand(0.88, 1.14)
     const dur = rand(0.55, 0.8)
 
     const osc = ctx.createOscillator()
@@ -1469,7 +1519,7 @@ export class Audio {
     this.perturb(osc.frequency, shim.gain, t, dur, base, 1.4)
     // "aa" — the vowel you scream in. Scaled by pitch so a lighter voice reads
     // as a smaller person rather than as the same person sped up.
-    const s = 0.85 + pitch * 0.18
+    const s = (0.85 + pitch * 0.18) * VOICE_TRACT[voice]
     const F = [780 * s, 1180 * s, 2700 * s] as const
 
     // Drive the voiced tone before it reaches the vowel. Folds under this much
@@ -1577,15 +1627,18 @@ export class Audio {
   }
 
   /** Not a scream — a word. Shorter, lower, and it stops dead. */
-  shout(place: Place = {}, pitch = 1) {
+  shout(place: Place = {}, pitch = 1, voice: Voice = 'm') {
     const ctx = this.ctx
     if (!ctx) return
     pitch = clamp(pitch, 0.4, 2.5, 1)
-    if (this.sample('shout', place, LEVELS.shoutSample, pitch, 1.2)) return
+    if (this.sample('shout', place, LEVELS.shoutSample, pitch, 1.2, voice)) return
     const dest = this.voice(PRI.normal, 0.5, LEVELS.shout, place, 1.2)
     if (!dest) return
     const t = this.t + this.travel(place)
-    const base = 190 * pitch * rand(0.92, 1.1)
+    const base = 190 * pitch * VOICE_F0[voice] * rand(0.92, 1.1)
+    // Vowel scale. The scream calls this `s`; here it multiplies the formant
+    // table below directly, which is why it is `pitch` and not `0.85 + …`.
+    const fs = pitch * VOICE_TRACT[voice]
     const dur = rand(0.3, 0.42)
 
     const osc = ctx.createOscillator()
@@ -1647,8 +1700,8 @@ export class Audio {
     ] as const) {
       const bp = ctx.createBiquadFilter()
       bp.type = 'bandpass'
-      bp.frequency.setValueAtTime(f0 * pitch, ctxNow)
-      bp.frequency.linearRampToValueAtTime(f1 * pitch, ctxNow + dur)
+      bp.frequency.setValueAtTime(f0 * fs, ctxNow)
+      bp.frequency.linearRampToValueAtTime(f1 * fs, ctxNow + dur)
       bp.Q.value = q
       const g = ctx.createGain()
       g.gain.value = lvl
@@ -1664,9 +1717,9 @@ export class Audio {
     // starts with a stop or a fricative, and that burst is the whole reason a
     // shout reads as a word rather than as a note. Without it this faded in
     // over a sixth of a second, which is a synthesiser, not a person.
-    this.noise(dest, 0.03, 0.26, 'bandpass', 2400 * pitch, 1300, at, 1.2, 0.001)
+    this.noise(dest, 0.03, 0.26, 'bandpass', 2400 * fs, 1300, at, 1.2, 0.001)
     this.noise(dest, 0.012, 0.16, 'highpass', 4200, 4200, at, 0.7, 0.0008)
-    this.breath(dest, at, dur * 0.7, 0.1, [720 * pitch, 1150 * pitch, 2600 * pitch], 2.6)
+    this.breath(dest, at, dur * 0.7, 0.1, [720 * fs, 1150 * fs, 2600 * fs], 2.6)
   }
 
   /**

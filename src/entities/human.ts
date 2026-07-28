@@ -23,10 +23,11 @@ import * as THREE from 'three'
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
 import { HUMAN, HUT } from '../config'
 import { clamp, damp, Rng } from '../engine/rng'
+import type { Voice } from '../engine/samples'
 import { terrainHeight, World } from '../world/world'
 import type { Hut } from '../world/village'
 import {
-  type Body, castReady, type ClipName, gaitPaces, HUNTER, makeBody, Motion, reach, toMesh, twist, VILLAGERS,
+  type Body, castReady, type ClipName, FEMALE, gaitPaces, HUNTER, makeBody, Motion, reach, toMesh, twist, VILLAGERS,
 } from './body'
 import {
   addWoundShading, clearWounds, createWoundSet, cutWound, extendRun, RUN_SLOTS, startRun,
@@ -203,6 +204,19 @@ export class Human {
   private readonly avatars = new Map<string, Body>()
   /** Which of the four villager bodies this slot is, for its whole life. */
   private readonly villagerModel: string
+
+  /**
+   * Which voice set this slot's screams and shouts come from.
+   *
+   * Derived from the body rather than stored, so it cannot drift out of step
+   * with the face on screen, and read at the call rather than at spawn because
+   * `kind` is what decides whether this slot is currently wearing `HUNTER` —
+   * the same slot is a villager in one life and a hunter in the next, and only
+   * the villager half has a body of its own to be a woman in.
+   */
+  get voice(): Voice {
+    return this.kind !== 'hunter' && FEMALE.has(this.villagerModel) ? 'f' : 'm'
+  }
   /** This body's height over the 1.72 m the damage code is authored against. */
   private scale = 1
   /** Natural travel speed of each locomotion clip on this body, in m/s. */

@@ -11,8 +11,7 @@
       "scream-08.m4a",
       "scream-09.m4a",
       "scream-10.m4a",
-      "scream-11.m4a",
-      "scream-12.m4a"
+      "scream-11.m4a"
     ],
     "shout": [
       "shout-01.m4a",
@@ -34,6 +33,24 @@
     ],
     "murmur": [
       "murmur-01.m4a"
+    ],
+    "scream-f": [
+      "scream-f-01.m4a",
+      "scream-f-02.m4a",
+      "scream-f-03.m4a",
+      "scream-f-04.m4a",
+      "scream-f-05.m4a"
+    ],
+    "shout-f": [
+      "shout-f-01.m4a",
+      "shout-f-02.m4a",
+      "shout-f-03.m4a",
+      "shout-f-04.m4a",
+      "shout-f-05.m4a",
+      "shout-f-06.m4a",
+      "shout-f-07.m4a",
+      "shout-f-08.m4a",
+      "shout-f-09.m4a"
     ]
   }
 }

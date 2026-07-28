@@ -34,6 +34,19 @@ import { applyPose, registerPose } from './pose'
 /** Villager bodies, picked round-robin by slot so a crowd is not one man. */
 export const VILLAGERS = ['villager_a', 'villager_b', 'villager_elder', 'villager_woman'] as const
 export const HUNTER = 'hunter'
+
+/**
+ * Which of those bodies has a woman's larynx, and therefore which voice set its
+ * screams and shouts come from.
+ *
+ * Here rather than in the audio engine because the model *is* the fact. A slot
+ * picks one of `VILLAGERS` for its whole life and wears that face on screen;
+ * anything else — a coin flip at the audio call, a field on the entity set at
+ * spawn — is a second source of truth that can disagree with what the player is
+ * looking at, and the disagreement is audible. Add a woman to `VILLAGERS` and
+ * the only thing that has to happen here is her name.
+ */
+export const FEMALE: ReadonlySet<string> = new Set(['villager_woman'])
 const FILES = [...VILLAGERS, HUNTER]
 
 /**

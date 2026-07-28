@@ -477,7 +477,13 @@ export class Game {
         if (atk.kind === 'bite') this.tiger.heal(TIGER.biteHeal)
       } else {
         audio.clawHit(this.placeOf(h.pos))
-        audio.scream(this.placeOf(h.pos), h.kind === 'hunter' ? 0.85 : 1.05)
+        // 1.05 for a villager until the voices were split by sex. That number
+        // was never about villagers — it was the only handle there was for "not
+        // all of these people are men", applied to a set in which all of them
+        // were. Now that `h.voice` picks the set, pitch goes back to meaning
+        // what it says: hunters are the heaviest men in the round and read a
+        // little lower, and everyone else is nominal.
+        audio.scream(this.placeOf(h.pos), h.kind === 'hunter' ? 0.85 : 1, h.voice)
       }
       // Claws cleave: keep going and hit everyone in the arc.
       if (atk.kind === 'bite') break
@@ -550,7 +556,7 @@ export class Game {
     // over the seconds it takes to make one. See Human.poolPulse.
     audio.biteKill(this.placeOf(h.pos))
     audio.killConfirm()
-    audio.scream(this.placeOf(h.pos), h.kind === 'hunter' ? 0.8 : 1.1)
+    audio.scream(this.placeOf(h.pos), h.kind === 'hunter' ? 0.8 : 1, h.voice)
 
     // Small: it rides on top of the hit-stop and shake that already exist.
     this.tiger.fovKick = 4
@@ -698,7 +704,7 @@ export class Game {
 
       // Someone spotted the tiger and yelled — everyone nearby now knows.
       if (h.pendingShout) {
-        audio.shout(this.placeOf(h.pos), h.kind === 'hunter' ? 0.85 : 1.15)
+        audio.shout(this.placeOf(h.pos), h.kind === 'hunter' ? 0.85 : 1, h.voice)
         for (const other of this.humans) {
           if (other === h || !other.alive) continue
           if (Math.hypot(other.pos.x - h.pos.x, other.pos.z - h.pos.z) < HUMAN.alertShoutRadius) {

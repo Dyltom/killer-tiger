@@ -11,9 +11,10 @@
  * and still read as a machine imitating a person, because at that point it
  * was one.
  *
- * So the voices are recordings and the rest is not. The samples are CC0 from
- * Freesound — see CREDITS.md — fetched by `scripts/fetch-voices.ts`, which
- * writes the manifest this reads.
+ * So the voices are recordings and the rest is not. They are fetched by
+ * `scripts/fetch-voices.ts`, which writes the manifest this reads; two of the
+ * six packs are CC BY rather than CC0, so CREDITS.md is a licence condition and
+ * not a courtesy.
  *
  * Nothing here is allowed to be load-bearing. A missing manifest, a failed
  * fetch and an undecodable file all land in the same place: the set stays
@@ -25,20 +26,38 @@
 /** The voice sets. One name per procedural cue these stand in for. */
 export type VoiceSet = 'scream' | 'shout' | 'murmur'
 
+/**
+ * Which voice a cue is asked for.
+ *
+ * A separate axis from `VoiceSet` rather than five set names, because a caller
+ * always knows which cue it wants and only sometimes knows — or cares — whose
+ * throat it comes out of. The murmur is a room of people and takes neither.
+ */
+export type Voice = 'm' | 'f'
+
 const SETS: VoiceSet[] = ['scream', 'shout', 'murmur']
+const VOICED: VoiceSet[] = ['scream', 'shout']
+
+/**
+ * Manifest key for a cue and a voice.
+ *
+ * `m` is unsuffixed, matching `keyFor` in scripts/fetch-voices.ts. That is not
+ * symmetry for its own sake: it means a manifest written before the split still
+ * names every set this loader asks for, so assets and code can be updated in
+ * either order without a window where the voices go silent.
+ */
+const keyFor = (set: VoiceSet, voice?: Voice) => (voice === 'f' ? `${set}-f` : set)
+
+const KEYS: string[] = [...SETS, ...VOICED.map((s) => keyFor(s, 'f'))]
 
 interface Manifest {
-  sets?: Partial<Record<VoiceSet, string[]>>
+  sets?: Partial<Record<string, string[]>>
 }
 
 const BASE = 'assets/audio/voices/'
 
 export class Samples {
-  private buffers: Record<VoiceSet, AudioBuffer[]> = {
-    scream: [],
-    shout: [],
-    murmur: [],
-  }
+  private buffers: Record<string, AudioBuffer[]> = Object.fromEntries(KEYS.map((k) => [k, []]))
 
   /**
    * Resolves once loading has finished or given up, never rejects.
@@ -63,7 +82,7 @@ export class Samples {
   }
 
   get loaded() {
-    return SETS.reduce((n, s) => n + this.buffers[s].length, 0)
+    return KEYS.reduce((n, k) => n + this.buffers[k]!.length, 0)
   }
 
   private async load(ctx: BaseAudioContext) {
@@ -89,13 +108,13 @@ export class Samples {
     }
 
     await Promise.all(
-      SETS.flatMap((set) =>
-        (manifest.sets?.[set] ?? []).map(async (file) => {
+      KEYS.flatMap((key) =>
+        (manifest.sets?.[key] ?? []).map(async (file) => {
           try {
             const res = await fetch(BASE + file)
             if (!res.ok) throw new Error(String(res.status))
             const buf = await ctx.decodeAudioData(await res.arrayBuffer())
-            this.buffers[set].push(buf)
+            this.buffers[key]!.push(buf)
           } catch (e) {
             console.warn(`[audio] could not load ${file}:`, e)
           }
@@ -106,13 +125,31 @@ export class Samples {
     console.info(`[audio] loaded ${this.loaded} voice samples`)
   }
 
-  /** A random take from a set, or null if the set is empty. */
-  pick(set: VoiceSet): AudioBuffer | null {
-    const b = this.buffers[set]
-    return b.length ? b[Math.floor(Math.random() * b.length)]! : null
+  /**
+   * A random take from a set, or null if neither it nor its fallback has one.
+   *
+   * Falling back to the other voice rather than to synthesis is deliberate, and
+   * it is the less obvious of the two options: a woman's death cry played from
+   * the male set is wrong, and it is wrong in the ordinary way that a stock
+   * library is wrong, whereas the synthesised voice is the thing that was
+   * rejected twice for sounding like a different decade of game. One of those
+   * degrades and the other breaks the illusion for everyone in earshot.
+   *
+   * This is what makes the female sets safe to ship at five and nine takes
+   * against eleven and sixteen: if a pack ever goes away upstream, or a fetch
+   * runs on a machine without ffmpeg, the cue does not change character.
+   */
+  pick(set: VoiceSet, voice?: Voice): AudioBuffer | null {
+    const b = this.buffers[keyFor(set, voice)]
+    const from = b?.length ? b : this.buffers[keyFor(set, voice === 'f' ? 'm' : 'f')]
+    return from?.length ? from[Math.floor(Math.random() * from.length)]! : null
   }
 
-  has(set: VoiceSet) {
-    return this.buffers[set].length > 0
+  /** Whether `pick` would return something. Mirrors its fallback exactly. */
+  has(set: VoiceSet, voice?: Voice) {
+    return (
+      !!this.buffers[keyFor(set, voice)]?.length ||
+      !!this.buffers[keyFor(set, voice === 'f' ? 'm' : 'f')]?.length
+    )
   }
 }
