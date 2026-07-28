@@ -1053,8 +1053,8 @@ export const LEVELS = {
   // once, so left alone the panic would have flattened everything else in the
   // mix through the limiter. These trims put the loudness back where it was and
   // keep only the balance.
-  scream: 0.6,
-  shout: 2.2,
+  scream: 0.78,
+  shout: 3.1,
   growl: 7.0,
 
   // Stingers. These were eating the whole headroom; they are deliberately

@@ -920,6 +920,78 @@ export class Audio {
     }
   }
 
+  /**
+   * A glottal source, as a wave rather than as a sawtooth.
+   *
+   * Every voice in this file was a sawtooth through bandpasses, and that is not
+   * a description of a defect in the balance — it is the architecture of a 1978
+   * speech chip, and it sounds like one no matter how the formants are tuned.
+   * Two things are wrong with a sawtooth as a pair of vocal folds. Its harmonics
+   * fall at exactly 6 dB an octave forever, which no glottis does; and they are
+   * all in phase, so every cycle is a perfect impulse and the ear hears a buzz
+   * with a filter on it.
+   *
+   * `tilt` is the exponent the harmonics fall off at — around 1.6 is a relaxed
+   * voice, 0.9 is one being torn out of someone. The phase spread is the part
+   * that stops it buzzing: real folds do not slam every harmonic shut on the
+   * same instant, and smearing the upper ones over a fraction of a cycle is the
+   * difference between a voice and a kazoo. It is randomised per call, so no
+   * two screams have the same waveform.
+   */
+  private glottis(tilt: number): PeriodicWave | null {
+    const ctx = this.ctx
+    if (!ctx?.createPeriodicWave) return null
+    const N = 40
+    const re = new Float32Array(N + 1)
+    const im = new Float32Array(N + 1)
+    for (let n = 1; n <= N; n++) {
+      const a = Math.pow(n, -tilt)
+      const ph = rand(-1, 1) * Math.min(1, n / 10) * 1.1
+      re[n] = a * Math.sin(ph)
+      im[n] = a * Math.cos(ph)
+    }
+    return ctx.createPeriodicWave(re, im)
+  }
+
+  /**
+   * Cycle-to-cycle instability: jitter in the pitch, shimmer in the level.
+   *
+   * This is the measurable difference between a synthesised voice and a
+   * recorded one, and it is what is left over once the spectrum is right. No
+   * larynx repeats a cycle exactly — the period wanders by around a percent and
+   * the amplitude by a few, cycle to cycle, and a voice with that wander
+   * removed is heard as synthetic within about a syllable. It is not vibrato:
+   * vibrato is at five hertz and deliberate, this is at thirty and involuntary.
+   *
+   * Both come off the same oscillators, because in a real larynx they have the
+   * same cause — a cycle that opens late also opens weakly — and because a
+   * voice that fires often enough to have a node budget should not pay twice.
+   */
+  private perturb(freq: AudioParam, amp: AudioParam | null, t: number, dur: number, f0: number, depth = 1) {
+    const ctx = this.ctx
+    if (!ctx) return
+    for (const [rate, jit, shim] of [
+      [rand(23, 41), 0.007, 0.05],
+      [rand(53, 79), 0.004, 0.03],
+    ] as const) {
+      const o = ctx.createOscillator()
+      o.type = 'sine'
+      o.frequency.value = rate
+      const g = ctx.createGain()
+      g.gain.value = f0 * jit * depth
+      o.connect(g)
+      g.connect(freq)
+      if (amp) {
+        const a = ctx.createGain()
+        a.gain.value = shim * depth
+        o.connect(a)
+        a.connect(amp)
+      }
+      o.start(t)
+      o.stop(t + dur + 0.05)
+    }
+  }
+
   /** Pull the score down under a loud event, then let it back up. */
   private duck(amount = AUDIO.duckAmount) {
     const ctx = this.ctx
@@ -1278,28 +1350,44 @@ export class Audio {
     const dest = this.voice(PRI.normal, 0.9, LEVELS.scream, place, 1.3)
     if (!dest) return
     const t = this.t + this.travel(place)
-    const base = 380 * pitch * rand(0.9, 1.12)
+    // Where a terrified adult actually sits, rather than a note to swoop up to.
+    const base = 660 * pitch * rand(0.88, 1.14)
     const dur = rand(0.55, 0.8)
 
     const osc = ctx.createOscillator()
-    osc.type = 'sawtooth'
-    osc.frequency.setValueAtTime(base * 0.7, t)
-    osc.frequency.exponentialRampToValueAtTime(base * 1.9, t + 0.06)
-    osc.frequency.exponentialRampToValueAtTime(base * 1.6, t + dur * 0.45)
-    osc.frequency.exponentialRampToValueAtTime(base * 0.6, t + dur)
+    const wave = this.glottis(rand(0.85, 1.05))
+    if (wave) osc.setPeriodicWave(wave)
+    else osc.type = 'sawtooth'
 
-    // Vibrato that gets wider as the voice loses control — and that wanders
-    // while it does. A vibrato on a clean linear ramp is a sine modulating a
-    // sine, which the ear picks out instantly and files as a theremin; the
-    // whole reason a scream is frightening is that the person has stopped
-    // being in control of it.
+    // The pitch contour, and this is the one that mattered.
+    //
+    // What was here rose an octave and a half in sixty milliseconds and then
+    // slid smoothly back down over half a second. That is not a person — it is
+    // the gesture an arcade cabinet makes when something explodes, and no
+    // amount of spectral correction was ever going to stop it reading as one.
+    //
+    // A scream is *already at pitch* when it starts. The folds are pressed
+    // together before the air arrives, so the attack is a glottal stop that
+    // lands on the note inside about fifteen milliseconds, with at most a
+    // semitone of scoop as it catches. From there it does not glide anywhere:
+    // it drifts sharp while the panic holds, because a larynx under that much
+    // tension climbs, and then it gives out. The fall at the end is short and
+    // late, not a slow descent — the breath runs out all at once.
+    osc.frequency.setValueAtTime(base * 0.94, t)
+    osc.frequency.exponentialRampToValueAtTime(base, t + 0.015)
+    osc.frequency.exponentialRampToValueAtTime(base * rand(1.04, 1.12), t + dur * 0.62)
+    osc.frequency.setValueAtTime(base * rand(1.04, 1.12), t + dur * 0.78)
+    osc.frequency.exponentialRampToValueAtTime(base * rand(0.78, 0.88), t + dur)
+
+    // Vibrato, wider as the voice loses control. Slower and shallower than it
+    // was: at 75 cents it was doing the job the instability below now does, and
+    // doing it periodically, which is what a theremin is.
     const vib = ctx.createOscillator()
-    vib.frequency.setValueAtTime(5.5, t)
-    vib.frequency.linearRampToValueAtTime(9, t + dur)
-    this.jitter(vib.frequency, t, dur, 2.2)
+    vib.frequency.setValueAtTime(4.8, t)
+    vib.frequency.linearRampToValueAtTime(7.5, t + dur)
     const vibGain = ctx.createGain()
-    vibGain.gain.setValueAtTime(12, t)
-    vibGain.gain.linearRampToValueAtTime(75, t + dur)
+    vibGain.gain.setValueAtTime(6, t)
+    vibGain.gain.linearRampToValueAtTime(38, t + dur)
     vib.connect(vibGain)
     vibGain.connect(osc.detune)
     vib.start(t)
@@ -1310,7 +1398,13 @@ export class Audio {
     env.gain.exponentialRampToValueAtTime(0.34, t + 0.012)
     env.gain.setValueAtTime(0.34, t + dur * 0.5)
     env.gain.exponentialRampToValueAtTime(0.0001, t + dur)
-    env.connect(dest)
+    // Shimmer rides a unity gain of its own rather than the envelope, so the
+    // instability cannot drag the tail negative and flip its phase.
+    const shim = ctx.createGain()
+    shim.gain.value = 1
+    env.connect(shim)
+    shim.connect(dest)
+    this.perturb(osc.frequency, shim.gain, t, dur, base, 1.4)
     // "aa" — the vowel you scream in. Scaled by pitch so a lighter voice reads
     // as a smaller person rather than as the same person sped up.
     const s = 0.85 + pitch * 0.18
@@ -1340,10 +1434,11 @@ export class Audio {
     const breakAt = t + dur * rand(0.3, 0.5)
     for (const [ratio, lvl] of [[0.5, 0.26], [1.37, 0.12]] as const) {
       const fold = ctx.createOscillator()
-      fold.type = 'sawtooth'
-      fold.frequency.setValueAtTime(base * 1.9 * ratio, t)
-      fold.frequency.exponentialRampToValueAtTime(base * 1.6 * ratio, t + dur * 0.45)
-      fold.frequency.exponentialRampToValueAtTime(base * 0.6 * ratio, t + dur)
+      if (wave) fold.setPeriodicWave(wave)
+      else fold.type = 'sawtooth'
+      fold.frequency.setValueAtTime(base * ratio, t)
+      fold.frequency.exponentialRampToValueAtTime(base * 1.08 * ratio, t + dur * 0.62)
+      fold.frequency.exponentialRampToValueAtTime(base * 0.83 * ratio, t + dur)
       vibGain.connect(fold.detune)
       const fg = ctx.createGain()
       fg.gain.setValueAtTime(0.0001, breakAt)
@@ -1377,15 +1472,27 @@ export class Audio {
     // which is the entire point of the sound. With three it measured thirteen
     // decibels down in presence against its own low-mid: a shout of alarm from
     // the next room, not a person in front of you.
-    for (const [f, lvl, q] of [
-      [F[0], 0.7, 8],
-      [F[1], 0.6, 9],
-      [F[2], 0.62, 8],
-      [3700 * s, 0.4, 6],
+    //
+    // And they move. A fixed set of resonances is the other half of why this
+    // read as a speech chip: a mouth is not a fixed filter bank, and a person
+    // screaming does not hold one vowel — the jaw drops further as it goes,
+    // which takes the first formant up and the second down, and then closes
+    // again as the breath fails. That drift is small, well under a vowel's
+    // worth, and it is the difference between a person and a preset. Q values
+    // are formant bandwidths a throat actually has: about 90 Hz on the first,
+    // widening to 250 on the fourth.
+    const move = rand(0.9, 1.1)
+    for (const [f0, f1, f2, lvl, q] of [
+      [F[0], F[0] * 1.16 * move, F[0] * 0.92, 0.8, 8.5],
+      [F[1], F[1] * 0.9 * move, F[1] * 1.04, 0.62, 10.5],
+      [F[2], F[2] * 1.05 * move, F[2], 0.72, 15],
+      [3700 * s, 3900 * s * move, 3600 * s, 0.5, 14],
     ] as const) {
       const bp = ctx.createBiquadFilter()
       bp.type = 'bandpass'
-      bp.frequency.value = f
+      bp.frequency.setValueAtTime(f0, t)
+      bp.frequency.linearRampToValueAtTime(f1, t + dur * 0.55)
+      bp.frequency.linearRampToValueAtTime(f2, t + dur)
       bp.Q.value = q
       const g = ctx.createGain()
       g.gain.value = lvl
@@ -1419,15 +1526,31 @@ export class Audio {
     const dur = rand(0.3, 0.42)
 
     const osc = ctx.createOscillator()
-    osc.type = 'sawtooth'
-    osc.frequency.setValueAtTime(base * 1.25, t)
-    osc.frequency.exponentialRampToValueAtTime(base * 0.85, t + dur)
+    // Same folds as the scream, less pressed — a shout is a voice raised, not a
+    // voice torn, so the harmonics fall away faster.
+    const wave = this.glottis(rand(1.15, 1.4))
+    if (wave) osc.setPeriodicWave(wave)
+    else osc.type = 'sawtooth'
+    // A shouted syllable starts a little above its pitch and settles onto it,
+    // which is a quarter of what was here: a fifth of downward glide across a
+    // third of a second reads as a slide whistle.
+    osc.frequency.setValueAtTime(base * 1.08, t)
+    osc.frequency.exponentialRampToValueAtTime(base, t + 0.05)
+    osc.frequency.exponentialRampToValueAtTime(base * 0.9, t + dur)
     const env = ctx.createGain()
     env.gain.setValueAtTime(0.0001, t)
     env.gain.exponentialRampToValueAtTime(0.3, t + 0.012)
     env.gain.setValueAtTime(0.3, t + dur * 0.6)
     env.gain.exponentialRampToValueAtTime(0.0001, t + dur)
-    env.connect(dest)
+    // Same instability as the scream, shallower — a shout is a controlled sound
+    // made by someone who still has their voice, but no larynx repeats a cycle
+    // exactly, and a shout with the wander taken out is heard as a synthesiser
+    // inside one syllable.
+    const shim = ctx.createGain()
+    shim.gain.value = 1
+    env.connect(shim)
+    shim.connect(dest)
+    this.perturb(osc.frequency, shim.gain, t, dur, base, 0.7)
 
     // Same saturation as the scream, for the same reason: a shout is a voice
     // being pushed, and pushing it is what puts energy above the formants.
