@@ -740,10 +740,45 @@ export class Music {
     env.connect(out)
 
     // Horn call on the new mode's root, so the key change is announced.
+    //
+    // The riser above was brought down to 0.38 to stop this cue clamping the
+    // mix; the payload underneath it was not, and it is the payload that was
+    // doing the clamping. Rendered, the stinger sat flat at -3 dB for 1.3
+    // seconds, and removing the brass stab dropped that window by 48 dB — the
+    // horn was the whole slab, and the taiko under it contributed 1.2 dB.
+    //
+    // The cause is that these three lines were the only calls in this file
+    // that scheduled an instrument without passing it through `layers()` and
+    // `trim`, the way every line of `scheduleStep` does. So the horn ignored
+    // both the arrangement and the auto gain compensation, and the worst case
+    // is the first thing a player hears: `brass` gates in at wave 5 and
+    // `taiko` at wave 4, so on the wave-1 stinger the arrangement's own answer
+    // for both instruments is silence, and they played at full velocity
+    // instead.
+    //
+    // A transition still has to announce itself, so the fix is not to obey
+    // `layers()` — that would delete the horn entirely for the first four
+    // hunts — but to play it at a fixed, measured level instead of at full
+    // velocity.
+    //
+    // Fixed rather than trimmed against `busy`, because the three lines above
+    // just set `bar`, `step` and `nextStepTime` forward: the arrangement is
+    // silent for the whole 1.5 s this lands in. Scaling the horn down for a
+    // dense texture would be scaling it against a texture that is not
+    // sounding.
+    //
+    // ANNOUNCE is the one tuned number. Above about 0.30 the horn's own peak
+    // exceeds the gong's, and the cue reports its attack 2.8 s in — measured
+    // by sweeping it and watching where `--env waveStart` moves the peak
+    // bucket back to the front.
+    const ANNOUNCE = 0.27
+
     const stack = [this.pitch(0, 1), this.pitch(4, 1)]
     if (wave >= MUSIC.exoticFrom) stack.push(this.pitch(1, 2))
-    this.brassStab(t + dur - 0.05, stack, 2.2, 0.6)
-    this.taikoHit(t + dur, 0.78, 0.9)
-    this.taikoHit(t + dur, 0.58, 1.4)
+    this.brassStab(t + dur - 0.05, stack, 2.2, 0.6 * ANNOUNCE)
+    // Offset, because two taiko hits on the same sample sum coherently into one
+    // louder hit rather than reading as a drum being struck twice.
+    this.taikoHit(t + dur, 0.78 * ANNOUNCE, 0.9)
+    this.taikoHit(t + dur + 0.035, 0.58 * ANNOUNCE, 1.4)
   }
 }

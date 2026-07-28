@@ -1054,7 +1054,16 @@ export const LEVELS = {
   // mix through the limiter. These trims put the loudness back where it was and
   // keep only the balance.
   scream: 0.78,
-  shout: 3.1,
+  // 3.1 until it was measured against the scream beside it, where it came out
+  // +3.8 dB — the alert call was louder than someone being killed, which is
+  // both the wrong order and, at 3 dB under a near rifle, the loudest human
+  // sound in a round. 1.2 puts it 2.1 dB under the scream, matching the balance
+  // `shoutSample` was independently tuned to on the recorded path.
+  //
+  // Averaged over four probe runs, not read off one. These are synthesised per
+  // firing and no two are the same sound: single runs of this pair disagreed by
+  // as much as 1.5 dB, enough to have picked a value nearly 2 dB out.
+  shout: 1.2,
   growl: 7.0,
 
   // The recorded voices need their own numbers and cannot borrow the three
@@ -1080,8 +1089,22 @@ export const LEVELS = {
   //
   // 1.1 puts it back level with the synthesised cue it replaced.
   screamSample: 1.1,
-  /** Unused so far: no recorded shout source. See scripts/fetch-voices.ts. */
-  shoutSample: 1.0,
+  /**
+   * The alert call, fired the moment a villager sees the tiger.
+   *
+   * Tuned against the scream rather than against full scale, because the only
+   * thing this level really has to get right is the order of the two: someone
+   * being killed has to top someone calling out, or the loudest human sound in
+   * a round is the one that costs the player nothing. Measured at 18 m, this
+   * sits 2.1 dB under the scream — 1.1 put it 4.4 under, which lost the quieter
+   * takes entirely, and 1.8 put it 1 dB over, which is the wrong way round.
+   *
+   * Both figures are medians of a dozen firings, not single shots. The takes
+   * are peak-normalised individually but still spread about 6 dB once the voice
+   * chain has applied its per-instance pitch and tilt, so any one of them says
+   * very little; the scream set, recorded in one session, spreads about 2 dB.
+   */
+  shoutSample: 1.4,
   /**
    * The village murmur bed. Far quieter than the one-shots — it is under
    * everything, all the time.
@@ -1108,7 +1131,16 @@ export const LEVELS = {
 
   // Stingers. These were eating the whole headroom; they are deliberately
   // under the gun now, and they duck the score instead of shouting over it.
-  waveStart: 0.3,
+  //
+  // waveStart was 0.3, and raising it is a consequence of a fix in music.ts
+  // rather than a change of mind about the line above. The stinger's brass stab
+  // was playing at full velocity outside the arrangement's levels, clamping the
+  // limiter flat for 1.3 s, and that slab was what a player actually heard as
+  // "the wave started" — the gong under it measured -16.8 dB, the quietest
+  // sting in the game. With the brass brought down to where it belongs the gong
+  // has to carry the cue on its own, so it moves to -10.3 dB: between gameOver
+  // (-11.1) and roar (-8.3), and still 8 dB under a near gunshot.
+  waveStart: 0.60,
   gameOver: 0.4,
   frenzy: 0.26,
   powerup: 0.5,

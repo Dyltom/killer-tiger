@@ -74,6 +74,26 @@ interface Pinned {
   source: string
   /** Extract an archive and take every member matching this. */
   archive?: RegExp
+  /**
+   * Keep only members whose *trimmed* length falls in this window, in seconds.
+   *
+   * Trimmed, not as published: a pack can be cut on half-second boundaries with
+   * room tone padding every file out to the grid, in which case the length on
+   * disk says nothing about the length of the sound. The filter therefore costs
+   * one extra trim per candidate, which is a fetch-time cost and not a
+   * ship-time one.
+   */
+  dur?: [number, number]
+  /**
+   * Cap on how many members to keep, selected by an even stride through the
+   * name-sorted survivors rather than by taking the first N.
+   *
+   * Packs of this kind are named `<vocalist><take>`, so name order groups all of
+   * one person's takes together and the first N would be one voice. A stride
+   * spreads the selection over everybody in the pack, which for a cue that
+   * fires once per villager is the entire point.
+   */
+  want?: number
   /** Build a seamless loop rather than trimming a one-shot. */
   loop?: boolean
 }
@@ -104,6 +124,25 @@ const PINNED: Pinned[] = [
     source: 'https://opengameart.org/content/high-pitch-scream-sounds2',
   },
   {
+    // Four men yelling, 10-16 takes each. Dual licensed OGA-BY 3.0 and CC0;
+    // taken under CC0, so this adds no obligation.
+    //
+    // 62 files go in and 16 come out. The window drops both ends for the same
+    // reason: under 0.35 s the pack's effort grunts and clipped takes, over
+    // 0.95 s the sustained screams, and what is left is the length of a person
+    // calling out to someone rather than to nobody. Everything here is padded
+    // out to a half-second grid on disk, so this is measured after the trim.
+    set: 'shout',
+    url: 'https://opengameart.org/sites/default/files/yelling%20sounds.zip',
+    archive: /yell\d+\.wav$/i,
+    dur: [0.35, 0.95],
+    want: 16,
+    title: 'Male Grunt/Yelling sounds',
+    author: 'HaelDB',
+    license: 'CC0',
+    source: 'https://opengameart.org/content/male-gruntyelling-sounds',
+  },
+  {
     // A minute of real crowd walla. Public domain, and genuinely a room full of
     // people rather than a synthesised approximation of one, which is the whole
     // point of the exercise.
@@ -117,11 +156,18 @@ const PINNED: Pinned[] = [
   },
 ]
 
-// `shout` has no pinned source. Nothing free and licence-clean that this
-// script can reach unattended is a person calling out to someone — the packs
-// above are pain, not speech — and a pain grunt fired when a hunter spots the
-// tiger would be worse than the synthesised shout, not better. It stays
-// synthesised until the Freesound half of this script runs.
+// The note that used to sit here said `shout` had no pinned source, because
+// the scream packs above are pain rather than speech and a pain grunt fired
+// when a hunter spots the tiger would be worse than the synthesised shout. The
+// first half of that is still true; the conclusion was wrong, and it was wrong
+// because "nothing exists" had been inferred from two packs rather than looked
+// for. HaelDB's pack is four people yelling into a good microphone, dual
+// licensed OGA-BY 3.0 and CC0, and taken here under CC0.
+//
+// It matters more than one missing cue. `shout` fires the moment a villager
+// sees the tiger, which is the loudest human sound in a typical round and the
+// one that sets the tone for everything after it, and it was the last cue still
+// running the voice synthesis that was rejected twice.
 
 /** Freesound searches. Only used with --freesound and a token. */
 interface SetSpec {
@@ -222,13 +268,33 @@ async function download(url: string, dest: string) {
  * in the path is behind the limiter — but it would otherwise make the one
  * number these are normalised to a lie by a couple of decibels.
  */
+/**
+ * Strip leading and trailing silence. Shared so that the length `Pinned.dur`
+ * filters on is the length that actually ships, rather than two trims that
+ * agree until one of them is edited.
+ */
+const TRIM =
+  'silenceremove=start_periods=1:start_threshold=-45dB:start_silence=0.01,' +
+  'areverse,silenceremove=start_periods=1:start_threshold=-45dB,areverse'
+
+/** How long `src` is once trimmed, in seconds. Used to select archive members. */
+function trimmedSeconds(src: string): number {
+  const tmp = join(TMP, 'measure.wav')
+  ff(['-i', src, '-af', TRIM, '-ac', '1', '-ar', '44100', tmp])
+  const out = execFileSync(
+    'ffprobe',
+    ['-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', tmp],
+    { encoding: 'utf8' },
+  )
+  rmSync(tmp, { force: true })
+  return Number(out.trim()) || 0
+}
+
 function oneShot(src: string, dest: string) {
   const tmp = join(TMP, 'trim.wav')
   ff([
     '-i', src,
-    '-af',
-    'silenceremove=start_periods=1:start_threshold=-45dB:start_silence=0.01,' +
-      'areverse,silenceremove=start_periods=1:start_threshold=-45dB,areverse',
+    '-af', TRIM,
     '-ac', '1', '-ar', '44100', tmp,
   ])
   ff(['-i', tmp, '-af', `volume=${(-3 - peakDb(tmp)).toFixed(2)}dB`, '-ac', '1', '-c:a', 'aac', '-b:a', '96k', dest])
@@ -306,6 +372,24 @@ async function doPinned() {
           e.isDirectory() ? walk(join(d, e.name)) : [join(d, e.name)],
         )
       members = walk(dir).filter((f) => p.archive!.test(f)).sort()
+    }
+
+    if (p.dur) {
+      const [lo, hi] = p.dur
+      const before = members.length
+      members = members.filter((m) => {
+        const d = trimmedSeconds(m)
+        return d >= lo && d <= hi
+      })
+      console.log(`  dur  ${before} -> ${members.length} in [${lo}, ${hi}]s after trim`)
+    }
+    if (p.want && members.length > p.want) {
+      // Even stride through name order, so the takes come from everyone in the
+      // pack rather than from whoever sorts first. See `want` on Pinned.
+      const step = members.length / p.want
+      const spread = Array.from({ length: p.want }, (_, i) => members[Math.floor(i * step)]!)
+      console.log(`  pick ${members.length} -> ${spread.length} by stride ${step.toFixed(2)}`)
+      members = spread
     }
 
     for (const m of members) {
