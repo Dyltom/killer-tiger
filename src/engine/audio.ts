@@ -680,7 +680,26 @@ export class Audio {
     return g
   }
 
-  /** A pitched voice with an exponential frequency glide and AD envelope. */
+  /**
+   * A pitched voice with an exponential frequency glide and AD envelope.
+   *
+   * Above the bass it is a *pair* of oscillators, a few cents apart and panned
+   * against each other. Making the noise buffer stereo widened everything built
+   * out of noise and left everything built out of oscillators exactly where it
+   * was — a single oscillator has one channel and always will — so the tonal
+   * cues stayed the narrowest things in the game: the landing, the pickup, the
+   * combo and the kill confirm all still measured over twenty decibels of side
+   * under mid. A dead-centre sine is the sound of a synthesiser, and there is
+   * no arrangement of layers that hides it.
+   *
+   * Five to twelve cents is under the threshold where the ear hears two pitches
+   * and well over the one where it hears one wide pitch, and the slow beating
+   * between them is what a struck object with more than one resonance actually
+   * does. Below `WIDE_HZ` the pair is skipped: bass belongs in the middle,
+   * because that is where the ear cannot place it anyway and because two
+   * detuned sub oscillators beat against each other in the one register where
+   * that costs real headroom.
+   */
   private tone(
     dest: AudioNode,
     type: OscillatorType,
@@ -694,13 +713,26 @@ export class Audio {
     const ctx = this.ctx
     if (!ctx) return
     const t = this.when(at)
-    const osc = ctx.createOscillator()
-    osc.type = type
-    osc.frequency.setValueAtTime(Math.max(1, f0), t)
-    osc.frequency.exponentialRampToValueAtTime(Math.max(1, f1), t + dur)
-    osc.connect(this.env(dest, t, dur, gain, attack))
-    osc.start(t)
-    osc.stop(t + dur + 0.02)
+    const wide = Math.min(f0, f1) > 250 && !!ctx.createStereoPanner
+    const env = this.env(dest, t, dur, gain * (wide ? 0.85 : 1), attack)
+    const voices = wide ? [-1, 1] : [0]
+    for (const side of voices) {
+      const osc = ctx.createOscillator()
+      osc.type = type
+      osc.frequency.setValueAtTime(Math.max(1, f0), t)
+      osc.frequency.exponentialRampToValueAtTime(Math.max(1, f1), t + dur)
+      if (side !== 0) {
+        osc.detune.value = side * rand(5, 12)
+        const p = ctx.createStereoPanner()
+        p.pan.value = side * 0.5
+        osc.connect(p)
+        p.connect(env)
+      } else {
+        osc.connect(env)
+      }
+      osc.start(t)
+      osc.stop(t + dur + 0.02)
+    }
   }
 
   /** A filtered noise burst. `q` above 1 turns it from air into resonance. */
@@ -1748,8 +1780,11 @@ export class Audio {
     // audible. So the click and the wet band came up and the sub went down.
     this.noise(dest, 0.01, 0.3, 'highpass', 3800, 2600, 0.002, 0.8, 0.0006)
     this.noise(dest, 0.06, 0.16, 'bandpass', 1500 * j, 800, 0.004, 3.4, 0.004)
-    // Settling.
-    if (big) this.tone(dest, 'sine', 70, 44, 0.4, 0.16, 0.1, 0.03)
+    // Settling. Quiet enough to be felt under the wet part rather than to *be*
+    // the sound: a swallow carrying nothing but sub measured fifty-five decibels
+    // down through presence, which on the speakers this is played on is a
+    // pickup the player gets no feedback from at all.
+    if (big) this.tone(dest, 'sine', 70, 44, 0.4, 0.1, 0.1, 0.03)
   }
 
   /** Meat. Not a coin — a wet, low, satisfying swallow. */
